@@ -6,9 +6,11 @@
   "license": "MIT",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./contract": "./src/contract.ts"
   },
   "dependencies": {
-    "@lightning-pilot/core": "workspace:*"
+    "@lightning-pilot/core": "workspace:*",
+    "@scure/base": "2.4.0"
   }
 }

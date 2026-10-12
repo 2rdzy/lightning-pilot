@@ -1,0 +1,59 @@
+{
+  "comment": "Pinned node releases for tools/regtest. Update one entry per PR, after checking the release signature by hand (README.md, 'Updating a pin'). The SHA-256 is the security check at download time; the signer fingerprints record whose signature the pin was checked against.",
+  "blake2b": {
+    "bitcoind": {
+      "name": "knots",
+      "version": "29.4.2.knots20260508",
+      "url": "https://github.com/bitcoinknots/bitcoin/releases/download/v29.4.2.knots20260508/bitcoin-29.4.2.knots20260508-x86_64-linux-gnu.tar.gz",
+      "sha256": "b59d0445a317e21a03dc29425db3aba79b27d5125230b1a2b1dce62e120827c5",
+      "sums": "https://github.com/bitcoinknots/bitcoin/releases/download/v29.4.2.knots20260508/SHA256SUMS"
+    },
+    "cln": {
+      "name": "cln-fork",
+      "version": "v26.06.9-blake2b.7",
+      "url": "https://github.com/privkeyio/lightning/releases/download/v26.06.9-blake2b.7/clightning-v26.06.9-blake2b.7-Ubuntu-24.04-amd64.tar.xz",
+      "sha256": "a88342f9ecde7069bfb6ee6f33b85f6dffc23ea54125993314e9307dd0cadc0b",
+      "sums": "https://github.com/privkeyio/lightning/releases/download/v26.06.9-blake2b.7/SHA256SUMS-v26.06.9-blake2b.7"
+    }
+  },
+  "sha256d": {
+    "bitcoind": {
+      "name": "bitcoin-core",
+      "version": "31.1",
+      "url": "https://bitcoincore.org/bin/bitcoin-core-31.1/bitcoin-31.1-x86_64-linux-gnu.tar.gz",
+      "sha256": "b80d9c3e04da78fb6f0569685673418cf686fadba9042d926d13fb87ff503f9e",
+      "sums": "https://bitcoincore.org/bin/bitcoin-core-31.1/SHA256SUMS"
+    },
+    "cln": {
+      "name": "cln",
+      "version": "v26.06.9",
+      "url": "https://github.com/ElementsProject/lightning/releases/download/v26.06.9/clightning-v26.06.9-Ubuntu-24.04-amd64.tar.xz",
+      "sha256": "2f5b55838f8de8a7a627f8e34f888afb6770c5f303deee799edac8595bc3d2d1",
+      "sums": "https://github.com/ElementsProject/lightning/releases/download/v26.06.9/SHA256SUMS-v26.06.9"
+    }
+  },
+  "signers": {
+    "knots": [
+      "1A3E761F19D2CC7785C5502EA291A2C45D0C504A",
+      "658E64021E5793C6C4E15E45C2E581F5B998F30E",
+      "95636F3538D9262765AB29BEE952E584CA8C0F45",
+      "1D5889CB9E0564C154E18BB512EC9519DB43CC27",
+      "A47D99B6DB0D715D40C59A2023AE8A8EA7E24E38",
+      "DAED928C727D3E613EC46635F5073C4F4882FFFC"
+    ],
+    "cln-fork": ["A47D99B6DB0D715D40C59A2023AE8A8EA7E24E38"],
+    "bitcoin-core": [
+      "152812300785C96444D3334D17565732E08E5E41",
+      "E777299FC265DD04793070EB944D35F9AC3DB76A",
+      "D1DBF2C4B96F2DEBF4C16654410108112E7EA81F",
+      "0AD83877C1F0CD1EE9BD660AD7CC770B81FD22A8",
+      "F4FC70F07310028424EFC20A8E4256593F177720"
+    ],
+    "cln": [
+      "A57656F8004F6FD68ED99C85BE277A87802A6F08",
+      "7B696A616F731337520B8A19D8F31505B581D617",
+      "8A079421A871D0B1083511937AB4802ED5A639F3",
+      "616C52F99D0612B2A151B1074129A994AA7E9852"
+    ]
+  }
+}

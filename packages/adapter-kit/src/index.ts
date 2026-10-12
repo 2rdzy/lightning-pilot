@@ -1,3 +1,3 @@
-// @lightning-pilot/adapter-kit: Fake adapter and the adapter contract test suite.
-// Filled in by the work packages of the build plan; empty in WP00.
-export {};
+// @lightning-pilot/adapter-kit: the fake in-memory adapter and the adapter contract suite. Depends only on core.
+// The contract suite imports vitest, so only test files import `./contract.ts` (through '@lightning-pilot/adapter-kit/contract').
+export { FakeAdapter, FakeNetwork, type FakeNodeOptions } from './fake.ts';

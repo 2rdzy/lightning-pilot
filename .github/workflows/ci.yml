@@ -58,3 +58,49 @@ jobs:
         run: pnpm install --frozen-lockfile
       - name: Tests
         run: pnpm test
+      # The server's tests again on the fallback SQLite driver, so it can be switched if node:sqlite changes.
+      - name: Server tests on better-sqlite3
+        run: pnpm test:better-sqlite3
+
+  # Adapter contract tests and the walking-skeleton end-to-end test against real nodes, one job per chain. The
+  # nodes are pinned releases (tools/regtest/versions.json), checked against their SHA-256 before use; downloads are
+  # cached by that file's hash. The runner image is pinned to the Ubuntu release the CLN tarballs are built for.
+  contract:
+    name: contract-${{ matrix.chain }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        chain: [blake2b, sha256d]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version-file: .nvmrc
+      - name: Enable pnpm (version from package.json)
+        run: corepack enable
+      - name: Install
+        run: pnpm install --frozen-lockfile
+      - name: Libraries the Core Lightning release needs
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends libpq5 libsodium23 libsqlite3-0
+      - name: Cache node downloads
+        uses: actions/cache@caa296126883cff596d87d8935842f9db880ef25 # v6.1.0
+        with:
+          path: .regtest/cache
+          key: regtest-${{ matrix.chain }}-${{ hashFiles('tools/regtest/versions.json') }}
+      - name: Fetch and verify the pinned nodes
+        run: tools/regtest/regtest ${{ matrix.chain }} fetch
+      - name: Start the nodes and open the channels
+        run: tools/regtest/regtest ${{ matrix.chain }} init
+      - name: Smoke test
+        run: tools/regtest/regtest ${{ matrix.chain }} check
+      - name: Contract and end-to-end tests
+        run: pnpm test:regtest
+        env:
+          LP_REGTEST_CHAIN: ${{ matrix.chain }}
+      - name: Stop the nodes
+        if: always()
+        run: tools/regtest/regtest ${{ matrix.chain }} down

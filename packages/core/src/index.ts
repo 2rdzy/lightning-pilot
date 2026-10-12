@@ -1,3 +1,12 @@
-// @lightning-pilot/core: Domain types and zod schemas, money, errors, ports and the API contract.
-// Filled in by the work packages of the build plan; empty in WP00.
-export {};
+// @lightning-pilot/core: domain types and zod schemas, money, errors, ports, the method-table format and the API
+// contract. Depends on nothing else of ours.
+export * from './api.ts';
+export * from './decode/bolt11.ts';
+export * from './domain.ts';
+export * from './errors.ts';
+export * from './ids.ts';
+export * from './json.ts';
+export * from './methods.ts';
+export * from './money.ts';
+export * from './ports.ts';
+export * from './text.ts';

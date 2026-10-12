@@ -241,6 +241,9 @@ importers:
       '@lightning-pilot/adapter-cln':
         specifier: workspace:*
         version: link:../../packages/adapter-cln
+      '@lightning-pilot/adapter-kit':
+        specifier: workspace:*
+        version: link:../../packages/adapter-kit
       '@lightning-pilot/adapter-lnd':
         specifier: workspace:*
         version: link:../../packages/adapter-lnd
@@ -267,7 +270,7 @@ importers:
     dependencies:
       '@hookform/resolvers':
         specifier: 5.9.1
-        version: 5.9.1(ajv-formats@3.0.1)(ajv@8.20.0)(react-hook-form@7.89.0(@types/react@19.3.0)(react@19.3.0))(zod@4.6.5)
+        version: 5.9.1(ajv@8.20.0)(react-hook-form@7.89.0(@types/react@19.3.0)(react@19.3.0))(zod@4.6.5)
       '@lightning-pilot/core':
         specifier: workspace:*
         version: link:../../packages/core
@@ -301,12 +304,18 @@ importers:
       '@lightning-pilot/core':
         specifier: workspace:*
         version: link:../core
+      zod:
+        specifier: 4.6.5
+        version: 4.6.5
 
   packages/adapter-kit:
     dependencies:
       '@lightning-pilot/core':
         specifier: workspace:*
         version: link:../core
+      '@scure/base':
+        specifier: 2.4.0
+        version: 2.4.0
 
   packages/adapter-lnd:
     dependencies:
@@ -3080,13 +3089,12 @@ snapshots:
       hono: 4.13.13
       zod: 4.6.5
 
-  '@hookform/resolvers@5.9.1(ajv-formats@3.0.1)(ajv@8.20.0)(react-hook-form@7.89.0(@types/react@19.3.0)(react@19.3.0))(zod@4.6.5)':
+  '@hookform/resolvers@5.9.1(ajv@8.20.0)(react-hook-form@7.89.0(@types/react@19.3.0)(react@19.3.0))(zod@4.6.5)':
     dependencies:
       '@standard-schema/utils': 0.3.0
       react-hook-form: 7.89.0(@types/react@19.3.0)(react@19.3.0)
     optionalDependencies:
       ajv: 8.20.0
-      ajv-formats: 3.0.1
       zod: 4.6.5
 
   '@humanfs/core@0.19.2':

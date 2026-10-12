@@ -16,7 +16,9 @@
     "test": "vitest run",
     "licenses:check": "node tools/check-licenses.mjs",
     "audit:prod": "pnpm audit --prod --audit-level high",
-    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm licenses:check"
+    "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm licenses:check",
+    "test:regtest": "vitest run --config vitest.regtest.config.ts",
+    "test:better-sqlite3": "TEST_SQLITE_DRIVER=better-sqlite3 vitest run apps/server"
   },
   "devDependencies": {
     "@cyclonedx/cyclonedx-npm": "6.0.1",
