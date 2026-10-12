@@ -32,7 +32,11 @@ export interface ClnAdapterOptions {
   readTimeoutMs?: number;
   // Observes every command sent (tests use it to prove the adapter calls only what the method table lists).
   onCall?: (command: string, credential: 'read' | 'spend') => void;
+  // Replaces the HTTPS client; unit tests use it to play recorded node replies.
+  transport?: Transport;
 }
+
+export type Transport = Pick<ClnRestClient, 'call'>;
 
 const NETWORKS: Record<string, Network> = {
   bitcoin: 'mainnet',
@@ -71,11 +75,9 @@ const preimageHash = (preimage: string) =>
   parsePaymentHash(createHash('sha256').update(Buffer.from(preimage, 'hex')).digest('hex'));
 
 export function createClnAdapter(options: ClnAdapterOptions): NodeAdapter {
-  const client = new ClnRestClient({
-    url: options.url,
-    caCertificate: options.caCertificate,
-    serverName: options.serverName,
-  });
+  const client: Transport =
+    options.transport ??
+    new ClnRestClient({ url: options.url, caCertificate: options.caCertificate, serverName: options.serverName });
   const readTimeoutMs = options.readTimeoutMs ?? 30_000;
 
   // The rune is chosen from the method table, never by the caller: a read command can only go out with the view

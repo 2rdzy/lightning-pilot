@@ -11,7 +11,7 @@ import {
   SetupStatusResponse,
   type Permission,
 } from '@lightning-pilot/core';
-import type { Router } from '../../http/context.ts';
+import { sessionOf, type Router } from '../../http/context.ts';
 import { declare, type Guard } from '../../http/declare.ts';
 import { csrfTokenFor, type AuthService } from './service.ts';
 
@@ -39,14 +39,15 @@ export function createGuard(auth: AuthService): Guard {
     if (auth.setupMode) throw new AppError('setup_required', 'Setup has not been completed.');
     const cookie = readSessionCookie(c);
     const session = cookie === undefined ? undefined : await auth.session(cookie);
-    if (!session) throw new AppError('unauthenticated', 'Please log in.');
+    if (cookie === undefined || !session) throw new AppError('unauthenticated', 'Please log in.');
+    const csrfToken = csrfTokenFor(cookie);
     // CSRF token on unsafe methods (SameSite=Strict is the first layer). Checked only once the cookie maps to a
     // live session: a stale cookie must never block login, or the owner would be stuck after an idle timeout.
-    if (UNSAFE.has(c.req.method) && !sameText(c.req.header('x-csrf-token') ?? '', csrfTokenFor(cookie ?? ''))) {
+    if (UNSAFE.has(c.req.method) && !sameText(c.req.header('x-csrf-token') ?? '', csrfToken)) {
       throw new AppError('csrf_failed', 'Missing or wrong CSRF token.');
     }
     // The owner holds every permission except `setup`; finer access levels come with API clients.
-    c.set('session', { idHash: session.idHash, handle: session.handle });
+    c.set('session', { idHash: session.idHash, handle: session.handle, csrfToken, expiresAt: session.expiresAt });
     return next();
   };
 }
@@ -139,11 +140,9 @@ export function authRoutes(app: Router, guard: Guard, auth: AuthService): void {
       },
     }),
     async (c) => {
-      const cookie = readSessionCookie(c) ?? '';
-      const session = await auth.session(cookie);
-      if (!session) throw new AppError('unauthenticated', 'Please log in.');
+      const session = sessionOf(c);
       return c.json(
-        SessionResponse.parse({ csrfToken: csrfTokenFor(cookie), expiresAt: session.expiresAt.toISOString() }),
+        SessionResponse.parse({ csrfToken: session.csrfToken, expiresAt: session.expiresAt.toISOString() }),
         200,
       );
     },
@@ -160,8 +159,7 @@ export function authRoutes(app: Router, guard: Guard, auth: AuthService): void {
       responses: { 204: { description: 'Logged out' }, ...errors },
     }),
     async (c) => {
-      const session = c.get('session');
-      if (session) await auth.logout(session.idHash, c.get('requestId'));
+      await auth.logout(sessionOf(c).idHash, c.get('requestId'));
       deleteCookie(c, SESSION_COOKIE, { prefix: 'host', path: '/', secure: true });
       c.header('Clear-Site-Data', '"cookies"');
       return c.body(null, 204);

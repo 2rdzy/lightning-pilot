@@ -1,7 +1,6 @@
 // Routes of the spend module: preview a payment, then execute it with the confirmation token.
 import { createRoute } from '@hono/zod-openapi';
 import {
-  AppError,
   ErrorBody,
   IdempotencyHeader,
   NodeIdParam,
@@ -10,7 +9,7 @@ import {
   PaymentPreviewResponse,
   PaymentResultResponse,
 } from '@lightning-pilot/core';
-import type { Router } from '../../http/context.ts';
+import { sessionOf, type Router } from '../../http/context.ts';
 import { declare, type Guard } from '../../http/declare.ts';
 import type { SpendService } from './service.ts';
 
@@ -23,11 +22,6 @@ const errors = {
   422: { description: 'Payment failed; nothing was paid', ...json(ErrorBody) },
   502: { description: 'The node did not answer as expected', ...json(ErrorBody) },
 } as const;
-
-const sessionHandle = (session: { handle: string } | undefined): string => {
-  if (!session) throw new AppError('unauthenticated', 'Please log in.');
-  return session.handle;
-};
 
 export function spendRoutes(app: Router, guard: Guard, spend: SpendService): void {
   declare(
@@ -43,7 +37,7 @@ export function spendRoutes(app: Router, guard: Guard, spend: SpendService): voi
     }),
     async (c) => {
       const preview = await spend.preview(
-        sessionHandle(c.get('session')),
+        sessionOf(c).handle,
         c.req.valid('param').nodeId,
         c.req.valid('json').request,
         c.get('requestId'),
@@ -69,7 +63,7 @@ export function spendRoutes(app: Router, guard: Guard, spend: SpendService): voi
     }),
     async (c) => {
       const result = await spend.execute(
-        sessionHandle(c.get('session')),
+        sessionOf(c).handle,
         c.req.valid('param').nodeId,
         c.req.valid('json').confirmationToken,
         c.req.valid('header')['idempotency-key'],

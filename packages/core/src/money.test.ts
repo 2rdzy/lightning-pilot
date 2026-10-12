@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { add, MoneyError, msat, MsatString, parseMsat, ppm, satToMsat, sub, toMsatString } from './money.ts';
+import { add, max, MoneyError, msat, MsatString, parseMsat, ppm, satToMsat, sub, toMsatString } from './money.ts';
 
 describe('money', () => {
   it('round-trips amounts above 2^53 without loss', () => {
@@ -29,5 +29,13 @@ describe('money', () => {
     expect(ppm(msat(1000n), 5000n)).toBe(5n);
     expect(ppm(msat(1n), 5000n)).toBe(1n);
     expect(ppm(msat(0n), 5000n)).toBe(0n);
+  });
+});
+
+describe('money helpers', () => {
+  it('subtracts and picks the larger amount', () => {
+    expect(sub(msat(5n), msat(2n))).toBe(3n);
+    expect(max(msat(1n), msat(2n))).toBe(2n);
+    expect(max(msat(3n), msat(2n))).toBe(3n);
   });
 });

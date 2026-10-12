@@ -95,10 +95,8 @@ export class SpendService {
     try {
       decoded = readBolt11(request);
     } catch (err) {
-      throw new AppError(
-        'validation_failed',
-        err instanceof Bolt11Error ? `Not a payable invoice: ${err.message}.` : 'Not a payable invoice.',
-      );
+      // readBolt11 throws only Bolt11Error, whose messages are fixed text (no input echoed).
+      throw new AppError('validation_failed', `Not a payable invoice: ${(err as Bolt11Error).message}.`);
     }
     if (decoded.network !== row.network) {
       throw new AppError('validation_failed', `The invoice is for ${decoded.network}, the node is on ${row.network}.`);
@@ -106,7 +104,6 @@ export class SpendService {
     if (decoded.amount === undefined) {
       throw new AppError('validation_failed', 'Invoices without an amount are not supported yet.');
     }
-    if (decoded.amount === 0n) throw new AppError('validation_failed', 'The invoice amount is zero.');
     if (decoded.expiresAt.getTime() <= this.#now().getTime()) {
       throw new AppError('validation_failed', 'The invoice has expired.');
     }

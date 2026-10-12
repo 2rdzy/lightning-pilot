@@ -11,6 +11,7 @@ import { createLogger } from './logging/logger.ts';
 import type { NodeConnection } from './modules/nodes/index.ts';
 import { buildServer, type Server } from './server.ts';
 import { tempDir, testDriver, writeVaultKey } from './testing.ts';
+import fixtures from '../../../packages/core/src/decode/fixtures/regtest-invoices.json' with { type: 'json' };
 
 const PASSWORD = 'Correct-horse-9-battery';
 const CA = '-----BEGIN CERTIFICATE-----\nMIIBfake\n-----END CERTIFICATE-----\n';
@@ -501,6 +502,108 @@ describe(`API (${testDriver()})`, () => {
     for (const line of h.lines) {
       for (const secret of secrets) expect(line.includes(secret), `${secret.slice(0, 8)}… in ${line}`).toBe(false);
     }
+  });
+});
+
+describe(`spend edge cases (${testDriver()})`, () => {
+  async function setupNode(extra: Record<string, unknown> = {}) {
+    const h = await harness();
+    const auth = await loggedIn(h);
+    const res = await addNode(h, auth, 'https://a.blake2b.test', 'blake2b', extra);
+    expect(res.status).toBe(201);
+    const { id } = (await res.json()) as { id: string };
+    const other = h.fakes.get('https://b.blake2b.test');
+    const invoice = async (amount = 1_000n, expirySeconds?: number) =>
+      (
+        await other?.receive.createInvoice({
+          amount: msat(amount),
+          description: 'x',
+          label: 'x',
+          ...(expirySeconds === undefined ? {} : { expirySeconds }),
+        })
+      )?.bolt11;
+    const preview = (request: string | undefined) =>
+      h.request('POST', `/api/v1/nodes/${id}/payments/preview`, { ...auth, body: { request } });
+    const execute = (token: string, key = 'key-' + randomBytes(12).toString('hex')) =>
+      h.request('POST', `/api/v1/nodes/${id}/payments/execute`, {
+        ...auth,
+        body: { confirmationToken: token },
+        headers: { 'idempotency-key': key },
+      });
+    const token = async (bolt11: string | undefined) =>
+      ((await (await preview(bolt11)).json()) as { confirmationToken: string }).confirmationToken;
+    return { h, auth, id, invoice, preview, execute, token };
+  }
+
+  it('refuses to preview without a spend credential', async () => {
+    const { preview, invoice } = await setupNode({ spendRune: undefined });
+    expect(await errorCode(await preview(await invoice()))).toBe('capability_missing');
+  });
+
+  it('refuses to preview while the chain identity is waiting or refused', async () => {
+    const { h, id, preview, invoice } = await setupNode();
+    await h.server.db.updateTable('nodes').set({ identity_state: 'waiting' }).where('id', '=', id).execute();
+    expect(await errorCode(await preview(await invoice()))).toBe('chain_waiting');
+    await h.server.db.updateTable('nodes').set({ identity_state: 'refused' }).where('id', '=', id).execute();
+    expect(await errorCode(await preview(await invoice()))).toBe('chain_refused');
+  });
+
+  it('refuses a node that is no longer the one that was checked', async () => {
+    const { h, id, preview, invoice } = await setupNode();
+    await h.server.db
+      .updateTable('nodes')
+      .set({ pubkey: '03' + '11'.repeat(32) })
+      .where('id', '=', id)
+      .execute();
+    expect(await errorCode(await preview(await invoice()))).toBe('chain_refused');
+  });
+
+  it('refuses amountless and expired invoices', async () => {
+    const { preview, invoice } = await setupNode();
+    const amountless = fixtures.invoices.find((i) => i.chain === 'blake2b' && i.amountMsat === null);
+    expect(await errorCode(await preview(amountless?.bolt11))).toBe('validation_failed');
+    expect(await errorCode(await preview(await invoice(1_000n, 0)))).toBe('validation_failed');
+  });
+
+  it('answers a retry of a payment that is still running with a conflict, and of a failed one with the failure', async () => {
+    const { h, execute, token, invoice } = await setupNode();
+    const t = await token(await invoice());
+    const key = 'key-' + randomBytes(12).toString('hex');
+    expect((await execute(t, key)).status).toBe(200);
+    await h.server.db.updateTable('spend_intents').set({ state: 'reserved' }).execute();
+    expect(await errorCode(await execute(t, key))).toBe('idempotency_conflict');
+    await h.server.db.updateTable('spend_intents').set({ state: 'failed' }).execute();
+    const replay = await execute(t, key);
+    expect(replay.status).toBe(422);
+    expect(await errorCode(replay)).toBe('payment_failed');
+  });
+
+  it('records unknown when the node pays a different hash or throws something unexpected', async () => {
+    const { h, execute, token, invoice } = await setupNode();
+    const fake = h.fakes.get('https://a.blake2b.test');
+    if (!fake) throw new Error('no fake');
+    const real = fake.pay.pay;
+    fake.pay.pay = async (request) => ({ ...(await real(request)), paymentHash: 'cd'.repeat(32) as never });
+    const res = await execute(await token(await invoice()));
+    expect(((await res.json()) as { state: string }).state).toBe('unknown');
+    await h.server.db.updateTable('spend_intents').set({ state: 'succeeded' }).execute();
+    fake.pay.pay = async () => {
+      throw new Error('unexpected');
+    };
+    const res2 = await execute(await token(await invoice()));
+    expect(((await res2.json()) as { state: string }).state).toBe('unknown');
+    const codes = await h.server.db.selectFrom('spend_intents').select('error_code').orderBy('created_at').execute();
+    expect(codes.map((c) => c.error_code)).toEqual(['node_bad_response', 'internal']);
+  });
+});
+
+describe('sessions over the API', () => {
+  it('returns the session and its CSRF token after a reload', async () => {
+    const h = await harness();
+    const auth = await loggedIn(h);
+    const res = await h.request('GET', '/api/v1/auth/session', { cookie: auth.cookie });
+    expect(res.status).toBe(200);
+    expect(((await res.json()) as { csrfToken: string }).csrfToken).toBe(auth.csrf);
   });
 });
 

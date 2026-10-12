@@ -56,8 +56,9 @@ jobs:
         run: corepack enable
       - name: Install
         run: pnpm install --frozen-lockfile
-      - name: Tests
-        run: pnpm test
+      # Unit, API and security tests with the coverage gates of vitest.config.ts.
+      - name: Tests with coverage gates
+        run: pnpm test:coverage
       # The server's tests again on the fallback SQLite driver, so it can be switched if node:sqlite changes.
       - name: Server tests on better-sqlite3
         run: pnpm test:better-sqlite3
