@@ -41,11 +41,13 @@ export async function verifyPassword(password: string, stored: string): Promise<
   const [scheme, log2N, r, p, salt, hash] = stored.split('$');
   if (scheme !== 'scrypt' || !salt || !hash) return false;
   const expected = Buffer.from(hash, 'base64');
-  const actual = await scrypt(password, Buffer.from(salt, 'base64'), {
-    log2N: Number(log2N),
-    r: Number(r),
-    p: Number(p),
-  });
+  let actual: Buffer;
+  try {
+    actual = await scrypt(password, Buffer.from(salt, 'base64'), { log2N: Number(log2N), r: Number(r), p: Number(p) });
+  } catch {
+    // Parameters scrypt refuses (a damaged hash): never a match.
+    return false;
+  }
   return actual.length === expected.length && timingSafeEqual(actual, expected);
 }
 
@@ -71,8 +73,9 @@ function newSetupToken(): string {
       bits -= 5;
     }
   }
-  if (bits > 0) out += BASE32[(value << (5 - bits)) & 31];
-  return out.match(/.{1,4}/g)?.join('-') ?? out;
+  // 136 bits leave one bit over: it becomes the last character.
+  out += BASE32[(value << (5 - bits)) & 31];
+  return Array.from({ length: Math.ceil(out.length / 4) }, (_, i) => out.slice(i * 4, i * 4 + 4)).join('-');
 }
 
 const normaliseToken = (token: string) => token.toUpperCase().replace(/[^A-Z0-9]/g, '');

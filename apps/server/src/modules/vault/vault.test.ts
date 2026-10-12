@@ -161,3 +161,41 @@ describe('vault encryption', () => {
     await expect(vault.put(db, 'n1', 'read', 'x')).rejects.toThrow('vault not initialised');
   });
 });
+
+describe('vault edge cases', () => {
+  it('refuses a key id without a canary, and initialising twice', async () => {
+    const { db } = await testDb(dir());
+    const key = randomBytes(32);
+    const vault = await Vault.start(db, key);
+    await vault.initialise(db);
+    await expect(vault.initialise(db)).rejects.toThrow('vault already initialised');
+    await db.deleteFrom('settings').where('key', '=', 'vault_canary').execute();
+    await expect(Vault.start(db, key)).rejects.toThrow('vault canary missing');
+  });
+
+  it('follows the database after reload (a setup transaction that rolled back)', async () => {
+    const { db } = await testDb(dir());
+    const vault = await Vault.start(db, randomBytes(32));
+    await vault.initialise(db);
+    expect(vault.initialised).toBe(true);
+    await db.deleteFrom('settings').execute();
+    await vault.reload(db);
+    expect(vault.initialised).toBe(false);
+  });
+
+  it('returns nothing for a missing credential and refuses one stored under another key id or corrupted', async () => {
+    const { db } = await testDb(dir());
+    const vault = await Vault.start(db, randomBytes(32));
+    await vault.initialise(db);
+    await nodeRow(db, 'n1');
+    expect(await vault.get(db, 'n1', 'read')).toBeUndefined();
+    await vault.put(db, 'n1', 'read', 'rune-1');
+    await db.updateTable('credentials').set({ key_id: '0000000000000000' }).execute();
+    await expect(vault.get(db, 'n1', 'read')).rejects.toThrow('credential encrypted under another key');
+    await db
+      .updateTable('credentials')
+      .set({ key_id: vault.keyId, nonce: Buffer.alloc(3) })
+      .execute();
+    await expect(vault.get(db, 'n1', 'read')).rejects.toThrow('corrupt value');
+  });
+});
