@@ -1,0 +1,19 @@
+{
+  "name": "@lightning-pilot/ui",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Design system: tokens and React components",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@base-ui/react": "1.8.0",
+    "jsqr": "1.4.0",
+    "lucide-react": "1.52.0",
+    "qrcode-generator": "2.0.4",
+    "react": "19.3.0",
+    "react-dom": "19.3.0"
+  }
+}

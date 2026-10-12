@@ -1,0 +1,17 @@
+{
+  "name": "@lightning-pilot/core",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Domain types and zod schemas, money, errors, ports and the API contract",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@noble/hashes": "2.4.0",
+    "@noble/secp256k1": "3.2.0",
+    "@scure/base": "2.4.0",
+    "zod": "4.6.5"
+  }
+}
