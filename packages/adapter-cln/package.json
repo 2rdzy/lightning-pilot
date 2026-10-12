@@ -9,6 +9,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@lightning-pilot/core": "workspace:*"
+    "@lightning-pilot/core": "workspace:*",
+    "zod": "4.6.5"
   }
 }

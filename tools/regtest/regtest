@@ -1,0 +1,330 @@
+#!/usr/bin/env bash
+# Regtest test environment for Lightning Pilot, two chains side by side:
+#   blake2b  Bitcoin Knots (BLAKE2b proof of work from height 1) + the BLAKE2b Core Lightning fork
+#   sha256d  Bitcoin Core + Core Lightning
+# Each chain: one bitcoind ("btc") and three Core Lightning nodes (cln-a, cln-b, cln-c). LND nodes come with the LND
+# adapter (release 0.2). Used by CI (the contract jobs) and by developers alike; see README.md.
+#
+# Usage: regtest <chain|all> <command> [args]
+#   fetch                   download, verify (pinned SHA-256) and unpack the binaries of versions.json
+#   up [node...]            start what is stopped (default: all nodes)
+#   down [node...]          stop (default: all; lightning nodes first)
+#   status                  versions, heights, channels
+#   init                    first run: mine, fund, open the standard channels, make sample payments (re-runnable)
+#   mine [n]                mine n blocks (default 1)
+#   pay <from> <to> [sats]  invoice on <to>, paid by <from> (cln-a, cln-b or cln-c)
+#   cli <node> <args...>    run bitcoin-cli / lightning-cli against a node
+#   creds <node> [level]    connection details for Lightning Pilot; level: view | spend | full (default: view)
+#   check                   quick smoke test: payments, credential scopes, header format, feature bit 512
+#   reset --yes             DESTRUCTIVE: stop and delete all data of the chain (binaries and downloads kept)
+#
+# Environment:
+#   LP_REGTEST_HOME         where downloads, binaries and node data live (default: <repository>/.regtest)
+#   LP_REGTEST_PORT_OFFSET  added to every port (default 0), to run next to another environment on the same ports
+set -euo pipefail
+
+HERE=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+ROOT=${LP_REGTEST_HOME:-$(cd "$HERE/../.." && pwd)/.regtest}
+OFFSET=${LP_REGTEST_PORT_OFFSET:-0}
+VERSIONS=$HERE/versions.json
+BTC_RPCUSER=lp BTC_RPCPASS=lp-regtest-only                  # throwaway, regtest only
+LN_NODES="cln-a cln-b cln-c"
+ALL_NODES="btc $LN_NODES"
+
+die() { echo "regtest: $*" >&2; exit 1; }
+j() { python3 -c "import sys,json; d=json.load(sys.stdin); print($1)"; }
+# last_json <expr>: like j, for output that has progress lines before the final JSON object
+last_json() { python3 -c "import sys,json; t=sys.stdin.read(); i=t.rfind('\n{'); d=json.loads(t[i+1:] if i>=0 else t); print($1)"; }
+pin() { python3 -c "import sys,json; print(json.load(open(sys.argv[1]))[sys.argv[2]][sys.argv[3]][sys.argv[4]])" "$VERSIONS" "$CHAIN" "$1" "$2"; }
+wait_for() { local what=$1 tries=$2; shift 2; for _ in $(seq 1 "$tries"); do "$@" >/dev/null 2>&1 && return 0; sleep 1; done; die "timeout waiting for $what"; }
+
+# Ports are those of the manual test environment this script was ported from, so both can share notes.
+load_chain() {
+  CHAIN=$1
+  case $CHAIN in
+    blake2b)
+      BTC_NAME="Bitcoin Knots (BLAKE2b)"; base=19100
+      BTC_EXTRA_CONF="testactivationheight=blake2b@1" ;;  # BLAKE2b proof of work from block 1 on regtest
+    sha256d)
+      BTC_NAME="Bitcoin Core (SHA256d)"; base=19300
+      BTC_EXTRA_CONF="" ;;
+    *) die "unknown chain '$CHAIN' (blake2b | sha256d)" ;;
+  esac
+  # The Knots release binds an onion listener on P2P+1, so every P2P port leaves a gap after it.
+  local b=$((base + OFFSET))
+  BTC_P2P=$b BTC_RPC=$((b + 2)) BTC_ZMQ_BLOCK=$((b + 4)) BTC_ZMQ_TX=$((b + 5))
+  CLN_A_P2P=$((b + 10)) CLN_B_P2P=$((b + 12)) CLN_C_P2P=$((b + 14))
+  CLN_A_REST=$((b + 20)) CLN_B_REST=$((b + 22)) CLN_C_REST=$((b + 24))
+  BIN=$ROOT/$CHAIN/bin DATA=$ROOT/$CHAIN/data
+  BTC_BIN=$BIN/bitcoind/bin CLN_BIN=$BIN/cln/usr/bin
+}
+
+kind_of() { case $1 in btc) echo btc ;; cln-[abc]) echo cln ;; *) die "unknown node '$1' (btc, cln-a, cln-b, cln-c)" ;; esac; }
+port_of() { local n; n=$(echo "${1#*-}" | tr a-z A-Z); eval echo "\$CLN_${n}_$2"; }
+
+btc() { "$BTC_BIN/bitcoin-cli" -regtest -datadir="$DATA/btc" -rpcport=$BTC_RPC -rpcuser=$BTC_RPCUSER -rpcpassword=$BTC_RPCPASS "$@"; }
+cln() { local n=$1; shift; "$CLN_BIN/lightning-cli" --network=regtest --lightning-dir="$DATA/$n" "$@"; }
+node_cli() { case $(kind_of "$1") in btc) shift; btc "$@" ;; cln) cln "$@" ;; esac; }
+
+is_up() {
+  case $(kind_of "$1") in
+    btc) btc getblockcount >/dev/null 2>&1 ;;
+    cln) [ -S "$DATA/$1/regtest/lightning-rpc" ] && cln "$1" getinfo >/dev/null 2>&1 ;;
+  esac
+}
+pubkey() { cln "$1" getinfo | j 'd["id"]'; }
+height_of() { case $(kind_of "$1") in btc) btc getblockcount ;; cln) cln "$1" getinfo | j 'd["blockheight"]' ;; esac; }
+
+# fetch: every archive is checked against the SHA-256 pinned in versions.json before it is unpacked; a mismatch
+# stops with an error and there is no fallback. Archives are cached by their SHA-256, so a second fetch downloads
+# nothing.
+fetch_one() {
+  local part=$1 url sha file
+  url=$(pin "$part" url) sha=$(pin "$part" sha256)
+  file=$ROOT/cache/$sha-$(basename "$url")
+  mkdir -p "$ROOT/cache"
+  if [ ! -f "$file" ]; then
+    echo "downloading $(basename "$url")"
+    curl -sSfL --retry 3 -o "$file.part" "$url" || die "download failed: $url"
+    mv "$file.part" "$file"
+  fi
+  if ! echo "$sha  $file" | sha256sum -c --quiet - >/dev/null 2>&1; then
+    rm -f "$file"; die "SHA-256 mismatch for $(basename "$url") (expected $sha); file removed"
+  fi
+  local dest=$BIN/$part
+  rm -rf "$dest"; mkdir -p "$dest"
+  case $file in
+    *.tar.gz) tar -xzf "$file" -C "$dest" ;;
+    *.tar.xz) tar -xJf "$file" -C "$dest" ;;
+    *) die "unknown archive type: $file" ;;
+  esac
+  # Bitcoin tarballs unpack into bitcoin-<version>/; flatten so the path does not depend on the version.
+  if [ "$part" = bitcoind ]; then local sub; sub=$(find "$dest" -mindepth 1 -maxdepth 1 -type d | head -1); mv "$sub"/* "$dest"/; rmdir "$sub"; fi
+  echo "$part: $(pin "$part" name) $(pin "$part" version) (sha256 ${sha:0:16}…)"
+}
+cmd_fetch() {
+  mkdir -p "$BIN"
+  { fetch_one bitcoind; fetch_one cln; } | tee "$BIN/VERSIONS"
+}
+
+start_btc() {
+  mkdir -p "$DATA/btc"
+  cat >"$DATA/btc/bitcoin.conf" <<C
+regtest=1
+server=1
+txindex=1
+fallbackfee=0.0002
+listenonion=0
+dnsseed=0
+discover=0
+rpcuser=$BTC_RPCUSER
+rpcpassword=$BTC_RPCPASS
+[regtest]
+port=$BTC_P2P
+bind=127.0.0.1
+rpcport=$BTC_RPC
+rpcbind=127.0.0.1
+rpcallowip=127.0.0.1
+zmqpubrawblock=tcp://127.0.0.1:$BTC_ZMQ_BLOCK
+zmqpubrawtx=tcp://127.0.0.1:$BTC_ZMQ_TX
+$BTC_EXTRA_CONF
+C
+  "$BTC_BIN/bitcoind" -datadir="$DATA/btc" -daemon >/dev/null 2>&1
+  wait_for "$BTC_NAME" 120 btc getblockcount
+  btc loadwallet miner >/dev/null 2>&1 || true        # wallets are not loaded automatically after a restart
+  echo "btc up ($BTC_NAME): height $(btc getblockcount)"
+}
+
+start_cln() {
+  local n=$1 d="$DATA/$1"; mkdir -p "$d"
+  local before=0; [ -f "$d/lightningd.log" ] && before=$(wc -l <"$d/lightningd.log")   # only log lines from this start count
+  "$CLN_BIN/lightningd" --network=regtest --lightning-dir="$d" --daemon --log-file="$d/lightningd.log" \
+    --alias="$CHAIN-$n" --addr=127.0.0.1:$(port_of "$n" P2P) --disable-dns --disable-plugin=cln-grpc \
+    --bitcoin-cli="$BTC_BIN/bitcoin-cli" --bitcoin-datadir="$DATA/btc" \
+    --bitcoin-rpcuser=$BTC_RPCUSER --bitcoin-rpcpassword=$BTC_RPCPASS --bitcoin-rpcport=$BTC_RPC \
+    --clnrest-host=127.0.0.1 --clnrest-port=$(port_of "$n" REST) --clnrest-protocol=https >/dev/null 2>&1
+  # getinfo blocks while the node thinks it is in initial block download; the log line does not.
+  wait_for "$n" 120 bash -c "tail -n +$((before + 1)) '$d/lightningd.log' | grep -q 'Server started with public key'"
+  echo "$n up"
+}
+
+cmd_up() {
+  [ -x "$BTC_BIN/bitcoind" ] && [ -x "$CLN_BIN/lightningd" ] || die "no binaries for $CHAIN: run 'regtest $CHAIN fetch'"
+  local targets=("$@"); [ ${#targets[@]} -eq 0 ] && read -r -a targets <<<"$ALL_NODES"
+  for t in "${targets[@]}"; do
+    kind_of "$t" >/dev/null
+    if is_up "$t"; then echo "$t already running"; continue; fi
+    [ "$t" != btc ] && ! is_up btc && start_btc
+    case $(kind_of "$t") in btc) start_btc ;; cln) start_cln "$t" ;; esac
+  done
+  # After a restart CLN reconnects to its channel peers on its own, a few seconds later; payments fail until then.
+  for t in $LN_NODES; do is_up "$t" || return 0; done
+  for t in $LN_NODES; do wait_for "$t channel peers" 120 peers_connected "$t"; done
+}
+
+cmd_down() {
+  local targets=("$@"); [ ${#targets[@]} -eq 0 ] && read -r -a targets <<<"$LN_NODES btc"
+  for t in "${targets[@]}"; do
+    case $(kind_of "$t") in
+      btc) btc stop >/dev/null 2>&1 && echo "btc stopping" || true ;;
+      cln) cln "$t" stop >/dev/null 2>&1 && echo "$t stopped" || true ;;
+    esac
+  done
+}
+
+cmd_status() {
+  echo "== $CHAIN"
+  sed 's/^/  /' "$BIN/VERSIONS" 2>/dev/null || echo "  (no binaries: run 'regtest $CHAIN fetch')"
+  for t in $ALL_NODES; do
+    if ! is_up "$t"; then echo "  $t: down"; continue; fi
+    case $(kind_of "$t") in
+      btc) echo "  btc: height $(btc getblockcount)" ;;
+      cln) cln "$t" getinfo | j '"  '"$t"': height %s, channels %s active / %s pending, peers %s, id %s…" % (d["blockheight"], d["num_active_channels"], d["num_pending_channels"], d["num_peers"], d["id"][:16])' ;;
+    esac
+  done
+}
+
+cmd_mine() {
+  btc -rpcwallet=miner generatetoaddress "${1:-1}" "$(btc -rpcwallet=miner getnewaddress)" >/dev/null
+  echo "height $(btc getblockcount)"
+}
+
+synced() { [ "$(height_of "$1")" = "$(btc getblockcount)" ]; }
+wait_synced() { for t in $LN_NODES; do wait_for "$t to sync" 120 synced "$t"; done; }
+
+newaddr() { cln "$1" newaddr bech32 | j 'd["bech32"]'; }
+confirmed_sats() { cln "$1" listfunds | j 'sum(o["amount_msat"] for o in d["outputs"] if o["status"]=="confirmed")//1000'; }
+
+# has_channel <from> <to>: any channel (any state) between the two, seen from either side
+has_channel() { sees_channel "$1" "$2" || sees_channel "$2" "$1"; }
+sees_channel() { [ "$(cln "$1" listpeerchannels "$(pubkey "$2")" | j 'len(d["channels"])')" -gt 0 ]; }
+
+# open_channel <from> <to> <sats> [push_sats]
+open_channel() {
+  if has_channel "$1" "$2"; then echo "channel $1 -> $2 exists"; return; fi
+  local peer; peer=$(pubkey "$2")
+  cln "$1" connect "$peer@127.0.0.1:$(port_of "$2" P2P)" >/dev/null
+  # push_msat is a named argument; used positionally it lands in the announce slot.
+  cln "$1" fundchannel id="$peer" amount="$3" push_msat="$(( ${4:-0} * 1000 ))" >/dev/null
+  echo "channel $1 -> $2: $3 sat (push ${4:-0})"
+  cmd_mine 1 >/dev/null; wait_synced    # confirm the change output, so the next open can spend it
+}
+
+# peers_connected <node>: every open channel's peer is connected
+peers_connected() { [ "$(cln "$1" listpeerchannels | j 'sum(1 for c in d["channels"] if c["state"]=="CHANNELD_NORMAL" and not c.get("peer_connected"))')" = 0 ]; }
+
+active_channels() { cln "$1" listpeerchannels | j 'sum(1 for c in d["channels"] if c["state"]=="CHANNELD_NORMAL")'; }
+invoice() { cln "$1" invoice "$(( $2 * 1000 ))" "regtest-$(date +%s%N)" "regtest payment" | j 'd["bolt11"]'; }
+
+cmd_pay() {
+  [ $# -ge 2 ] || die "usage: regtest <chain> pay <from> <to> [sats]"
+  local inv; inv=$(invoice "$2" "${3:-10000}")
+  # xpay prints a progress line before its JSON
+  cln "$1" xpay "$inv" | last_json '"SUCCEEDED: fee %s msat" % (int(d["amount_sent_msat"]) - int(d["amount_msat"]))'
+}
+
+# Channels: cln-a -2,000,000 (1,000,000 pushed)-> cln-b -1,500,000-> cln-c -1,000,000-> cln-a, so every node has
+# two channels and can both pay and receive.
+cmd_init() {
+  cmd_up btc
+  btc -named createwallet wallet_name=miner >/dev/null 2>&1 || btc loadwallet miner >/dev/null 2>&1 || true
+  [ "$(btc getblockcount)" -ge 110 ] || cmd_mine $(( 110 - $(btc getblockcount) ))
+  cmd_up $LN_NODES
+  cmd_mine 1
+  wait_synced
+  local funded=0
+  for t in $LN_NODES; do
+    if [ "$(confirmed_sats "$t")" -lt 3000000 ]; then btc -rpcwallet=miner sendtoaddress "$(newaddr "$t")" 5 >/dev/null; funded=1; fi
+  done
+  if [ $funded = 1 ]; then cmd_mine 6; wait_synced; for t in $LN_NODES; do wait_for "$t funds" 60 test "$(confirmed_sats "$t")" -ge 3000000; done; fi
+  open_channel cln-a cln-b 2000000 1000000
+  open_channel cln-b cln-c 1500000
+  open_channel cln-c cln-a 1000000
+  cmd_mine 6; wait_synced
+  for t in $LN_NODES; do wait_for "$t channels active" 120 test "$(active_channels "$t")" -ge 2; done
+  echo "waiting for gossip so every node can route..."
+  wait_for "a route cln-a -> cln-c" 120 cmd_pay cln-a cln-c 1000
+  cmd_pay cln-b cln-a 10000 || true
+  cmd_pay cln-c cln-b 7000 || true
+  touch "$DATA/.initialised"; cmd_status
+}
+
+# Credentials with exactly the method lists of Lightning Pilot's credential scopes (view, spend, full). Each rune
+# starts with ["id!"] so it only works over clnrest, never over commando from a peer. The adapter's method table
+# (packages/adapter-cln) is checked against these lists by its tests.
+CLN_VIEW='[["id!"],["method=getinfo","method=listfunds","method=listpeers","method=listpeerchannels","method=listclosedchannels","method=listchannels","method=listnodes","method=listforwards","method=listinvoices","method=listsendpays","method=listpays","method=listtransactions","method=bkpr-listaccountevents","method=listoffers","method=listhtlcs","method=feerates","method=getrawblockbyheight","method=getchaininfo","method=decode","method=getroutes","method=fetchinvoice","method=wait","method=waitanyinvoice","method=waitblockheight","method=invoice","method=offer","method=disableoffer","method=newaddr","method=checkrune","method=plugin"],["method/plugin","pnamesubcommand=list"]]'
+CLN_SPEND_METHODS='"method=xpay","method=xkeysend","method=txprepare","method=txsend","method=txdiscard","method=unreserveinputs","method=fundchannel","method=close","method=connect","method=disconnect","method=setchannel"'
+CLN_SPEND="[[\"id!\"],[$CLN_SPEND_METHODS]]"
+CLN_FULL="[[\"id!\"],[$CLN_SPEND_METHODS,\"method=setconfig\",\"method=signmessage\",\"method=stop\"],[\"method/setconfig\",\"pnameconfig=alias\",\"pnameconfig=rgb\",\"pnameconfig=autoclean-cycle\"]]"
+
+cmd_creds() {
+  local n=${1:?usage: regtest <chain> creds <node> [view|spend|full]} level=${2:-view} f r
+  [ "$(kind_of "$n")" = cln ] || die "creds is for lightning nodes"
+  mkdir -p "$DATA/creds"
+  f="$DATA/creds/$n-$level.rune"
+  if [ ! -s "$f" ]; then
+    case $level in view) r=$CLN_VIEW ;; spend) r=$CLN_SPEND ;; full) r=$CLN_FULL ;; *) die "level: view | spend | full" ;; esac
+    cln "$n" createrune restrictions="$r" | j 'd["rune"]' >"$f"
+  fi
+  echo "implementation: cln   chain: $CHAIN   node: $n ($(pubkey "$n"))"
+  echo "url:            https://localhost:$(port_of "$n" REST)   (TLS servername: localhost)"
+  echo "ca certificate: $DATA/$n/regtest/ca.pem"
+  echo "$level rune:     $(cat "$f")"
+}
+
+# check: a quick smoke test of what the adapters rely on; the contract suite is the full one.
+ok=0 bad=0
+pass_() { echo "  PASS $*"; ok=$((ok + 1)); }
+fail_() { echo "  FAIL $*"; bad=$((bad + 1)); }
+expect() { local what=$1; shift; if "$@" >/dev/null 2>&1; then pass_ "$what"; else fail_ "$what"; fi; }
+rest() {   # rest <node> <level> <method> [body]: clnrest call with the node's credential, prints the body
+  local n=$1 lvl=$2 m=$3 body=${4:-'{}'}
+  cmd_creds "$n" "$lvl" >/dev/null
+  curl -s --cacert "$DATA/$n/regtest/ca.pem" -X POST "https://localhost:$(port_of "$n" REST)/v1/$m" \
+    -H "Rune: $(cat "$DATA/creds/$n-$lvl.rune")" -H 'Content-Type: application/json' -d "$body"
+}
+paid() { cmd_pay "$1" "$2" 1000 | grep -q '^SUCCEEDED'; }
+invoice_bits() { cln cln-b decode "$1" | j 'sorted(i for i in range(int(d["features"] or "0",16).bit_length()) if int(d["features"],16)>>i&1)'; }
+
+cmd_check() {
+  echo "== check $CHAIN"
+  for t in $ALL_NODES; do expect "$t is up" is_up "$t"; done
+  for p in "cln-a cln-c" "cln-c cln-b" "cln-b cln-a"; do expect "payment ${p% *} -> ${p#* }" paid $p; done
+  local r h hdr
+  r=$(rest cln-a view xpay '{"invstring":"x"}'); expect "view rune refused xpay (1502)" grep -q '"code":1502' <<<"$r"
+  r=$(rest cln-a view getinfo); expect "view rune allowed getinfo" grep -q '"id"' <<<"$r"
+  r=$(rest cln-a spend getinfo); expect "spend rune refused getinfo (1502)" grep -q '"code":1502' <<<"$r"
+  h=$(btc getblockcount)
+  hdr=$(rest cln-a view getrawblockbyheight "{\"height\":$h}" | j 'd["block"]')
+  local top=$(( 0x${hdr:6:2} >> 7 ))
+  if [ "$CHAIN" = blake2b ]; then expect "tip block version top bit set" test "$top" = 1
+  else expect "tip block version top bit clear" test "$top" = 0; fi
+  local bits; bits=$(invoice_bits "$(invoice cln-a 1)")
+  if [ "$CHAIN" = blake2b ]; then expect "invoice has bit 512 ($bits)" grep -q 512 <<<"$bits"
+  else expect "invoice has features but no bit 512 ($bits)" bash -c "grep -q 8 <<<'$bits' && ! grep -q 512 <<<'$bits'"; fi
+  echo "  $ok passed, $bad failed"
+  [ "$bad" = 0 ]
+}
+
+cmd_reset() {
+  [ "${1:-}" = --yes ] || die "reset deletes all data of chain '$CHAIN'; run: regtest $CHAIN reset --yes"
+  cmd_down
+  for _ in $(seq 1 30); do is_up btc || break; sleep 1; done
+  rm -rf "${DATA:?}"; echo "$CHAIN data deleted; run: regtest $CHAIN init"
+}
+
+main() {
+  [ $# -ge 2 ] || { sed -n '2,25p' "$0" | sed 's/^# \{0,1\}//'; exit 1; }
+  local chain=$1 cmd=$2; shift 2
+  if [ "$chain" = all ]; then
+    for c in blake2b sha256d; do "$0" "$c" "$cmd" "$@"; done; return
+  fi
+  load_chain "$chain"
+  case $cmd in
+    fetch) cmd_fetch ;; up) cmd_up "$@" ;; down) cmd_down "$@" ;; status) cmd_status ;; init) cmd_init ;;
+    mine) cmd_mine "$@" ;; pay) cmd_pay "$@" ;; cli) node_cli "$@" ;; creds) cmd_creds "$@" ;;
+    reset) cmd_reset "$@" ;; check) cmd_check ;;
+    *) die "unknown command '$cmd'" ;;
+  esac
+}
+main "$@"

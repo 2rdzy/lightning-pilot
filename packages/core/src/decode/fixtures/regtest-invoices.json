@@ -1,0 +1,85 @@
+{
+  "comment": "Invoices made on the tools/regtest chains on 2026-10-12 (cln-a, CLN fork on blake2b, stock CLN on sha256d), with the values the paying node's own decode returned. They never expire in a useful sense: regtest only, already past their expiry.",
+  "invoices": [
+    {
+      "chain": "blake2b",
+      "bolt11": "lnbcrt10n1p4v6pa9sp5m08939vx3laehags3dtga80af34n7f6ugke06lqj5xrvy7vugmzqpp5xrt9dhqttpy4l2d2k02j5s3jk9sduu8jf6mcfrre77erc0nrjzzqdqvve5hsar4wfjsxqr8pqcqp2rzjqfx8xhqgg4e0plgvup84ldq0tzansn4l5324qre35d3q4uvkwvjzuqqq0qqqqqgqqqqqqqqpqqqqqzsqqc9r8yqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqpqysgq5a7y20zmw970drww9dcl4zw45nzpes49mu0qyzncsrcgde03lvyy786z25x7ffgmdvw7e5drx5ltwnpcta6d8z9ld79ctxlsged39tcpknfhrk",
+      "amountMsat": "1000",
+      "paymentHash": "30d656dc0b58495fa9aab3d52a4232b160de70f24eb7848c79f7b23c3e639084",
+      "timestamp": 1791821733,
+      "expiry": 7200,
+      "currency": "bcrt",
+      "features": "0100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002024100"
+    },
+    {
+      "chain": "blake2b",
+      "bolt11": "lnbcrt123456780p1p4v6pa9sp5fdqzwgmpp8g3pp6muncv6yns5cn8vxq6jda06cx3nt5u76zm73vspp55f2fap437wxdlnjrre70xtz7yay7zeaqlfrxs5g5kjpmd8sdaklqdqvve5hsar4wfjsxqr8pqcqp2rzjqfx8xhqgg4e0plgvup84ldq0tzansn4l5324qre35d3q4uvkwvjzuqqq0qqqqqgqqqqqqqqpqqqqqzsqqc9r8yqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqpqysgqmwkkgzc6cy3wmznffpm8xzkxx8wmv59mpaucrl2uy9lt0r0n9ztxnp0wjtheq52xsjrgyt5vm36w5y496sq9ycjkdyqrf6klw895yfsp89egdz",
+      "amountMsat": "12345678",
+      "paymentHash": "a2549e86b1f38cdfce431e7cf32c5e2749e167a0fa46685114b483b69e0dedbe",
+      "timestamp": 1791821733,
+      "expiry": 7200,
+      "currency": "bcrt",
+      "features": "0100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002024100"
+    },
+    {
+      "chain": "blake2b",
+      "bolt11": "lnbcrt1p4v6pa9sp5rksd30r9sanxkhcs4m06xdkap0w3ncl00hjtfm3u079s95f7f0kspp5jdl8wd4z7xseq0amuh62zfdc6znupfsts3yrxz96qhzz5x8m2hdqdqvve5hsar4wfjsxqr8pqcqp2rzjqfx8xhqgg4e0plgvup84ldq0tzansn4l5324qre35d3q4uvkwvjzuqqq0qqqqqgqqqqqqqqpqqqqqzsqqc9r8yqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqpqysgq3qst6q6xj258zft7ryr3crvjtlnf9wj77dryn0pqwwshhz4w4wsrkdcttnenwp0eudhlda6vcs257a9gxzsvfddqk4a55x5kgm6f8xsp6rpa4f",
+      "amountMsat": null,
+      "paymentHash": "937e7736a2f1a1903fbbe5f4a125b8d0a7c0a60b84483308ba05c42a18fb55da",
+      "timestamp": 1791821733,
+      "expiry": 7200,
+      "currency": "bcrt",
+      "features": "0100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002024100"
+    },
+    {
+      "chain": "blake2b",
+      "bolt11": "lnbcrt15m1p4v6pa9sp5mzzgk7jpy968k2a4zedq7eph2r9wt37exxsr8c9cxlxe0f8u9yaqpp5gxf77g5gjnw2xh3h6czewjj0cxcxzn2528vtq0j2u38vc8k8zneqdqvve5hsar4wfjsxqr8pqcqp2rzjqwd2wsdv4glg0qrxkjt9jfazm2n85tcsx75z5xgslmwx086qqj9fvqqqwcqqqqgqqqqqqqqpqqqqqzsqqcrzjqfx8xhqgg4e0plgvup84ldq0tzansn4l5324qre35d3q4uvkwvjzuqqq0qqqqqgqqqqqqqqpqqqqqzsqqc9r8yqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqpqysgqhg925vfkm8w07s72a3pgvsh4anfr93ry6lenq345zpvnx3t6x52zac7adly6rf96xp97llf0ctqw0pphvzxew0vw3j4p20jdy3myrtqq7w83dp",
+      "amountMsat": "1500000000",
+      "paymentHash": "4193ef228894dca35e37d605974a4fc1b0614d5451d8b03e4ae44ecc1ec714f2",
+      "timestamp": 1791821733,
+      "expiry": 7200,
+      "currency": "bcrt",
+      "features": "0100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000002024100"
+    },
+    {
+      "chain": "sha256d",
+      "bolt11": "lnbcrt10n1p4v6pa9sp53f25vlelwjt87936ltzy9hdxt3j3y9pmx77qtqe0exy6k4ay934spp5hjm8td3hp0ve82d3hmwv06x0plky78euq0ffy6akzvcrcq65f46qdqvve5hsar4wfjsxqr8pqcqp2rzjqvylcgu9wx2qalg947rv597k9r8wu22nphy4yn68m6pd7gvlp483xqqqwcqqqqgqqqqqqqqpqqqqqzsqqc9qxpqysgqs0n2rcceqe5p2g3gyz6wh4jsypr5kmnryewekpex0z5e6gd7mnr89rax5qtxt4xd0lg532j0nu7tnlxqxzjnp2el6kzu409uxflmm0qqw6zfg7",
+      "amountMsat": "1000",
+      "paymentHash": "bcb675b6370bd993a9b1bedcc7e8cf0fec4f1f3c03d2926bb613303c03544d74",
+      "timestamp": 1791821733,
+      "expiry": 7200,
+      "currency": "bcrt",
+      "features": "02024100"
+    },
+    {
+      "chain": "sha256d",
+      "bolt11": "lnbcrt123456780p1p4v6pa9sp5c6adx4jcrvrugf5fjhszy9un9xrw20jr80mathygucata7z94drspp5l4t8mk4gznzz7nmfcvz8jd9csh8905y6azk6slvac2jp5j5eaqfsdqvve5hsar4wfjsxqr8pqcqp2rzjqdktrtprk9wz8uezhderhek7zyf8qujlplgdfjcppxnp9ff7zq0lyqqq0qqqqqgqqqqqqqqpqqqqqzsqqc9qxpqysgquv3yztfvae9lf8ps6sm2al494ze2jg2eegkd5s6x2fynpp3je4jpc86kt5kphsnxm6mtgrwrsnvrkl2jrcp5hnnsznpjj77pwv2kxpsppfha85",
+      "amountMsat": "12345678",
+      "paymentHash": "fd567ddaa814c42f4f69c3047934b885ce57d09ae8ada87d9dc2a41a4a99e813",
+      "timestamp": 1791821733,
+      "expiry": 7200,
+      "currency": "bcrt",
+      "features": "02024100"
+    },
+    {
+      "chain": "sha256d",
+      "bolt11": "lnbcrt1p4v6pa9sp5w8nhfkh5uhuezm3tdw4gukutfgc2u30gu5ynxchjpr8lhl63mh0spp5s8q0yvnw4set8qyr57y6fe8qjrwd46c6z5lagr5mntryxcmkl4aqdqvve5hsar4wfjsxqr8pqcqp2rzjqdktrtprk9wz8uezhderhek7zyf8qujlplgdfjcppxnp9ff7zq0lyqqq0qqqqqgqqqqqqqqpqqqqqzsqqc9qxpqysgqmtkvlyyw9ureuavfwqj9ntg2jdd999rv7q37xwa9axvcjn5vf53x58746umtpeu5gp7puzadsentyweathxath6au2tyy7fgxeanaksp8phe8c",
+      "amountMsat": null,
+      "paymentHash": "81c0f2326eac32b38083a789a4e4e090dcdaeb1a153fd40e9b9ac6436376fd7a",
+      "timestamp": 1791821733,
+      "expiry": 7200,
+      "currency": "bcrt",
+      "features": "02024100"
+    },
+    {
+      "chain": "sha256d",
+      "bolt11": "lnbcrt15m1p4v6pa9sp5zugnrf5vk2j8zd0ngxwj6kske58f9y9q88uwgsf6jjxqyypar09spp59hrvg4wnmkvtvca7qr9hzwqlgc4v5ny0m8x74cvkc80fg5zxza8qdqvve5hsar4wfjsxqr8pqcqp2rzjqvylcgu9wx2qalg947rv597k9r8wu22nphy4yn68m6pd7gvlp483xqqqwcqqqqgqqqqqqqqpqqqqqzsqqcrzjqdktrtprk9wz8uezhderhek7zyf8qujlplgdfjcppxnp9ff7zq0lyqqq0qqqqqgqqqqqqqqpqqqqqzsqqc9qxpqysgqmtm6a982e52lm72ujavct5vq6easxa0u7n9a9jdhwcnuu470e2szvnqlu5pukr32qnxzfcv2dvepc56zdp90k2w9vtfl3uvykx9a4aqqz4dd35",
+      "amountMsat": "1500000000",
+      "paymentHash": "2dc6c455d3dd98b663be00cb71381f462aca4c8fd9cdeae196c1de945046174e",
+      "timestamp": 1791821733,
+      "expiry": 7200,
+      "currency": "bcrt",
+      "features": "02024100"
+    }
+  ]
+}
