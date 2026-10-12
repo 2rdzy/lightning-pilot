@@ -1,0 +1,23 @@
+{
+  "name": "@lightning-pilot/server",
+  "version": "0.0.0",
+  "private": true,
+  "description": "HTTP API, authentication, sessions, modules, database, events, jobs",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@hono/node-server": "2.1.3",
+    "@hono/zod-openapi": "1.6.3",
+    "@lightning-pilot/adapter-cln": "workspace:*",
+    "@lightning-pilot/adapter-lnd": "workspace:*",
+    "@lightning-pilot/chain": "workspace:*",
+    "@lightning-pilot/core": "workspace:*",
+    "@noble/ciphers": "2.4.0",
+    "hono": "4.13.13",
+    "kysely": "0.29.6",
+    "zod": "4.6.5"
+  }
+}

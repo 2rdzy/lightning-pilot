@@ -1,0 +1,14 @@
+{
+  "name": "@lightning-pilot/chain",
+  "version": "0.0.0",
+  "private": true,
+  "description": "Chain profiles: identity rules, feature bits, header parsing, external sources",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@lightning-pilot/core": "workspace:*"
+  }
+}

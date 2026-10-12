@@ -1,0 +1,23 @@
+{
+  "name": "@lightning-pilot/web",
+  "version": "0.0.0",
+  "private": true,
+  "description": "React web app",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@hookform/resolvers": "5.9.1",
+    "@lightning-pilot/core": "workspace:*",
+    "@lightning-pilot/ui": "workspace:*",
+    "@tanstack/react-query": "5.104.1",
+    "@tanstack/react-router": "1.170.41",
+    "hono": "4.13.13",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "react-hook-form": "7.89.0",
+    "zod": "4.6.5"
+  }
+}

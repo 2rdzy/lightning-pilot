@@ -1,0 +1,17 @@
+# Dependency policy rule 8: weekly, grouped, never merged automatically; every update is a reviewed PR.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      runtime:
+        dependency-type: production
+      development:
+        dependency-type: development
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly

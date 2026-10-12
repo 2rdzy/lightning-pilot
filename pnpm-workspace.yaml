@@ -1,0 +1,15 @@
+packages:
+  - packages/*
+  - apps/*
+
+# Dependency policy: exact versions, no install scripts except the allowBuilds entries set to true,
+# and new versions only once they are at least 7 days old (in minutes).
+minimumReleaseAge: 10080
+allowBuilds:
+  esbuild: true # build tooling (Vite)
+  libxmljs2: false # optional XML validation of the SBOM tool; not needed
+strictPeerDependencies: true
+saveExact: true
+# Peers are resolved inside each workspace package, not from the root's development tools
+# (the root's @cyclonedx tooling brings ajv-formats 3, which an unused optional peer of @hookform/resolvers rejects).
+resolvePeersFromWorkspaceRoot: false

@@ -1,0 +1,14 @@
+{
+  "name": "@lightning-pilot/adapter-lnd",
+  "version": "0.0.0",
+  "private": true,
+  "description": "LND adapter (REST), release 0.2",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@lightning-pilot/core": "workspace:*"
+  }
+}
