@@ -29,8 +29,12 @@ test('setup, login, receive, pay and log out in the browser', async ({ page }, t
   const problems: string[] = [];
   page.on('console', (msg) => {
     // The browser logs every 401 it receives; those are expected here (the session probe while logged out, the
-    // wrong password). Anything else, a CSP violation included, is a problem.
-    if (msg.type() === 'error' && !/status of 401 \(Unauthorized\)/.test(msg.text())) problems.push(msg.text());
+    // wrong password), as is the 500 the test makes logout answer once. Anything else, a CSP violation included, is a
+    // problem.
+    const expected =
+      /status of 401 \(Unauthorized\)/.test(msg.text()) ||
+      (/status of 500/.test(msg.text()) && msg.location().url.endsWith('/api/v1/auth/logout'));
+    if (msg.type() === 'error' && !expected) problems.push(msg.text());
   });
   page.on('pageerror', (err) => problems.push(err.message));
 
@@ -103,9 +107,22 @@ test('setup, login, receive, pay and log out in the browser', async ({ page }, t
   await page.reload();
   await expect(page.getByTestId('balance-spendable')).toBeVisible();
 
-  // Logout; a deep link then goes through login and comes back.
+  // A logout the server does not confirm leaves the session as it is and says so; trying again logs out.
+  await page.route('**/api/v1/auth/logout', (route) =>
+    route.fulfill({
+      status: 500,
+      contentType: 'application/json',
+      body: JSON.stringify({ error: { code: 'internal', message: 'injected', requestId: 'r-e2e' } }),
+    }),
+  );
   await page.getByRole('button', { name: 'Log out' }).click();
+  await expect(page.getByText('You are still logged in')).toBeVisible();
+  await expect(page).toHaveURL(new RegExp(`${aliceUrl}/?$`));
+  await page.unroute('**/api/v1/auth/logout');
+  await page.getByRole('button', { name: 'Try again' }).click();
   await expect(page).toHaveURL(/\/login$/);
+
+  // Logged out; a deep link then goes through login and comes back.
   await page.goto(`${aliceUrl}/receive`);
   await expect(page).toHaveURL(/\/login\?next=/);
   await expect(page.getByRole('heading', { name: 'Log in' })).toBeVisible();
