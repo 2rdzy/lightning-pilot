@@ -15,6 +15,7 @@ export interface ClnRestOptions {
 
 export interface CallOptions {
   rune: string;
+  // Deadline for the whole call, from connecting to the last byte of the reply.
   timeoutMs: number;
   // Aborts the request (an event stream being closed); the call then fails as not sent or not definitive.
   signal?: AbortSignal;
@@ -73,9 +74,16 @@ export class ClnRestClient {
       // that, nothing can have reached the node.
       let connected = false;
       let settled = false;
+      // A wall-clock deadline: req.setTimeout only fires on an idle socket, so a reply that keeps arriving slowly
+      // would stretch it.
+      const deadline = setTimeout(() => {
+        fail(new AdapterError({ code: 'node_unreachable', sent: connected, definitive: false, detail: 'timeout' }));
+        req.destroy();
+      }, options.timeoutMs);
       const fail = (err: AdapterError) => {
         if (settled) return;
         settled = true;
+        clearTimeout(deadline);
         reject(err);
       };
 
@@ -105,6 +113,7 @@ export class ClnRestClient {
           const status = res.statusCode ?? 0;
           if (status >= 200 && status < 300) {
             settled = true;
+            clearTimeout(deadline);
             resolve(parsed);
             return;
           }
@@ -140,10 +149,6 @@ export class ClnRestClient {
         socket.on('secureConnect', () => {
           connected = true;
         });
-      });
-      req.setTimeout(options.timeoutMs, () => {
-        fail(new AdapterError({ code: 'node_unreachable', sent: connected, definitive: false, detail: 'timeout' }));
-        req.destroy();
       });
       req.on('error', (err) => {
         fail(new AdapterError({ code: 'node_unreachable', sent: connected, definitive: false, detail: err.message }));

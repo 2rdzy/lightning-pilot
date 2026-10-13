@@ -3,7 +3,7 @@
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { createServer, type Server } from 'node:https';
-import type { AddressInfo } from 'node:net';
+import { createServer as createNetServer, type AddressInfo } from 'node:net';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
@@ -17,6 +17,8 @@ type Handler = (
   status: number;
   body: string;
   delayMs?: number;
+  // Sends a space every `everyMs`, `count` times, before the body: a reply that never goes quiet.
+  dribble?: { everyMs: number; count: number };
 };
 
 const dir = mkdtempSync(join(tmpdir(), 'lp-clnrest-'));
@@ -66,7 +68,13 @@ beforeAll(async () => {
       const reply = handler(Buffer.concat(chunks).toString('utf8'), { ...req.headers, path: req.url });
       setTimeout(() => {
         res.writeHead(reply.status, { 'content-type': 'application/json' });
-        res.end(reply.body);
+        let left = reply.dribble?.count ?? 0;
+        const next = () => {
+          if (left-- <= 0 || res.destroyed) return void res.end(reply.body);
+          res.write(' ');
+          setTimeout(next, reply.dribble?.everyMs);
+        };
+        next();
       }, reply.delayMs ?? 0);
     });
   });
@@ -176,6 +184,35 @@ describe('clnrest client', () => {
       sent: true,
       definitive: false,
     });
+  });
+
+  // The timeout is a deadline for the whole call, not for a quiet socket: a reply that keeps sending a little data
+  // must not stretch it.
+  it('times out at the deadline while the reply keeps arriving', async () => {
+    handler = () => ({ status: 200, body: '{}', dribble: { everyMs: 20, count: 25 } });
+    const started = Date.now();
+    expect(await failure(call(client(), {}, 100))).toMatchObject({
+      code: 'node_unreachable',
+      sent: true,
+      definitive: false,
+      detail: 'timeout',
+    });
+    expect(Date.now() - started).toBeLessThan(300);
+  });
+
+  it('times out as not sent when the TLS handshake never completes', async () => {
+    const silent = createNetServer(() => {});
+    await new Promise<void>((resolve) => silent.listen(0, '127.0.0.1', resolve));
+    try {
+      const port = (silent.address() as AddressInfo).port;
+      expect(await failure(call(client({ url: `https://127.0.0.1:${port}` }), {}, 100))).toMatchObject({
+        code: 'node_unreachable',
+        sent: false,
+        detail: 'timeout',
+      });
+    } finally {
+      silent.close();
+    }
   });
 
   it('refuses another CA, another server name and a closed port before sending anything', async () => {
