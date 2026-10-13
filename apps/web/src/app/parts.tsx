@@ -4,11 +4,12 @@ import { useState } from 'react';
 import type { ChainIdentityResponse } from '@lightning-pilot/core';
 import type { z } from 'zod';
 import { ApiError } from '../api/client.ts';
-import { formatExactSats, formatSats } from '../i18n/format.ts';
+import { formatCost, formatExactSats, formatSats } from '../i18n/format.ts';
 import { useT } from './i18n.tsx';
 
-// An amount in sats from msat, rounded down; the exact msat value on hover when it is not a whole sat.
-export function Amount({ msat, testId }: { msat: string; testId?: string }) {
+// An amount in sats from msat. A balance is rounded down, with the exact msat value on hover when it is not a whole
+// sat; a cost (`cost`) is always shown exactly, so an amount to pay never looks smaller than it is.
+export function Amount({ msat, testId, cost = false }: { msat: string; testId?: string; cost?: boolean }) {
   const tr = useT();
   const value = BigInt(msat);
   const exact = formatExactSats(value, tr.locale);
@@ -16,9 +17,9 @@ export function Amount({ msat, testId }: { msat: string; testId?: string }) {
     <span
       className="tabular-nums"
       data-testid={testId}
-      title={exact === undefined ? undefined : tr.t('amount.exact', { amount: exact })}
+      title={exact === undefined || cost ? undefined : tr.t('amount.exact', { amount: exact })}
     >
-      {tr.t('amount.sat', { amount: formatSats(value, tr.locale) })}
+      {tr.t('amount.sat', { amount: cost ? formatCost(value, tr.locale) : formatSats(value, tr.locale) })}
     </span>
   );
 }

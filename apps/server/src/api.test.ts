@@ -469,35 +469,39 @@ describe(`API (${testDriver()})`, () => {
     expect(ok.status).toBe(200);
   });
 
-  it('records an unclear outcome as unknown and blocks further spends on the node', async () => {
+  it('records an unclear outcome as unknown and blocks only that invoice, not the node', async () => {
     const h = await harness();
     const auth = await loggedIn(h);
     const { id } = (await (await addNode(h, auth, 'https://a.blake2b.test', 'blake2b')).json()) as { id: string };
     const other = h.fakes.get('https://b.blake2b.test');
-    const preview = async () =>
-      (await (
-        await h.request('POST', `/api/v1/nodes/${id}/payments/preview`, {
-          ...auth,
-          body: {
-            request: (await other?.receive.createInvoice({ amount: msat(1_000n), description: 'x', label: 'x' }))
-              ?.bolt11,
-          },
-        })
-      ).json()) as { confirmationToken: string };
-    const execute = (token: string) =>
+    const invoice = async () =>
+      (await other?.receive.createInvoice({ amount: msat(1_000n), description: 'x', label: 'x' }))?.bolt11;
+    const preview = (request: string | undefined) =>
+      h.request('POST', `/api/v1/nodes/${id}/payments/preview`, { ...auth, body: { request } });
+    const token = async (request: string | undefined) =>
+      ((await (await preview(request)).json()) as { confirmationToken: string }).confirmationToken;
+    const execute = (t: string) =>
       h.request('POST', `/api/v1/nodes/${id}/payments/execute`, {
         ...auth,
-        body: { confirmationToken: token },
+        body: { confirmationToken: t },
         headers: { 'idempotency-key': 'key-' + randomBytes(12).toString('hex') },
       });
-    const first = await preview();
+    const first = await invoice();
+    const firstToken = await token(first);
+    const secondToken = await token(first);
     h.fakes
       .get('https://a.blake2b.test')
       ?.failNext(new AdapterError({ code: 'node_unreachable', sent: true, definitive: false }));
-    const res = await execute(first.confirmationToken);
+    const res = await execute(firstToken);
     expect(res.status).toBe(200);
     expect(((await res.json()) as { state: string }).state).toBe('unknown');
-    expect(await errorCode(await execute((await preview()).confirmationToken))).toBe('spend_unknown');
+    // The same invoice: refused at preview and at execute (a token taken before the outcome was known).
+    expect(await errorCode(await preview(first))).toBe('spend_unknown');
+    expect(await errorCode(await execute(secondToken))).toBe('spend_unknown');
+    // Another invoice on the same node goes through.
+    const other2 = await execute(await token(await invoice()));
+    expect(other2.status).toBe(200);
+    expect(((await other2.json()) as { state: string }).state).toBe('succeeded');
   });
 
   it('sends security headers and never caches API responses', async () => {
@@ -508,6 +512,23 @@ describe(`API (${testDriver()})`, () => {
     expect(res.headers.get('referrer-policy')).toBe('no-referrer');
     expect(res.headers.get('strict-transport-security')).toContain('max-age=');
     expect(res.headers.get('cache-control')).toBe('no-store');
+  });
+
+  it('sends security headers and no-store on refusals before routing too', async () => {
+    const h = await harness();
+    for (const res of [
+      await h.request('GET', '/api/v1/setup', { headers: { host: 'evil.example' } }),
+      await h.request('POST', '/api/v1/auth/login', {
+        body: { password: 'x' },
+        headers: { origin: 'https://evil.example' },
+      }),
+      await h.request('POST', '/api/v1/auth/login', { body: 'x'.repeat(70_000) }),
+    ]) {
+      expect(res.status).toBeGreaterThanOrEqual(400);
+      expect(res.headers.get('content-security-policy')).toContain("frame-ancestors 'none'");
+      expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+      expect(res.headers.get('cache-control')).toBe('no-store');
+    }
   });
 
   it('never writes a secret to the log', async () => {
@@ -642,6 +663,109 @@ describe(`spend edge cases (${testDriver()})`, () => {
     expect(((await res2.json()) as { state: string }).state).toBe('unknown');
     const codes = await h.server.db.selectFrom('spend_intents').select('error_code').orderBy('created_at').execute();
     expect(codes.map((c) => c.error_code)).toEqual(['node_bad_response', 'internal']);
+  });
+
+  it('refuses to pay an invoice again once it has been paid from the node', async () => {
+    const { execute, token, invoice, preview } = await setupNode();
+    const bolt11 = await invoice();
+    const t = await token(bolt11);
+    expect((await execute(t)).status).toBe(200);
+    const again = await preview(bolt11);
+    expect(await errorCode(again)).toBe('validation_failed');
+  });
+
+  it('settles an unknown payment from the node record: complete means paid, failed frees the invoice', async () => {
+    const { h, id, execute, token, invoice, preview } = await setupNode();
+    const fake = h.fakes.get('https://a.blake2b.test');
+    if (!fake) throw new Error('no fake');
+    const unknownPayment = async () => {
+      const bolt11 = await invoice();
+      const t = await token(bolt11);
+      fake.failNext(new AdapterError({ code: 'node_unreachable', sent: true, definitive: false }));
+      const res = await execute(t);
+      expect(((await res.json()) as { state: string }).state).toBe('unknown');
+      return bolt11;
+    };
+    const stateOf = async () =>
+      await h.server.db
+        .selectFrom('spend_intents')
+        .select(['state', 'fee_msat'])
+        .where('node_id', '=', id)
+        .orderBy('created_at', 'desc')
+        .executeTakeFirstOrThrow();
+    const realGetPayment = fake.pay.getPayment;
+
+    // The node's record says complete: the intent becomes succeeded (fee from the node), and the invoice is paid.
+    const paid = await unknownPayment();
+    fake.pay.getPayment = async (hash) => ({ paymentHash: hash, status: 'succeeded', amountSent: msat(1_002n) });
+    expect(await errorCode(await preview(paid))).toBe('validation_failed');
+    expect(await stateOf()).toEqual({ state: 'succeeded', fee_msat: '2' });
+
+    // The node's record says every part failed, but xpay may still be retrying: stays unknown.
+    const failed = await unknownPayment();
+    fake.pay.getPayment = async (hash) => ({ paymentHash: hash, status: 'failed' });
+    expect(await errorCode(await preview(failed))).toBe('spend_unknown');
+    // Long enough after the call: failed, and the invoice can be paid.
+    await h.server.db
+      .updateTable('spend_intents')
+      .set({ updated_at: new Date(Date.now() - 121_000).toISOString() })
+      .where('state', '=', 'unknown')
+      .execute();
+    const t = await token(failed);
+    fake.pay.getPayment = realGetPayment;
+    expect(
+      (await h.server.db.selectFrom('spend_intents').select('state').where('state', '=', 'failed').execute()).length,
+    ).toBe(1);
+    expect(((await (await execute(t)).json()) as { state: string }).state).toBe('succeeded');
+
+    // No record, pending, or an unreadable record: stays unknown.
+    for (const answer of [undefined, 'pending', 'error'] as const) {
+      const bolt11 = await unknownPayment();
+      await h.server.db
+        .updateTable('spend_intents')
+        .set({ updated_at: '2020-01-01T00:00:00.000Z' })
+        .where('state', '=', 'unknown')
+        .execute();
+      fake.pay.getPayment = async (hash) => {
+        if (answer === 'error') throw new AdapterError({ code: 'node_unreachable', sent: true, definitive: false });
+        return answer === undefined ? undefined : { paymentHash: hash, status: answer };
+      };
+      expect(await errorCode(await preview(bolt11))).toBe('spend_unknown');
+      fake.pay.getPayment = realGetPayment;
+    }
+  });
+
+  it('stores what the node paid, and flags it, when it differs from what was confirmed', async () => {
+    const { h, execute, token, invoice } = await setupNode();
+    const fake = h.fakes.get('https://a.blake2b.test');
+    if (!fake) throw new Error('no fake');
+    const real = fake.pay.pay;
+    fake.pay.pay = async (request) => ({ ...(await real(request)), amount: msat(2_000n), fee: msat(9_000n) });
+    const res = await execute(await token(await invoice(1_000n)));
+    expect(res.status).toBe(200);
+    expect(await res.json()).toMatchObject({ state: 'succeeded', amount: '2000', fee: '9000' });
+    expect(
+      await h.server.db
+        .selectFrom('spend_intents')
+        .select(['state', 'amount_msat', 'fee_msat', 'error_code'])
+        .executeTakeFirst(),
+    ).toEqual({ state: 'succeeded', amount_msat: '2000', fee_msat: '9000', error_code: 'amount_mismatch' });
+    expect(h.lines.some((l) => l.includes('node paid other figures than confirmed'))).toBe(true);
+  });
+
+  it('sends the node the normalised invoice, not the text as typed', async () => {
+    const { h, execute, token, invoice } = await setupNode();
+    const fake = h.fakes.get('https://a.blake2b.test');
+    if (!fake) throw new Error('no fake');
+    const sent: string[] = [];
+    const real = fake.pay.pay;
+    fake.pay.pay = async (request) => {
+      sent.push(request.bolt11);
+      return real(request);
+    };
+    const bolt11 = (await invoice()) ?? '';
+    expect((await execute(await token(`  Lightning:${bolt11.toUpperCase()} `))).status).toBe(200);
+    expect(sent).toEqual([bolt11.toLowerCase()]);
   });
 });
 

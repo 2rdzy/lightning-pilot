@@ -1,8 +1,10 @@
-// The HTTP app. Every request passes, in order: Host allowlist (421) → Origin check on unsafe methods → body limit →
-// security headers → the route's declared permission (with the CSRF token for live sessions) → validation.
+// The HTTP app. Every response gets the security headers (and no-store under /api). Every request passes, in order:
+// Host allowlist (421) → Origin check on unsafe methods → body limit → the route's declared permission (with the
+// CSRF token for live sessions) → validation.
 // Errors always have one format: { error: { code, message, details?, requestId } }. With a web root, GET requests
 // outside /api are answered with the web app's files (and its index.html for app routes, which use history routing).
 import { randomBytes } from 'node:crypto';
+import { Http2ServerRequest } from 'node:http2';
 import { join } from 'node:path';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { createRoute, OpenAPIHono } from '@hono/zod-openapi';
@@ -41,6 +43,15 @@ function hostName(host: string): string {
   return trimmed.replace(/:[0-9]+$/, '');
 }
 
+// The host the client asked for. HTTP/2 carries it in the :authority pseudo-header, which @hono/node-server does not
+// copy into the request headers, so it is read from the Node request; HTTP/1.x has the Host header. Never taken from
+// c.req.url: node-server fills that in with a default host name when the client sent none.
+function requestHost(c: Context<AppEnv>): string | undefined {
+  const incoming = (c.env as { incoming?: unknown } | undefined)?.incoming;
+  if (incoming instanceof Http2ServerRequest) return incoming.authority || undefined;
+  return c.req.header('host');
+}
+
 function errorResponse(c: Context<AppEnv>, code: ErrorCode, message: string, details?: unknown) {
   const body = {
     error: { code, message, ...(details === undefined ? {} : { details }), requestId: c.get('requestId') ?? 'r-none' },
@@ -68,50 +79,8 @@ export function createApp(deps: AppDeps): Router {
     await next();
   });
 
-  // 1. Host allowlist: stops DNS rebinding; checked before routing, setup and login included.
-  app.use(async (c, next) => {
-    const host = c.req.header('host');
-    if (!host || !allowed.has(hostName(host))) throw new AppError('unknown_host', 'Unknown host.');
-    await next();
-  });
-
-  // 2. Origin check on every unsafe method, whatever the content type: Origin must be this host over https (http
-  // only for localhost and .onion), and Sec-Fetch-Site, when sent, must be same-origin.
-  app.use(async (c, next) => {
-    if (UNSAFE.has(c.req.method)) {
-      const origin = c.req.header('origin');
-      const host = c.req.header('host') ?? '';
-      let ok = false;
-      if (origin) {
-        try {
-          const url = new URL(origin);
-          const name = hostName(url.host);
-          const plainAllowed = name === 'localhost' || name.endsWith('.onion');
-          ok =
-            url.host === host.toLowerCase() &&
-            allowed.has(name) &&
-            (url.protocol === 'https:' || (url.protocol === 'http:' && plainAllowed));
-        } catch {
-          ok = false;
-        }
-      }
-      const site = c.req.header('sec-fetch-site');
-      if (!ok || (site !== undefined && site !== 'same-origin')) {
-        throw new AppError('bad_origin', 'Request origin not allowed.');
-      }
-    }
-    await next();
-  });
-
-  // 3. Body limit, then security headers on every response.
-  app.use(
-    bodyLimit({
-      maxSize: deps.bodyLimitBytes ?? DEFAULT_BODY_LIMIT,
-      onError: () => {
-        throw new AppError('body_too_large', 'The request body is too large.');
-      },
-    }),
-  );
+  // Security headers and the API's no-store go first, so every response has them, the refusals below included
+  // (Hono turns an error into a response inside the middleware that threw it, so outer middleware still runs).
   app.use(
     secureHeaders({
       contentSecurityPolicy: {
@@ -137,6 +106,52 @@ export function createApp(deps: AppDeps): Router {
     // API responses hold private data: never cache them.
     if (c.req.path.startsWith('/api/')) c.header('Cache-Control', 'no-store');
   });
+
+  // 1. Host allowlist: stops DNS rebinding; checked before routing, setup and login included.
+  app.use(async (c, next) => {
+    const host = requestHost(c);
+    if (!host || !allowed.has(hostName(host))) throw new AppError('unknown_host', 'Unknown host.');
+    c.set('host', host);
+    await next();
+  });
+
+  // 2. Origin check on every unsafe method, whatever the content type: Origin must be this host over https (http
+  // only for localhost and .onion), and Sec-Fetch-Site, when sent, must be same-origin.
+  app.use(async (c, next) => {
+    if (UNSAFE.has(c.req.method)) {
+      const origin = c.req.header('origin');
+      const host = c.get('host');
+      let ok = false;
+      if (origin) {
+        try {
+          const url = new URL(origin);
+          const name = hostName(url.host);
+          const plainAllowed = name === 'localhost' || name.endsWith('.onion');
+          ok =
+            url.host === host.toLowerCase() &&
+            allowed.has(name) &&
+            (url.protocol === 'https:' || (url.protocol === 'http:' && plainAllowed));
+        } catch {
+          ok = false;
+        }
+      }
+      const site = c.req.header('sec-fetch-site');
+      if (!ok || (site !== undefined && site !== 'same-origin')) {
+        throw new AppError('bad_origin', 'Request origin not allowed.');
+      }
+    }
+    await next();
+  });
+
+  // 3. Body limit.
+  app.use(
+    bodyLimit({
+      maxSize: deps.bodyLimitBytes ?? DEFAULT_BODY_LIMIT,
+      onError: () => {
+        throw new AppError('body_too_large', 'The request body is too large.');
+      },
+    }),
+  );
 
   if (deps.webRoot) app.use(webApp(deps.webRoot));
 

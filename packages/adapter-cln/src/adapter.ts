@@ -56,9 +56,10 @@ const CLOSING_STATES = new Set([
 ]);
 
 // xpay failures after which the node made no payment, once listsendpays confirms that no part is pending or
-// complete: 203 destination permanent failure, 205 route not found, 207 invoice expired, 210 stopped retrying,
-// 212 invoice request invalid. Any other code is not definitive (CLN common/jsonrpc_errors.h).
-const PAY_NOT_MADE = new Set([203, 205, 207, 210, 212]);
+// complete: -32602 invalid parameters (refused before xpay does anything, e.g. an invoice the node cannot parse),
+// 203 destination permanent failure, 205 route not found, 207 invoice expired, 210 stopped retrying, 212 invoice
+// request invalid. Any other code is not definitive (CLN common/jsonrpc_errors.h).
+const PAY_NOT_MADE = new Set([-32602, 203, 205, 207, 210, 212]);
 
 const credentialOf = (command: ClnMethod) =>
   METHODS.find((row) => (row.nodeMethods as readonly string[]).includes(command))?.credential;
