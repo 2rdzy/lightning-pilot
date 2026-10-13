@@ -10,3 +10,4 @@ export * from './methods.ts';
 export * from './money.ts';
 export * from './ports.ts';
 export * from './text.ts';
+export * from './setup.ts';

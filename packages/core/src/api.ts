@@ -7,35 +7,43 @@ import { MsatString } from './money.ts';
 
 // Permissions a route can declare. `public` routes answer without a session (health, login); `setup` routes answer
 // only while no owner exists. The owner's session holds every other permission.
-export const PERMISSIONS = ['public', 'setup', 'read', 'receive', 'manage', 'spend'] as const;
+export const PERMISSIONS = ['public', 'setup', 'read', 'receive', 'manage', 'spend', 'recovery'] as const;
 export type Permission = (typeof PERMISSIONS)[number];
 
 // Owner decision: at least 12 characters with lowercase, uppercase, a digit and a symbol.
 export const Password = z
   .string()
   .min(12, 'at least 12 characters')
-  .max(1024)
+  .max(128)
   .refine((p) => /[a-z]/.test(p) && /[A-Z]/.test(p) && /[0-9]/.test(p) && /[^A-Za-z0-9]/.test(p), {
     message: 'needs lowercase, uppercase, a digit and a symbol',
   });
 
 export const SetupStatusResponse = z.strictObject({ setupRequired: z.boolean() }).meta({ id: 'SetupStatus' });
 
+// Retained for a compatible preceding contract PR. The staged setup route rejects this legacy body.
+/** @deprecated Use SetupAction. */
 export const SetupRequest = z
-  .strictObject({
-    // Groups of letters and digits as printed in the log; separators and case are ignored.
-    token: z.string().min(1).max(200),
-    password: Password,
-  })
+  .strictObject({ token: z.string().min(1).max(200), password: Password })
   .meta({ id: 'SetupRequest' });
 
-export const LoginRequest = z.strictObject({ password: z.string().min(1).max(1024) }).meta({ id: 'LoginRequest' });
+export const LoginRequest = z
+  .strictObject({
+    password: z.string().min(1).max(1024),
+    recoveryCode: z.string().min(1).max(100).optional(),
+    totpCode: z
+      .string()
+      .regex(/^[0-9]{6}$/)
+      .optional(),
+  })
+  .meta({ id: 'LoginRequest' });
 
 export const SessionResponse = z
   .strictObject({
     // Sent back in the X-CSRF-Token header on every state-changing request.
     csrfToken: z.string(),
     expiresAt: z.iso.datetime(),
+    recoveryRequired: z.boolean().optional(),
   })
   .meta({ id: 'Session' });
 
