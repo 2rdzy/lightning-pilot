@@ -63,6 +63,16 @@ describe('readBolt11 limits', () => {
     expect(padded.expiresAt.getTime()).toBe((1 + 112) * 1000);
   });
 
+  it('refuses unknown prefixes, truncated fields, a missing payment hash and bad amounts', () => {
+    expect(() => readBolt11(build('lnxyz10u', [hashField()]))).toThrow(Bolt11Error);
+    expect(() => readBolt11(build('lnbcrt10u', [hashField(), [13, 0, 20, 1]]))).toThrow(Bolt11Error);
+    expect(() => readBolt11(build('lnbcrt10u', [hashField(), [13, 0]]))).toThrow(Bolt11Error);
+    expect(() => readBolt11(build('lnbcrt10u', [field(13, [1, 2])]))).toThrow(Bolt11Error);
+    expect(() => readBolt11(build('lnbcrt015u', [hashField()]))).toThrow(Bolt11Error);
+    expect(() => readBolt11(build('lnbcrt15p', [hashField()]))).toThrow(Bolt11Error);
+    expect(() => readBolt11('bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080'.replace('bcrt', 'xx'))).toThrow(Bolt11Error);
+  });
+
   it('throws only Bolt11Error, also for a payment hash with non-zero padding bits', () => {
     expect(() => readBolt11(build('lnbcrt10u', [hashField(3)]))).toThrow(Bolt11Error);
   });
