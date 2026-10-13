@@ -230,6 +230,57 @@ describe('event stream', () => {
     await expect(iterator.next()).rejects.toMatchObject({ code: 'node_credential_revoked' });
   });
 
+  // A node with 1,000 paid invoices after index 10, and `wait` answered at once for as many rounds as needed.
+  function backlog() {
+    const s = scripted({
+      listinvoices: (p) => {
+        const start = Number(p.start);
+        const rows = [];
+        for (let i = start; i < start + Number(p.limit) && i <= 1010; i++) {
+          rows.push({
+            label: `l${i}`,
+            payment_hash: HASH,
+            status: 'paid',
+            expires_at: 1,
+            created_index: i,
+            updated_index: i,
+          });
+        }
+        return { invoices: rows };
+      },
+    });
+    for (let round = 0; round < 12; round++) s.answer('invoices:updated', { subsystem: 'invoices', updated: 1010 });
+    const lists = () => s.calls.filter((c) => c.command === 'listinvoices').length;
+    return { s, lists };
+  }
+  const settle = async () => {
+    for (let i = 0; i < 50; i++) await tick();
+  };
+
+  it('stops reading from the node while the consumer is not taking events, and loses none', async () => {
+    const { s, lists } = backlog();
+    const iterator = s.adapter.events.subscribe('cln1.10.0.0.0.0.126')[Symbol.asyncIterator]();
+    expect((await next(iterator)).cursor).toBe('cln1.11.0.0.0.0.126');
+    await settle();
+    // One batch of 100 rows fills the queue; the next is read only once the consumer takes events.
+    expect(lists()).toBeLessThanOrEqual(2);
+    let last;
+    for (let i = 12; i <= 1010; i++) last = await next(iterator);
+    expect(last?.cursor).toBe('cln1.1010.0.0.0.0.126');
+    expect(lists()).toBeGreaterThanOrEqual(10);
+    await iterator.return?.();
+  });
+
+  it('yields nothing more after its signal aborts, even with events queued', async () => {
+    const { s } = backlog();
+    const controller = new AbortController();
+    const iterator = s.adapter.events.subscribe('cln1.10.0.0.0.0.126', controller.signal)[Symbol.asyncIterator]();
+    await next(iterator);
+    await settle();
+    controller.abort();
+    expect((await iterator.next()).done).toBe(true);
+  });
+
   it('refuses a malformed cursor and stops at once when already aborted', async () => {
     const s = scripted();
     await expect(s.adapter.events.subscribe('nonsense')[Symbol.asyncIterator]().next()).rejects.toMatchObject({

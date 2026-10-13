@@ -41,6 +41,9 @@ const CURSOR_PREFIX = 'cln1.';
 export const WAIT_TIMEOUT_MS = 5 * 60_000;
 const BLOCK_WAIT_SECONDS = 60;
 const LIST_BATCH = 100;
+// Events read but not yet taken by the consumer. A watch that finds the queue full waits, so a slow consumer stops the
+// reads from the node instead of growing memory; the cursor still moves only with delivered events.
+const MAX_QUEUED = LIST_BATCH;
 // CLN answers waitblockheight with this code when its own timeout passes.
 const WAIT_TIMED_OUT = 2000;
 
@@ -118,7 +121,13 @@ export function subscribe(
         wake?.();
         wake = undefined;
       };
-      const push = (item: Item) => {
+      // Watches waiting for room in the queue; released one by one as events are taken, and all at once on abort.
+      const blocked: (() => void)[] = [];
+      const release = () => blocked.splice(0).forEach((resume) => resume());
+      signal.addEventListener('abort', release, { once: true });
+      const push = async (item: Item) => {
+        while (queue.length >= MAX_QUEUED && !signal.aborted) await new Promise<void>((r) => blocked.push(r));
+        if (signal.aborted) return;
         queue.push(item);
         notify();
       };
@@ -139,8 +148,12 @@ export function subscribe(
         }
         signal.addEventListener('abort', notify, { once: true });
         while (true) {
+          // Closed by its signal: nothing more is yielded, even if events are queued (they are read again from the
+          // last delivered cursor).
+          if (outer?.aborted) return;
           const item = queue.shift();
           if (item) {
+            blocked.shift()?.();
             state[item.key] = item.value;
             yield { event: item.event, cursor: encodeCursor(state) };
             continue;
@@ -177,7 +190,7 @@ async function watch(
   w: (typeof WATCHES)[number],
   from: number,
   signal: AbortSignal,
-  push: (item: Item) => void,
+  push: (item: Item) => Promise<void>,
 ): Promise<void> {
   let last = from;
   while (!signal.aborted) {
@@ -216,14 +229,19 @@ async function watch(
     for (const row of rows) {
       if (row.index <= last) continue;
       last = row.index;
-      if (row.event) push({ event: row.event, key: w.key, value: row.index });
+      if (row.event) await push({ event: row.event, key: w.key, value: row.index });
     }
     // Rows deleted since (autoclean) leave a gap: move on to what `wait` reported.
     if (rows.length < LIST_BATCH) last = Math.max(last, reached);
   }
 }
 
-async function watchBlocks(call: Call, from: number, signal: AbortSignal, push: (item: Item) => void): Promise<void> {
+async function watchBlocks(
+  call: Call,
+  from: number,
+  signal: AbortSignal,
+  push: (item: Item) => Promise<void>,
+): Promise<void> {
   let last = from;
   while (!signal.aborted) {
     let height: number;
@@ -242,6 +260,6 @@ async function watchBlocks(call: Call, from: number, signal: AbortSignal, push: 
     }
     if (height <= last) continue;
     last = height;
-    push({ event: { type: 'block.new', data: { height } }, key: 'block', value: height });
+    await push({ event: { type: 'block.new', data: { height } }, key: 'block', value: height });
   }
 }
