@@ -236,13 +236,17 @@ export interface PluginPort {
   listPlugins(): Promise<Plugin[]>;
 }
 
-// What the walking-skeleton adapters implement. The complete CLN adapter and the fake (WP05) switch NodeAdapter to
-// the full ports below in the same change that implements them.
 export interface NodeAdapter {
   readonly implementation: Implementation;
-  readonly node: Pick<NodePort, 'getInfo'>;
-  readonly chain: Pick<ChainPort, 'getTipHeader'>;
+  readonly node: NodePort;
+  readonly chain: ChainPort;
   readonly balance: BalancePort;
-  readonly receive: Pick<ReceivePort, 'createInvoice'>;
-  readonly pay: Pick<PayPort, 'getPayment' | 'pay'>;
+  readonly peer: PeerPort;
+  readonly channel: ChannelPort;
+  readonly receive: ReceivePort;
+  readonly pay: PayPort;
+  readonly onchain: OnchainPort;
+  readonly routing: RoutingPort;
+  readonly events: EventPort;
+  readonly plugin: PluginPort;
 }

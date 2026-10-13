@@ -121,6 +121,31 @@ describe('clnrest client', () => {
     expect(await failure(call(client()))).toMatchObject({ code: 'node_credential_revoked', definitive: true });
   });
 
+  it("reads 1502 with HTTP 500 as checkrune's answer about another rune, not a refusal of ours", async () => {
+    handler = () => ({
+      status: 500,
+      body: '{"code":1502,"data":null,"message":"Not permitted: method is not equal to xpay"}',
+    });
+    expect(await failure(call(client()))).toMatchObject({ code: 'node_error', definitive: false, nodeCode: 1502 });
+    handler = () => ({ status: 201, body: '{"valid":true}' });
+    expect(await call(client())).toEqual({ valid: true });
+  });
+
+  it('stops a request when its signal aborts, before or after sending', async () => {
+    handler = () => ({ status: 200, body: '{}', delayMs: 500 });
+    const controller = new AbortController();
+    const pending = client().call('wait', {}, { rune: 'RUNE', timeoutMs: 5000, signal: controller.signal });
+    setTimeout(() => controller.abort(), 100);
+    expect(await failure(pending)).toMatchObject({
+      code: 'node_unreachable',
+      sent: true,
+      definitive: false,
+      detail: 'aborted',
+    });
+    const early = client().call('wait', {}, { rune: 'RUNE', timeoutMs: 5000, signal: AbortSignal.abort() });
+    expect(await failure(early)).toMatchObject({ code: 'node_unreachable', sent: false, detail: 'aborted' });
+  });
+
   it('reports other node errors as not definitive, with the node code', async () => {
     handler = () => ({ status: 500, body: '{"code":205,"data":null,"message":"no route"}' });
     expect(await failure(call(client()))).toMatchObject({

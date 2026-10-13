@@ -3,73 +3,22 @@
 // tools/regtest.
 import { createHash } from 'node:crypto';
 import { describe, expect, it } from 'vitest';
-import { AdapterError, msat, parseJsonLossless, parsePaymentHash } from '@lightning-pilot/core';
+import { AdapterError, msat, parsePaymentHash } from '@lightning-pilot/core';
 import fixtures from '../../core/src/decode/fixtures/regtest-invoices.json' with { type: 'json' };
-import { createClnAdapter, type Transport } from './adapter.ts';
+import { adapter, getinfo, ID, nodeError, TXID } from './fixtures/recorded.ts';
 
-const ID = '024470f8943559c516abe722f8919fa81fec56ede15eb46ef557b0a0b15872a399';
 const PREIMAGE = '11'.repeat(32);
 const PREIMAGE_HASH = createHash('sha256').update(Buffer.from(PREIMAGE, 'hex')).digest('hex');
 // A real regtest invoice (committed fixture) and the payment hash it carries.
 const INVOICE = fixtures.invoices[0]?.bolt11 ?? '';
 const INVOICE_HASH = fixtures.invoices[0]?.paymentHash ?? '';
 
-type Reply = unknown | ((params: Record<string, unknown>) => unknown);
-
-// Plays replies by command; a reply that is an Error (or a function throwing one) is thrown.
-function recorded(replies: Record<string, Reply>) {
-  const calls: { command: string; params: Record<string, unknown>; rune: string }[] = [];
-  const transport: Transport = {
-    call: async (command, params, options) => {
-      calls.push({ command, params, rune: options.rune });
-      const reply = replies[command];
-      const value = typeof reply === 'function' ? (reply as (p: Record<string, unknown>) => unknown)(params) : reply;
-      if (value instanceof Error) throw value;
-      if (value === undefined) throw new Error(`no recorded reply for ${command}`);
-      return typeof value === 'string' ? parseJsonLossless(value) : value;
-    },
-  };
-  return { transport, calls };
-}
-
-// spendRune null: a node added without a spend credential.
-function adapter(replies: Record<string, Reply>, spendRune: string | null = 'SPEND') {
-  const r = recorded(replies);
-  return {
-    ...r,
-    adapter: createClnAdapter({
-      url: 'https://localhost:1',
-      caCertificate: '',
-      serverName: 'localhost',
-      viewRune: 'VIEW',
-      ...(spendRune === null ? {} : { spendRune }),
-      transport: r.transport,
-    }),
-  };
-}
-
-const getinfo = (extra: Record<string, unknown> = {}) =>
-  JSON.stringify({
-    id: ID,
-    alias: 'blake2b-cln-a‮',
-    color: '024470',
-    version: 'v26.06.9-blake2b.7',
-    network: 'regtest',
-    blockheight: 126,
-    num_peers: 2,
-    num_active_channels: 2,
-    num_pending_channels: 0,
-    num_inactive_channels: 0,
-    our_features: { init: '0200' },
-    ...extra,
-  });
-
-const nodeError = (nodeCode: number) =>
-  new AdapterError({ code: 'node_error', sent: true, definitive: false, nodeCode, detail: 'Failed' });
-
 describe('cln adapter with recorded replies', () => {
   it('maps getinfo, stripping unsafe characters from the alias', async () => {
-    const { adapter: a, calls } = adapter({ getinfo: getinfo() });
+    // U+202E (right-to-left override), built from its code so the source stays plain ASCII.
+    const { adapter: a, calls } = adapter({
+      getinfo: getinfo({ alias: `blake2b-cln-a${String.fromCharCode(0x202e)}` }),
+    });
     const info = await a.node.getInfo();
     expect(info).toMatchObject({
       pubkey: ID,
@@ -115,17 +64,17 @@ describe('cln adapter with recorded replies', () => {
   it('sums balances by output status and channel state, exactly', async () => {
     const { adapter: a } = adapter({
       listfunds: `{"outputs":[
-        {"amount_msat":9007199254740993,"status":"confirmed"},
-        {"amount_msat":1000,"status":"unconfirmed"},
-        {"amount_msat":500,"status":"confirmed","reserved":true},
-        {"amount_msat":7,"status":"spent","reserved":true}]}`,
+        {"txid":"${TXID}","output":0,"amount_msat":9007199254740993,"status":"confirmed"},
+        {"txid":"${TXID}","output":1,"amount_msat":1000,"status":"unconfirmed"},
+        {"txid":"${TXID}","output":2,"amount_msat":500,"status":"confirmed","reserved":true},
+        {"txid":"${TXID}","output":3,"amount_msat":7,"status":"spent","reserved":true}]}`,
       listpeerchannels: `{"channels":[
-        {"state":"CHANNELD_NORMAL","peer_connected":true,"to_us_msat":600,"total_msat":1000,"spendable_msat":500,"receivable_msat":300},
-        {"state":"CHANNELD_NORMAL","peer_connected":false,"to_us_msat":100,"total_msat":200,"spendable_msat":90,"receivable_msat":80},
-        {"state":"CHANNELD_AWAITING_SPLICE","peer_connected":true},
-        {"state":"ONCHAIN","to_us_msat":42},
-        {"state":"CLOSINGD_COMPLETE"},
-        {"state":"DUALOPEND_AWAITING_LOCKIN","to_us_msat":5}]}`,
+        {"peer_id":"${ID}","state":"CHANNELD_NORMAL","peer_connected":true,"to_us_msat":600,"total_msat":1000,"spendable_msat":500,"receivable_msat":300},
+        {"peer_id":"${ID}","state":"CHANNELD_NORMAL","peer_connected":false,"to_us_msat":100,"total_msat":200,"spendable_msat":90,"receivable_msat":80},
+        {"peer_id":"${ID}","state":"CHANNELD_AWAITING_SPLICE","peer_connected":true},
+        {"peer_id":"${ID}","state":"ONCHAIN","to_us_msat":42},
+        {"peer_id":"${ID}","state":"CLOSINGD_COMPLETE"},
+        {"peer_id":"${ID}","state":"DUALOPEND_AWAITING_LOCKIN","to_us_msat":5}]}`,
     });
     expect(await a.balance.getBalances()).toEqual({
       onchain: { confirmed: 9007199254740993n, unconfirmed: 1000n, reserved: 500n },
@@ -167,16 +116,24 @@ describe('cln adapter with recorded replies', () => {
         amountSent: 1000n,
         preimage: PREIMAGE,
         label: 'intent-1',
+        parts: 3,
       });
       const bare = await adapter({ listsendpays: parts({ status: 'complete' }) }).adapter.pay.getPayment(hash);
-      expect(bare).toEqual({ paymentHash: hash, status: 'succeeded', amountSent: 0n });
+      expect(bare).toEqual({ paymentHash: hash, status: 'succeeded', amountSent: 0n, parts: 1 });
+      const amounts = await adapter({
+        listsendpays: parts(
+          { status: 'complete', amount_msat: 600n, amount_sent_msat: 605n, destination: ID },
+          { status: 'complete', amount_msat: 400n, amount_sent_msat: 402n },
+        ),
+      }).adapter.pay.getPayment(hash);
+      expect(amounts).toMatchObject({ amount: 1000n, amountSent: 1007n, fee: 7n, destination: ID });
     });
 
     it('reports pending, failed, and never reads an unknown part status as failed', async () => {
       const get = (...p: Record<string, unknown>[]) =>
         adapter({ listsendpays: parts(...p) }).adapter.pay.getPayment(hash);
       expect((await get({ status: 'pending' }, { status: 'failed' }))?.status).toBe('pending');
-      expect(await get({ status: 'failed' })).toEqual({ paymentHash: hash, status: 'failed' });
+      expect(await get({ status: 'failed' })).toEqual({ paymentHash: hash, status: 'failed', parts: 1 });
       expect((await get({ status: 'failed' }, { status: 'mystery' }))?.status).toBe('pending');
     });
   });
@@ -195,7 +152,7 @@ describe('cln adapter with recorded replies', () => {
         amountSent: 1003n,
         fee: 3n,
       });
-      expect(calls[0]).toEqual({
+      expect(calls[0]).toMatchObject({
         command: 'xpay',
         rune: 'SPEND',
         params: { invstring: INVOICE, maxfee: 5000n, retry_for: 60, label: 'intent-1' },
@@ -231,8 +188,15 @@ describe('cln adapter with recorded replies', () => {
           nodeCode: 205,
         });
       }
-      const failedParts = adapter({ xpay: nodeError(207), listsendpays: { payments: [] } });
-      await expect(failedParts.adapter.pay.pay(request)).rejects.toMatchObject({ code: 'payment_failed' });
+      // Every "payment not made" code of domain and adapter §5.3: 203, 205, 207, 210, 212.
+      for (const code of [203, 207, 210, 212]) {
+        const { adapter: a } = adapter({ xpay: nodeError(code), listsendpays: { payments: [] } });
+        await expect(a.pay.pay(request), String(code)).rejects.toMatchObject({
+          code: 'payment_failed',
+          definitive: true,
+          nodeCode: code,
+        });
+      }
     });
 
     it('treats invalid parameters (-32602, refused before xpay starts) as a definitive failure', async () => {
@@ -259,8 +223,11 @@ describe('cln adapter with recorded replies', () => {
     });
 
     it('passes other errors through unchanged', async () => {
+      // 200 already being paid, 209 unspecified, 218 injectpaymentonion failed: unclear, so unknown → recovery.
       for (const error of [
+        nodeError(200),
         nodeError(209),
+        nodeError(218),
         new AdapterError({ code: 'node_unreachable', sent: false, definitive: false }),
         new AdapterError({ code: 'node_unreachable', sent: true, definitive: false }),
         new Error('bug'),

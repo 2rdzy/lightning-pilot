@@ -73,3 +73,26 @@ export function isPaidOn(chain: RegtestChain, node: ClnNode, paymentHash: string
   };
   return reply.invoices.some((i) => i.status === 'paid');
 }
+
+// Pays an invoice from a regtest node (lightning-cli xpay prints a progress line before its JSON).
+export function payOn(chain: RegtestChain, node: ClnNode, bolt11: string): void {
+  const out = regtest(chain, 'cli', node, 'xpay', bolt11);
+  const reply = JSON.parse(out.slice(out.indexOf('{'))) as { payment_preimage?: string };
+  if (!reply.payment_preimage) throw new Error(`payment from ${node} failed`);
+}
+
+export function offerOn(chain: RegtestChain, node: ClnNode): string {
+  return (cli(chain, node, 'offer', '-k', 'amount=any', 'description=test') as { bolt12: string }).bolt12;
+}
+
+// The node's key and its peer address as `pubkey@host:port`.
+export function nodeUri(chain: RegtestChain, node: ClnNode): { pubkey: string; uri: string } {
+  const info = cli(chain, node, 'getinfo') as { id: string; binding: { address: string; port: number }[] };
+  const binding = info.binding[0];
+  if (!binding) throw new Error(`${node} has no binding`);
+  return { pubkey: info.id, uri: `${info.id}@${binding.address}:${binding.port}` };
+}
+
+export function blockCount(chain: RegtestChain): number {
+  return Number(regtest(chain, 'cli', 'btc', 'getblockcount').trim());
+}
