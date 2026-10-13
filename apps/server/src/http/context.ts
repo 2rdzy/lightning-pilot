@@ -14,6 +14,8 @@ export interface SessionInfo {
 export interface AppEnv {
   Variables: {
     requestId: string;
+    // The Host header, or HTTP/2's :authority; set by the Host allowlist, so always one of the allowed hosts.
+    host: string;
     session: SessionInfo | undefined;
   };
 }

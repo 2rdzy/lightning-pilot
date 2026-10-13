@@ -4,8 +4,10 @@
 //   execute  in one write transaction: claim the idempotency key, use up the token, store the intent ("reserved");
 //            then call the node with the intent id as label; then store the outcome.
 // An outcome is `failed` only if nothing was sent or the node definitively said nothing was paid; everything else
-// is `unknown` and blocks further spends on the node until resolved. Payments are never retried automatically.
-// Limits, step-up, fee caps and crash recovery come in later work packages.
+// is `unknown`. An invoice with an unresolved or successful payment on the node cannot be paid again from it; other
+// invoices are not affected. An `unknown` payment is checked with the node (read-only) the next time its invoice is
+// previewed or paid. Payments are never retried automatically.
+// Limits, step-up, fee caps and crash recovery at start-up come in later work packages.
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import {
   AdapterError,
@@ -20,8 +22,10 @@ import {
   readBolt11,
   toMsatString,
   type ChainIdentityState,
+  type PaymentHash,
   type Msat,
   type Network,
+  type NodeAdapter,
 } from '@lightning-pilot/core';
 import { writeTx, type Db } from '../../storage/db.ts';
 import type { Logger } from '../../logging/logger.ts';
@@ -34,6 +38,17 @@ const RETRY_FOR_SECONDS = 60;
 const FEE_PPM = 5_000n;
 const FEE_MINIMUM = 5_000n;
 const UNRESOLVED = ['reserved', 'sent', 'unknown'];
+// States that stop the same invoice from being paid again from the same node.
+const BLOCKING = [...UNRESOLVED, 'succeeded'];
+// An `unknown` payment is declared failed from the node's records only once xpay has stopped retrying it (retry_for)
+// plus a margin: until then the node may still start another attempt.
+const SETTLE_FAILED_AFTER_MS = (RETRY_FOR_SECONDS + 60) * 1000;
+
+function blockedBy(state: string): AppError {
+  return state === 'succeeded'
+    ? new AppError('validation_failed', 'This invoice has already been paid from this node.')
+    : new AppError('spend_unknown', 'An earlier payment of this invoice has no known outcome yet.');
+}
 
 const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
 
@@ -114,10 +129,13 @@ export class SpendService {
       throw new AppError('chain_refused', 'The node is not the one that was checked.');
     }
 
+    await this.#guardInvoice(nodeId, adapter, decoded.paymentHash, requestId);
+
     const amount = decoded.amount;
     const maxFee = max(msat(FEE_MINIMUM), ppm(amount, FEE_PPM));
     const payload: PreviewPayload = {
-      bolt11: request.trim(),
+      // The normalised text: nodes refuse some spellings our reader accepts (`Lightning:` in mixed case).
+      bolt11: decoded.bolt11,
       paymentHash: decoded.paymentHash,
       amount: toMsatString(amount),
       maxFee: toMsatString(maxFee),
@@ -169,6 +187,29 @@ export class SpendService {
   ): Promise<ExecuteResult> {
     const { row, adapter } = await this.#nodes.adapter(nodeId);
     const tokenHash = sha256(token);
+
+    // Before the write transaction (no node call may hold the write lock): settle what the node can tell about earlier
+    // payments of this invoice. Only for a usable confirmation, and not for a retry with a known key (which only returns
+    // the first result): the transaction below gives those their own answers.
+    const pending = await this.#db
+      .selectFrom('spend_confirmations')
+      .select('payload')
+      .where('token_hash', '=', tokenHash)
+      .where('session_handle', '=', sessionHandle)
+      .where('node_id', '=', nodeId)
+      .where('used_at', 'is', null)
+      .where('expires_at', '>', this.#now().toISOString())
+      .executeTakeFirst();
+    const retried = await this.#db
+      .selectFrom('spend_intents')
+      .select('id')
+      .where('idempotency_key', '=', idempotencyKey)
+      .executeTakeFirst();
+    if (pending && !retried) {
+      const { paymentHash } = JSON.parse(pending.payload) as PreviewPayload;
+      await this.#guardInvoice(nodeId, adapter, parsePaymentHash(paymentHash), requestId);
+    }
+
     const now = this.#now();
 
     const claimed = await writeTx(this.#db, async (trx) => {
@@ -205,15 +246,17 @@ export class SpendService {
         .where('token_hash', '=', tokenHash)
         .execute();
 
-      const unresolved = await trx
-        .selectFrom('spend_intents')
-        .select('id')
-        .where('node_id', '=', nodeId)
-        .where('state', 'in', UNRESOLVED)
-        .executeTakeFirst();
-      if (unresolved) throw new AppError('spend_unknown', 'An earlier payment on this node is still unresolved.');
-
       const payload = JSON.parse(confirmation.payload) as PreviewPayload;
+      // Checked again inside the transaction: another request may have started paying this invoice meanwhile.
+      const earlier = await trx
+        .selectFrom('spend_intents')
+        .select('state')
+        .where('node_id', '=', nodeId)
+        .where('payment_hash', '=', payload.paymentHash)
+        .where('state', 'in', BLOCKING)
+        .executeTakeFirst();
+      if (earlier) throw blockedBy(earlier.state);
+
       const intentId = randomUUID();
       await trx
         .insertInto('spend_intents')
@@ -269,6 +312,7 @@ export class SpendService {
     let fee: Msat | undefined;
     let preimage: string | undefined;
     let errorCode: string | null = null;
+    let paidAmount: Msat | undefined;
     try {
       const paid = await adapter.pay.pay({
         bolt11: payload.bolt11,
@@ -281,9 +325,25 @@ export class SpendService {
         state = 'unknown';
         errorCode = 'node_bad_response';
       } else {
+        // The preimage proves the payment, so it succeeded; but if the node paid another amount, or more fee than the
+        // cap, than was confirmed, the node's own figures are stored and the mismatch is flagged.
         state = 'succeeded';
         fee = paid.fee;
         preimage = paid.preimage;
+        if (paid.amount !== parseMsat(payload.amount) || paid.fee > parseMsat(payload.maxFee)) {
+          errorCode = 'amount_mismatch';
+          paidAmount = paid.amount;
+          this.#log.error('node paid other figures than confirmed', {
+            requestId,
+            intentId,
+            nodeId,
+            paymentHash,
+            confirmedAmountMsat: payload.amount,
+            paidAmountMsat: toMsatString(paid.amount),
+            maxFeeMsat: payload.maxFee,
+            feeMsat: toMsatString(paid.fee),
+          });
+        }
       }
     } catch (err) {
       const definite = err instanceof AdapterError && (!err.sent || err.definitive);
@@ -303,6 +363,7 @@ export class SpendService {
       .updateTable('spend_intents')
       .set({
         state,
+        ...(paidAmount === undefined ? {} : { amount_msat: toMsatString(paidAmount) }),
         fee_msat: fee === undefined ? null : toMsatString(fee),
         error_code: errorCode,
         updated_at: this.#now().toISOString(),
@@ -326,10 +387,78 @@ export class SpendService {
       intentId,
       state,
       paymentHash,
-      payload.amount,
+      paidAmount === undefined ? payload.amount : toMsatString(paidAmount),
       fee === undefined ? null : toMsatString(fee),
       preimage,
     );
+  }
+
+  // The same invoice is never paid twice from one node. Earlier payments of it are looked at: an `unknown` one is
+  // checked with the node first; one that succeeded or is still unresolved refuses the new spend.
+  async #guardInvoice(nodeId: string, adapter: NodeAdapter, paymentHash: PaymentHash, requestId: string) {
+    const earlier = await this.#db
+      .selectFrom('spend_intents')
+      .select(['id', 'state', 'amount_msat', 'updated_at'])
+      .where('node_id', '=', nodeId)
+      .where('payment_hash', '=', paymentHash)
+      .where('state', 'in', BLOCKING)
+      .execute();
+    for (const intent of earlier) {
+      const state =
+        intent.state === 'unknown' ? await this.#settle(intent, adapter, paymentHash, requestId) : intent.state;
+      if (state !== 'failed') throw blockedBy(state);
+    }
+  }
+
+  // Reads the node's record of an `unknown` payment and stores the outcome when the record is clear: complete →
+  // succeeded; every part failed (and xpay has stopped retrying) → failed. Anything else stays unknown. `reserved`
+  // and `sent` are never settled here: in a running server they mean the node call is still in progress.
+  async #settle(
+    intent: { id: string; amount_msat: string; updated_at: string },
+    adapter: NodeAdapter,
+    paymentHash: PaymentHash,
+    requestId: string,
+  ): Promise<string> {
+    let record;
+    try {
+      record = await adapter.pay.getPayment(paymentHash);
+    } catch (err) {
+      this.#log.warn('payment status not readable', {
+        requestId,
+        intentId: intent.id,
+        code: err instanceof AdapterError ? err.code : 'internal',
+      });
+      return 'unknown';
+    }
+    const now = this.#now();
+    let state: 'succeeded' | 'failed' | undefined;
+    let fee: Msat | undefined;
+    if (record?.status === 'succeeded') {
+      state = 'succeeded';
+      const amount = parseMsat(intent.amount_msat);
+      if (record.amountSent !== undefined && record.amountSent >= amount) fee = msat(record.amountSent - amount);
+    } else if (record?.status === 'failed' && now.getTime() - Date.parse(intent.updated_at) >= SETTLE_FAILED_AFTER_MS) {
+      state = 'failed';
+    }
+    if (state === undefined) return 'unknown';
+    await this.#db
+      .updateTable('spend_intents')
+      .set({
+        state,
+        ...(fee === undefined ? {} : { fee_msat: toMsatString(fee) }),
+        updated_at: now.toISOString(),
+      })
+      .where('id', '=', intent.id)
+      .where('state', '=', 'unknown')
+      .execute();
+    this.#log.info('spend settled', {
+      requestId,
+      intentId: intent.id,
+      paymentHash,
+      state,
+      ...(fee === undefined ? {} : { feeMsat: toMsatString(fee) }),
+    });
+    return state;
   }
 
   #result(

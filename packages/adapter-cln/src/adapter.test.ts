@@ -235,6 +235,15 @@ describe('cln adapter with recorded replies', () => {
       await expect(failedParts.adapter.pay.pay(request)).rejects.toMatchObject({ code: 'payment_failed' });
     });
 
+    it('treats invalid parameters (-32602, refused before xpay starts) as a definitive failure', async () => {
+      const { adapter: a } = adapter({ xpay: nodeError(-32602), listsendpays: { payments: [] } });
+      await expect(a.pay.pay(request)).rejects.toMatchObject({
+        code: 'payment_failed',
+        definitive: true,
+        nodeCode: -32602,
+      });
+    });
+
     it('keeps a no-route failure not definitive when a part is pending or the check fails', async () => {
       const pending = adapter({
         xpay: nodeError(205),

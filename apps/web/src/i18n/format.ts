@@ -38,6 +38,12 @@ export function formatSats(msat: bigint, locale: string): string {
   return integerFormat(locale).format(msat / 1000n);
 }
 
+// A cost (an amount to pay, a fee, a total): exact to the msat when it is not a whole sat, never rounded, so what
+// is paid is never shown smaller than it is ("1,234.567"). Balances use formatSats instead.
+export function formatCost(msat: bigint, locale: string): string {
+  return formatExactSats(msat, locale) ?? formatSats(msat, locale);
+}
+
 // The exact amount when it is not a whole number of sats ("1,234.567 sat" on hover); undefined otherwise.
 export function formatExactSats(msat: bigint, locale: string): string | undefined {
   const rest = msat % 1000n;

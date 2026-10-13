@@ -5,6 +5,7 @@ import {
   decimalSeparator,
   formatCoins,
   formatDateTime,
+  formatCost,
   formatExactSats,
   formatInteger,
   formatSats,
@@ -36,6 +37,12 @@ describe('formatting from the browser region (style guide §6a)', () => {
     expect(formatExactSats(1_234_567n, 'en-US')).toBe('1,234.567');
     expect(formatExactSats(1_234_007n, 'de-DE')).toBe('1.234,007');
     expect(formatExactSats(5_000n, 'en-US')).toBeUndefined();
+  });
+
+  it('shows a cost exactly, never rounded down', () => {
+    expect(formatCost(500n, 'en-US')).toBe('0.500');
+    expect(formatCost(1_999n, 'de-DE')).toBe('1,999');
+    expect(formatCost(1_250_000n, 'en-US')).toBe('1,250');
   });
 
   it('shows whole coins with 8 decimals and the region decimal separator', () => {

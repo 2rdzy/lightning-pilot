@@ -13,7 +13,7 @@ import { useApi } from '../../app/api-context.tsx';
 import { useT } from '../../app/i18n.tsx';
 import { Amount, Card, ChainBadge, ErrorNote, Field } from '../../app/parts.tsx';
 import { nodeRoute, payRoute } from '../../app/router.tsx';
-import { formatDateTime, formatSats, shortId } from '../../i18n/format.ts';
+import { formatCost, formatDateTime, shortId } from '../../i18n/format.ts';
 
 type Preview = z.infer<typeof PaymentPreviewResponse>;
 type Result = z.infer<typeof PaymentResultResponse>;
@@ -65,7 +65,7 @@ export function PayScreen() {
 
   if (preview) {
     const p = preview.data;
-    const amountText = formatSats(BigInt(p.cost.amount), tr.locale);
+    const amountText = formatCost(BigInt(p.cost.amount), tr.locale);
     return (
       <div className="flex max-w-[640px] flex-col gap-6">
         <h1 className="text-2xl font-semibold">{tr.t('pay.title')}</h1>
@@ -74,15 +74,15 @@ export function PayScreen() {
           <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-2" data-testid="preview">
             <dt className="text-muted">{tr.t('pay.amount')}</dt>
             <dd className="text-right">
-              <Amount msat={p.cost.amount} testId="preview-amount" />
+              <Amount msat={p.cost.amount} testId="preview-amount" cost />
             </dd>
             <dt className="text-muted">{tr.t('pay.maxFee')}</dt>
             <dd className="text-right">
-              <Amount msat={p.cost.maxFee} />
+              <Amount msat={p.cost.maxFee} cost />
             </dd>
             <dt className="font-medium">{tr.t('pay.total')}</dt>
             <dd className="text-right font-semibold">
-              <Amount msat={p.cost.total} />
+              <Amount msat={p.cost.total} cost />
             </dd>
             <dt className="text-muted">{tr.t('pay.network')}</dt>
             <dd className="flex items-center justify-end gap-2">
@@ -168,11 +168,11 @@ function Outcome({ result, onAgain }: { result: Result | undefined; onAgain: () 
           {result?.state === 'succeeded' ? (
             <div className="flex flex-col gap-2">
               <p className="text-success text-xl font-semibold">
-                {tr.t('pay.succeeded', { amount: formatSats(BigInt(result.amount), tr.locale) })}
+                {tr.t('pay.succeeded', { amount: formatCost(BigInt(result.amount), tr.locale) })}
               </p>
               {result.fee ? (
                 <p className="text-muted text-sm">
-                  {tr.t('pay.fee', { amount: formatSats(BigInt(result.fee), tr.locale) })}
+                  {tr.t('pay.fee', { amount: formatCost(BigInt(result.fee), tr.locale) })}
                 </p>
               ) : null}
               {result.preimage ? (
