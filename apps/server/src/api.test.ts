@@ -3,7 +3,7 @@
 import { randomBytes } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { FakeAdapter, FakeNetwork } from '@lightning-pilot/adapter-kit';
 import { AdapterError, msat, type Chain, type Network } from '@lightning-pilot/core';
 import { loadConfig } from './config/config.ts';
@@ -625,6 +625,46 @@ describe(`spend edge cases (${testDriver()})`, () => {
       .where('id', '=', id)
       .execute();
     expect(await errorCode(await preview(await invoice()))).toBe('chain_refused');
+  });
+
+  it('refuses to preview after the node dropped away, until a full check confirms it again', async () => {
+    const { h, auth, preview, invoice } = await setupNode();
+    const fake = h.fakes.get('https://a.blake2b.test');
+    if (!fake) throw new Error('no fake');
+    const bolt11 = await invoice();
+    const down = vi
+      .spyOn(fake.node, 'getInfo')
+      .mockRejectedValue(new AdapterError({ code: 'node_unreachable', sent: false, definitive: true }));
+    expect(await errorCode(await preview(bolt11))).toBe('chain_refused');
+    down.mockRestore();
+    // Back on the next preview: the reconnect runs a full check first, which confirms it again.
+    expect((await preview(bolt11)).status).toBe(200);
+    // A new block on the wrong chain's software: the preview's full check refuses it before anything is paid.
+    fake.blockHeight += 1;
+    fake.featuresOverride = '';
+    expect(await errorCode(await preview(bolt11))).toBe('chain_refused');
+    const nodes = (await (await h.request('GET', '/api/v1/nodes', auth)).json()) as unknown;
+    expect(JSON.stringify(nodes)).toContain('"failedCheck":"software"');
+  });
+
+  it('refuses to execute a confirmed preview once the node is no longer confirmed, but still answers a retry', async () => {
+    const { h, id, invoice, token, execute } = await setupNode();
+    const setState = (state: 'waiting' | 'refused' | 'confirmed') =>
+      h.server.db.updateTable('nodes').set({ identity_state: state }).where('id', '=', id).execute();
+    const waiting = await token(await invoice());
+    await setState('waiting');
+    expect(await errorCode(await execute(waiting))).toBe('chain_waiting');
+    await setState('confirmed');
+    const refused = await token(await invoice());
+    await setState('refused');
+    expect(await errorCode(await execute(refused))).toBe('chain_refused');
+    await setState('confirmed');
+    const paid = await token(await invoice());
+    const key = 'key-' + randomBytes(12).toString('hex');
+    expect((await execute(paid, key)).status).toBe(200);
+    await setState('refused');
+    // A retry with the same key returns the first result.
+    expect((await execute(paid, key)).status).toBe(200);
   });
 
   it('refuses amountless and expired invoices', async () => {
