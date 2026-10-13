@@ -10,6 +10,9 @@ import { msat, type Msat } from '../money.ts';
 export class Bolt11Error extends Error {}
 
 export interface Bolt11Basics {
+  // The invoice as nodes accept it: lower case, without a `lightning:` scheme. Send this text to the node, never the
+  // input as typed (CLN only strips the scheme in all lower or all upper case).
+  bolt11: string;
   network: Network;
   amount?: Msat;
   paymentHash: PaymentHash;
@@ -34,20 +37,28 @@ const TIMESTAMP_WORDS = 7; // 35 bits
 const TAG_PAYMENT_HASH = 1;
 const TAG_EXPIRY = 6;
 const DEFAULT_EXPIRY = 3600;
+// Upper bounds, so every value read fits the API schemas and makes a valid date: 21 million coins in msat, and an
+// expiry of at most 2^31 - 1 seconds (about 68 years; real invoices use hours or days).
+const MAX_AMOUNT = 2_100_000_000_000_000_000n;
+const MAX_EXPIRY = 2 ** 31 - 1;
 
 function readAmount(text: string): Msat | undefined {
   if (text === '') return undefined;
   const match = /^([1-9][0-9]*)([munp]?)$/.exec(text);
   if (!match) throw new Bolt11Error('invalid amount');
   const [, digits = '', unit = ''] = match;
+  let value: bigint;
   if (unit === 'p') {
     const pico = BigInt(digits);
     if (pico % 10n !== 0n) throw new Bolt11Error('amount is not a whole number of millisatoshi');
-    return msat(pico / 10n);
+    value = pico / 10n;
+  } else {
+    const perUnit = MULTIPLIER[unit];
+    if (perUnit === undefined) throw new Bolt11Error('invalid amount');
+    value = BigInt(digits) * perUnit;
   }
-  const perUnit = MULTIPLIER[unit];
-  if (perUnit === undefined) throw new Bolt11Error('invalid amount');
-  return msat(BigInt(digits) * perUnit);
+  if (value > MAX_AMOUNT) throw new Bolt11Error('amount above 21 million coins');
+  return msat(value);
 }
 
 const wordsToNumber = (words: readonly number[]): number => words.reduce((n, w) => n * 32 + w, 0);
@@ -86,12 +97,32 @@ export function readBolt11(input: string): Bolt11Basics {
     i += 3 + length;
     // A payment hash of the wrong length must be skipped, not used (BOLT11 "MUST skip").
     if (tag === TAG_PAYMENT_HASH && length === 52 && paymentHash === undefined) {
-      paymentHash = parsePaymentHash(bytesToHex(bech32.fromWords(data)));
+      let bytes: Uint8Array;
+      try {
+        bytes = bech32.fromWords(data);
+      } catch {
+        // Non-zero padding bits: not a well-formed hash.
+        throw new Bolt11Error('invalid payment hash');
+      }
+      paymentHash = parsePaymentHash(bytesToHex(bytes));
     } else if (tag === TAG_EXPIRY) {
-      expirySeconds = wordsToNumber(data);
+      // Leading zero words are allowed (BOLT11 only says SHOULD be minimal); beyond them, more than 7 words (35 bits)
+      // cannot hold an expiry within MAX_EXPIRY, and wordsToNumber would lose precision.
+      const first = data.findIndex((w) => w !== 0);
+      const significant = first === -1 ? [] : data.slice(first);
+      expirySeconds = significant.length > TIMESTAMP_WORDS ? Infinity : wordsToNumber(significant);
+      if (expirySeconds > MAX_EXPIRY) throw new Bolt11Error('expiry too long');
     }
   }
   if (!paymentHash) throw new Bolt11Error('invoice has no payment hash');
   const expiresAt = new Date((timestamp + expirySeconds) * 1000);
-  return { network, ...(amount === undefined ? {} : { amount }), paymentHash, timestamp, expirySeconds, expiresAt };
+  return {
+    bolt11: text,
+    network,
+    ...(amount === undefined ? {} : { amount }),
+    paymentHash,
+    timestamp,
+    expirySeconds,
+    expiresAt,
+  };
 }
