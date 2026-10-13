@@ -224,7 +224,7 @@ export class IdentityMonitor {
           state: 'refused',
           profile: chain,
           checkedAt: this.#now().toISOString(),
-          failedCheck: 'network',
+          failedCheck: 'node',
           detail: 'the node at this address has another public key than the node that was added',
         };
       }

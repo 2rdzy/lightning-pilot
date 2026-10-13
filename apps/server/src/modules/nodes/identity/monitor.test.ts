@@ -149,7 +149,7 @@ describe('IdentityMonitor: full check', () => {
       .set({ pubkey: '03' + '11'.repeat(32) })
       .where('id', '=', 'n1')
       .execute();
-    expect(await monitor.fullCheck('n1', 'other_node')).toMatchObject({ state: 'refused', failedCheck: 'network' });
+    expect(await monitor.fullCheck('n1', 'other_node')).toMatchObject({ state: 'refused', failedCheck: 'node' });
   });
 
   it('runs one full check at a time per node: simultaneous callers share it', async () => {
@@ -343,7 +343,7 @@ describe('IdentityMonitor: before a spend preview', () => {
       .updateTable('nodes')
       .set({ pubkey: '03' + '11'.repeat(32) })
       .execute();
-    expect(await monitor.ensureFresh('n1')).toMatchObject({ state: 'refused', failedCheck: 'network' });
+    expect(await monitor.ensureFresh('n1')).toMatchObject({ state: 'refused', failedCheck: 'node' });
   });
 
   it('waits for a full check that is already running', async () => {
