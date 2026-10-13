@@ -4,10 +4,11 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, Outlet, useNavigate, useRouterState } from '@tanstack/react-router';
 import { useEffect } from 'react';
+import { ApiError } from '../api/client.ts';
 import { formatInteger } from '../i18n/format.ts';
 import { useApi } from './api-context.tsx';
 import { useT } from './i18n.tsx';
-import { ChainBadge } from './parts.tsx';
+import { ChainBadge, ErrorNote } from './parts.tsx';
 import { nodeInfoQuery } from './queries.ts';
 import { nodeRoute } from './router.tsx';
 import { rememberNode } from './session.ts';
@@ -35,12 +36,18 @@ export function Shell() {
     }
   }, [node.id]);
 
+  const leave = async () => {
+    api.setCsrfToken(undefined);
+    queryClient.clear();
+    await navigate({ to: '/login', search: {} });
+  };
+  // The session ends when the server confirms it, or answers that it had already ended. After any other failure the
+  // session cookie is still valid: the app stays as it is and says so, with a retry, rather than appear logged out.
   const logout = useMutation({
     mutationFn: () => api.call('logout'),
-    onSettled: async () => {
-      api.setCsrfToken(undefined);
-      queryClient.clear();
-      await navigate({ to: '/login', search: {} });
+    onSuccess: leave,
+    onError: async (err) => {
+      if (err instanceof ApiError && err.code === 'unauthenticated') await leave();
     },
   });
 
@@ -80,6 +87,12 @@ export function Shell() {
           {tr.t('nav.logout')}
         </button>
       </header>
+      {logout.isError ? (
+        <div className="px-4 pt-3">
+          <p className="mb-2 text-sm">{tr.t('nav.logoutFailed')}</p>
+          <ErrorNote error={logout.error} onRetry={() => logout.mutate()} />
+        </div>
+      ) : null}
       <div className="flex flex-1">
         <nav
           aria-label={tr.t('nav.main')}
