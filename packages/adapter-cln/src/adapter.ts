@@ -175,7 +175,7 @@ export function createClnAdapter(options: ClnAdapterOptions): NodeAdapter {
         const reply = parse(
           InvoiceReply,
           await call('invoice', {
-            amount_msat: request.amount,
+            amount_msat: request.amount ?? 'any',
             label: request.label,
             description: request.description,
             ...(request.expirySeconds === undefined ? {} : { expiry: request.expirySeconds }),
@@ -184,7 +184,7 @@ export function createClnAdapter(options: ClnAdapterOptions): NodeAdapter {
         return {
           paymentHash: parsePaymentHash(reply.payment_hash),
           bolt11: reply.bolt11,
-          amount: request.amount,
+          ...(request.amount === undefined ? {} : { amount: request.amount }),
           description: untrustedText(request.description),
           label: request.label,
           status: 'unpaid',
