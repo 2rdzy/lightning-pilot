@@ -55,7 +55,7 @@ const NO_TEXT = untrustedText('');
 // LUD-16: the user name is lower-case letters, digits and -_.+
 const LIGHTNING_ADDRESS = /^([a-z0-9\-_.+]+)@([a-z0-9-]+(\.[a-z0-9-]+)+)$/;
 // LUD-17 schemes, which stand for https (http for .onion).
-const LUD17 = /^(lnurlc|lnurlw|lnurlp|keyauth):\/\//;
+const LUD17 = /^(lnurlc|lnurlw|lnurlp|keyauth):\/\//i;
 // BOLT12 strings: bech32 characters without a checksum, which may be split with `+` and whitespace.
 const BOLT12 = /^(lno|lni|lnr)1[02-9ac-hj-np-z+\s]+$/;
 // Shapes that can only be meant as an address, so their errors are reported rather than "not recognised".
