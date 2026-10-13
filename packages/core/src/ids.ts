@@ -11,10 +11,13 @@ export type Txid = Brand<string, 'Txid'>;
 export type ChannelId = Brand<string, 'ChannelId'>;
 export type Pubkey = Brand<string, 'Pubkey'>;
 export type FundingOutpoint = Brand<string, 'FundingOutpoint'>;
+export type ShortChannelId = Brand<string, 'ShortChannelId'>;
 
 const HEX32 = /^[0-9a-f]{64}$/;
 const PUBKEY = /^0[23][0-9a-f]{64}$/;
 const OUTPOINT = /^[0-9a-f]{64}:[0-9]{1,10}$/;
+// block x transaction index x output index (BOLT 7); each part fits its field (24, 24 and 16 bits).
+const SCID = /^[0-9]{1,8}x[0-9]{1,8}x[0-9]{1,5}$/;
 
 export class IdError extends Error {}
 
@@ -30,6 +33,7 @@ export const parseTxid = check<Txid>(HEX32, 'txid');
 export const parseChannelId = check<ChannelId>(HEX32, 'channel id');
 export const parsePubkey = check<Pubkey>(PUBKEY, 'node public key');
 export const parseFundingOutpoint = check<FundingOutpoint>(OUTPOINT, 'funding outpoint');
+export const parseShortChannelId = check<ShortChannelId>(SCID, 'short channel id');
 
 export const ID_PATTERNS = {
   paymentHash: HEX32,
@@ -37,6 +41,7 @@ export const ID_PATTERNS = {
   channelId: HEX32,
   pubkey: PUBKEY,
   fundingOutpoint: OUTPOINT,
+  shortChannelId: SCID,
 };
 
 export const PubkeySchema = z.string().regex(PUBKEY).meta({ description: 'Node public key (33 bytes, hex)' });
