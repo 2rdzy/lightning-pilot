@@ -667,6 +667,68 @@ describe(`spend edge cases (${testDriver()})`, () => {
     expect((await execute(paid, key)).status).toBe(200);
   });
 
+  // The identity monitor may refuse the node while execute is between loading the node and claiming the spend: the
+  // claim must see the refusal (chain-identity spec §5).
+  it('refuses to execute when the node is refused after execute loaded it', async () => {
+    const { h, invoice, token, execute } = await setupNode();
+    const fake = h.fakes.get('https://a.blake2b.test');
+    if (!fake) throw new Error('no fake');
+    const t = await token(await invoice());
+    const load = h.server.nodes.adapter.bind(h.server.nodes);
+    vi.spyOn(h.server.nodes, 'adapter').mockImplementationOnce(async (nodeId) => {
+      const loaded = await load(nodeId);
+      // A new block on the wrong chain's software: the real full check refuses it.
+      fake.blockHeight += 1;
+      fake.featuresOverride = '';
+      expect((await h.server.nodes.monitor.fullCheck(nodeId, 'block')).state).toBe('refused');
+      return loaded;
+    });
+    expect(await (await execute(t)).json()).toMatchObject({ error: { code: 'chain_refused' } });
+    expect(await h.server.db.selectFrom('spend_intents').select('id').execute()).toEqual([]);
+  });
+
+  it('waits for a full check that is already running before it admits a spend', async () => {
+    const { h, id, invoice, token, execute } = await setupNode();
+    const fake = h.fakes.get('https://a.blake2b.test');
+    if (!fake) throw new Error('no fake');
+    const t = await token(await invoice());
+    // The full check stops at the tip header until execute asks to be admitted.
+    let release = () => {};
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const getTipHeader = fake.chain.getTipHeader.bind(fake.chain);
+    vi.spyOn(fake.chain, 'getTipHeader').mockImplementationOnce(async () => {
+      await gate;
+      return getTipHeader();
+    });
+    const admit = h.server.nodes.monitor.admit.bind(h.server.nodes.monitor);
+    vi.spyOn(h.server.nodes.monitor, 'admit').mockImplementationOnce((nodeId, admission) => {
+      release();
+      return admit(nodeId, admission);
+    });
+    fake.blockHeight += 1;
+    fake.featuresOverride = '';
+    const check = h.server.nodes.monitor.fullCheck(id, 'block');
+    expect(await (await execute(t)).json()).toMatchObject({ error: { code: 'chain_refused' } });
+    expect((await check).state).toBe('refused');
+    expect(await h.server.db.selectFrom('spend_intents').select('id').execute()).toEqual([]);
+  });
+
+  it('refuses to preview when a full check refuses the node while the preview asks it for its facts', async () => {
+    const { h, id, invoice, preview } = await setupNode();
+    const fake = h.fakes.get('https://a.blake2b.test');
+    if (!fake) throw new Error('no fake');
+    const bolt11 = await invoice();
+    const getInfo = fake.node.getInfo.bind(fake.node);
+    vi.spyOn(fake.node, 'getInfo').mockImplementationOnce(async () => {
+      const facts = await getInfo();
+      // Same facts as the last full check, but another full check refuses the node meanwhile.
+      fake.featuresOverride = '';
+      expect((await h.server.nodes.monitor.fullCheck(id, 'block')).state).toBe('refused');
+      return facts;
+    });
+    expect(await (await preview(bolt11)).json()).toMatchObject({ error: { code: 'chain_refused' } });
+  });
+
   it('refuses amountless and expired invoices', async () => {
     const { preview, invoice } = await setupNode();
     const amountless = fixtures.invoices.find((i) => i.chain === 'blake2b' && i.amountMsat === null);
