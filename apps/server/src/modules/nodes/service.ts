@@ -100,12 +100,9 @@ export class NodesService {
     if (input.network === 'regtest' && !this.#dev) {
       throw new AppError('validation_failed', 'regtest nodes can only be added in development mode.');
     }
-    const count = await this.#db
-      .selectFrom('nodes')
-      .select((eb) => eb.fn.countAll<number>().as('n'))
-      .executeTakeFirstOrThrow();
-    if (Number(count.n) >= this.#maxNodes)
-      throw new AppError('validation_failed', 'The maximum number of nodes is reached.');
+    // Checked here to refuse early, and again in the transaction that adds the node: additions at the same time all
+    // pass this one.
+    await this.#refuseAtLimit(this.#db);
 
     const connection: NodeConnection = {
       url: input.url,
@@ -134,6 +131,7 @@ export class NodesService {
     const now = this.#now().toISOString();
     try {
       await writeTx(this.#db, async (trx) => {
+        await this.#refuseAtLimit(trx);
         await trx
           .insertInto('nodes')
           .values({
@@ -174,6 +172,15 @@ export class NodesService {
       canSpend: input.spendRune !== undefined,
     });
     return this.summary(id);
+  }
+
+  async #refuseAtLimit(db: Db): Promise<void> {
+    const count = await db
+      .selectFrom('nodes')
+      .select((eb) => eb.fn.countAll<number>().as('n'))
+      .executeTakeFirstOrThrow();
+    if (Number(count.n) >= this.#maxNodes)
+      throw new AppError('validation_failed', 'The maximum number of nodes is reached.');
   }
 
   async #row(id: string): Promise<NodeRow> {

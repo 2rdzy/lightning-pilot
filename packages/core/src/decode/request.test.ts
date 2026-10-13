@@ -267,6 +267,9 @@ describe('decodeRequest (universal input)', () => {
     const lnurl = bech32.encode('lnurl', bytesToWords(new TextEncoder().encode(url)), false).toUpperCase();
     expect(decodeRequest(`lightning:${lnurl}`, BLAKE2B)).toMatchObject({ kind: 'lnurl', url, supported: true });
     expect(decodeRequest('lnurlp://service.com/pay/1', BLAKE2B)).toMatchObject({ url: 'https://service.com/pay/1' });
+    // The scheme in any case; the rest keeps its case.
+    expect(decodeRequest('LNURLP://service.com/Pay/1', BLAKE2B)).toMatchObject({ url: 'https://service.com/Pay/1' });
+    expect(decodeRequest('KeyAuth://service.com/a', BLAKE2B)).toMatchObject({ url: 'https://service.com/a' });
     const onion = `lnurlw://${'a'.repeat(56)}.onion/w`;
     expect(decodeRequest(onion, BLAKE2B)).toMatchObject({ url: `http://${'a'.repeat(56)}.onion/w` });
     expect(reasonOf(() => decodeRequest('lnurl1qqqqqqqq', BLAKE2B))).toBe('malformed');

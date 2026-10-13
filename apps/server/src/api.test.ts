@@ -41,11 +41,16 @@ interface RequestOptions {
   headers?: Record<string, string>;
 }
 
-async function harness(options: { dev?: boolean; webRoot?: string } = {}): Promise<Harness> {
+async function harness(options: { dev?: boolean; webRoot?: string; maxNodes?: number } = {}): Promise<Harness> {
   const { dir, cleanup } = tempDir();
   const vaultKey = writeVaultKey(dir);
   const { config } = loadConfig({
-    readFile: () => JSON.stringify({ tls: { mode: 'off' }, paths: { dataDir: dir, vaultKey } }),
+    readFile: () =>
+      JSON.stringify({
+        tls: { mode: 'off' },
+        paths: { dataDir: dir, vaultKey },
+        ...(options.maxNodes === undefined ? {} : { limits: { maxNodes: options.maxNodes } }),
+      }),
   });
   const lines: string[] = [];
   const logger = createLogger({ level: 'debug', sink: (l) => lines.push(l) });
@@ -305,6 +310,19 @@ describe(`API (${testDriver()})`, () => {
     expect(rows).toHaveLength(2);
     for (const r of rows) expect(Buffer.from(r.ciphertext).toString('utf8')).not.toContain('rune');
     expect(JSON.stringify(list)).not.toContain(VIEW_RUNE);
+  });
+
+  it('keeps to the node limit when nodes are added at the same time', async () => {
+    const h = await harness({ maxNodes: 1 });
+    const auth = await loggedIn(h);
+    const results = await Promise.all([
+      addNode(h, auth, 'https://a.blake2b.test', 'blake2b'),
+      addNode(h, auth, 'https://b.blake2b.test', 'blake2b'),
+    ]);
+    expect(results.map((r) => r.status).sort()).toEqual([201, 400]);
+    const refused = results.find((r) => r.status === 400);
+    expect(refused && (await errorCode(refused))).toBe('validation_failed');
+    expect(await h.server.db.selectFrom('nodes').select('id').execute()).toHaveLength(1);
   });
 
   it('refuses regtest nodes outside development mode', async () => {

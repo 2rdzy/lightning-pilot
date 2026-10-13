@@ -717,6 +717,14 @@ export class FakeAdapter implements NodeAdapter {
       if (invoice.paid) throw new AdapterError({ code: 'node_error', sent: true, definitive: false, nodeCode: 219 });
       const amount = invoice.amount ?? request.amount;
       if (amount === undefined) throw invalid('amount');
+      // Checked before either side changes, so a refused payment pays nothing: CLN's codes for an expired invoice
+      // and for no route with enough capacity.
+      if (invoice.expiresAt <= now()) {
+        throw new AdapterError({ code: 'payment_failed', sent: true, definitive: true, nodeCode: 207 });
+      }
+      if (amount > this.#local) {
+        throw new AdapterError({ code: 'payment_failed', sent: true, definitive: true, nodeCode: 205 });
+      }
       const payee = this.#world.nodes.get(invoice.owner);
       if (payee) payee.#receive(decoded.paymentHash, amount);
       return this.#record(decoded.paymentHash, {
@@ -735,7 +743,8 @@ export class FakeAdapter implements NodeAdapter {
     },
     keysend: async (request: KeysendRequest): Promise<PayResult> => {
       this.#spend('keysend');
-      if (!this.#world.nodes.has(request.destination) || request.destination === this.pubkey) {
+      const unreachable = !this.#world.nodes.has(request.destination) || request.destination === this.pubkey;
+      if (unreachable || request.amount > this.#local) {
         throw new AdapterError({ code: 'payment_failed', sent: true, definitive: true, nodeCode: 205 });
       }
       const preimage = randomHex(32);
