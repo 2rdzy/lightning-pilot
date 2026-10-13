@@ -820,30 +820,72 @@ describe('sessions over the API', () => {
 });
 
 describe('start-up', () => {
+  const startAt = (dir: string, key: Buffer, lines: string[], adapterFactory?: (c: NodeConnection) => FakeAdapter) => {
+    const vaultKey = writeVaultKey(dir, key);
+    const { config } = loadConfig({
+      readFile: () => JSON.stringify({ tls: { mode: 'off' }, paths: { dataDir: dir, vaultKey } }),
+    });
+    return buildServer({
+      config,
+      vaultKeyPath: vaultKey,
+      dev: true,
+      logger: createLogger({ sink: (l) => lines.push(l) }),
+      driver: testDriver(),
+      scryptCost: { log2N: 10, r: 8, p: 1 },
+      ...(adapterFactory ? { adapterFactory } : {}),
+    });
+  };
+  const setupToken = (lines: string[]) =>
+    (JSON.parse(lines.find((l) => l.includes('"setupToken"')) ?? '{}') as { setupToken: string }).setupToken;
+
   it('refuses a vault key that does not match the database', async () => {
     const { dir, cleanup } = tempDir();
     cleanups.push(cleanup);
     const lines: string[] = [];
-    const logger = createLogger({ sink: (l) => lines.push(l) });
-    const start = async (key: Buffer) => {
-      const vaultKey = writeVaultKey(dir, key);
-      const { config } = loadConfig({
-        readFile: () => JSON.stringify({ tls: { mode: 'off' }, paths: { dataDir: dir, vaultKey } }),
-      });
-      return buildServer({
-        config,
-        vaultKeyPath: vaultKey,
-        dev: true,
-        logger,
-        driver: testDriver(),
-        scryptCost: { log2N: 10, r: 8, p: 1 },
-      });
-    };
-    const first = await start(randomBytes(32));
-    const token = (JSON.parse(lines.find((l) => l.includes('"setupToken"')) ?? '{}') as { setupToken: string })
-      .setupToken;
-    await first.auth.completeSetup(token, PASSWORD, 'r-test');
+    const first = await startAt(dir, randomBytes(32), lines);
+    await first.auth.completeSetup(setupToken(lines), PASSWORD, 'r-test');
     await first.close();
-    await expect(start(randomBytes(32))).rejects.toThrow(/does not match this database/);
+    await expect(startAt(dir, randomBytes(32), lines)).rejects.toThrow(/does not match this database/);
+  });
+
+  // The server wipes the key it read from the file once the vault has started; the vault must keep working with its
+  // own copy, so a restart with the same key file opens the database and reads the stored credentials.
+  it('restarts with the same vault key after setup and reads the stored credentials', async () => {
+    const { dir, cleanup } = tempDir();
+    cleanups.push(cleanup);
+    const key = randomBytes(32);
+    const lines: string[] = [];
+    const world = new FakeNetwork();
+    const first = await startAt(
+      dir,
+      key,
+      lines,
+      () => new FakeAdapter({ chain: 'blake2b', network: 'regtest', world }),
+    );
+    await first.auth.completeSetup(setupToken(lines), PASSWORD, 'r-test');
+    const node = await first.nodes.add(
+      {
+        name: 'test node',
+        chain: 'blake2b',
+        network: 'regtest',
+        implementation: 'cln',
+        url: 'https://a.blake2b.test',
+        caCertificate: CA,
+        serverName: 'localhost',
+        viewRune: VIEW_RUNE,
+        spendRune: SPEND_RUNE,
+      },
+      'r-test',
+    );
+    await first.close();
+
+    const connections: NodeConnection[] = [];
+    const second = await startAt(dir, key, lines, (c) => {
+      connections.push(c);
+      return new FakeAdapter({ chain: 'blake2b', network: 'regtest', world });
+    });
+    cleanups.push(() => second.close());
+    await second.nodes.adapter(node.id);
+    expect(connections).toEqual([expect.objectContaining({ viewRune: VIEW_RUNE, spendRune: SPEND_RUNE })]);
   });
 });

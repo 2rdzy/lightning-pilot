@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto';
+import { createDecipheriv, randomBytes } from 'node:crypto';
 import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -133,6 +133,37 @@ describe('vault encryption', () => {
     expect(Buffer.from(second.nonce).equals(Buffer.from(first.nonce))).toBe(false);
     expect(Buffer.from(second.ciphertext).toString('utf8')).not.toContain('rune-1');
     expect(await vault.get(db, 'n1', 'spend')).toBe('rune-1');
+  });
+
+  it('keeps its own copy of the key, so the caller can wipe its buffer', async () => {
+    const { db } = await testDb(dir());
+    const key = randomBytes(32);
+    const original = Buffer.from(key);
+    const vault = await Vault.start(db, key);
+    key.fill(0);
+    await vault.initialise(db);
+    await nodeRow(db, 'n1');
+    await vault.put(db, 'n1', 'spend', 'rune-1');
+    expect(await (await Vault.start(db, original)).get(db, 'n1', 'spend')).toBe('rune-1');
+    // Nothing was sealed under the wiped (all-zero) buffer.
+    const row = await db.selectFrom('credentials').select(['nonce', 'ciphertext']).executeTakeFirstOrThrow();
+    const data = Buffer.from(row.ciphertext);
+    const decipher = createDecipheriv('aes-256-gcm', Buffer.alloc(32), Buffer.from(row.nonce));
+    decipher.setAAD(Buffer.from(`${keyIdOf(original)}|n1|spend`));
+    decipher.setAuthTag(data.subarray(data.length - 16));
+    decipher.update(data.subarray(0, data.length - 16));
+    expect(() => decipher.final()).toThrow();
+  });
+
+  it('wipes its key on close and refuses to be used afterwards', async () => {
+    const { db } = await testDb(dir());
+    const vault = await Vault.start(db, randomBytes(32));
+    await vault.initialise(db);
+    await nodeRow(db, 'n1');
+    await vault.put(db, 'n1', 'spend', 'rune-1');
+    vault.close();
+    await expect(vault.get(db, 'n1', 'spend')).rejects.toThrow(/vault closed/);
+    await expect(vault.put(db, 'n1', 'spend', 'rune-2')).rejects.toThrow(/vault closed/);
   });
 
   it('refuses a value moved to another row or kind (additional data)', async () => {
