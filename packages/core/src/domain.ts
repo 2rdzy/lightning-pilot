@@ -27,7 +27,10 @@ export interface NodeRef {
 
 export const IDENTITY_STATES = ['confirmed', 'waiting', 'refused'] as const;
 export type IdentityState = (typeof IDENTITY_STATES)[number];
-export const FAILED_CHECKS = ['network', 'software', 'header', 'fork_height', 'sync', 'unreachable'] as const;
+// Which part of the chain identity check failed. `node`: the node at the stored address answers with another public
+// key than the node that was added (rebuilt with a new key, or another machine answering for it); the chain checks
+// alone would not notice, since they look at the chain, not at who answers.
+export const FAILED_CHECKS = ['network', 'software', 'header', 'fork_height', 'sync', 'unreachable', 'node'] as const;
 export type FailedCheck = (typeof FAILED_CHECKS)[number];
 
 export interface ChainIdentityState {
