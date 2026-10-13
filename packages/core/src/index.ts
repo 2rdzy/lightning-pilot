@@ -1,7 +1,7 @@
 // @lightning-pilot/core: domain types and zod schemas, money, errors, ports, the method-table format and the API
 // contract. Depends on nothing else of ours.
 export * from './api.ts';
-export * from './decode/bolt11.ts';
+export * from './decode/index.ts';
 export * from './domain.ts';
 export * from './errors.ts';
 export * from './ids.ts';

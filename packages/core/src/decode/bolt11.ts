@@ -1,6 +1,8 @@
-// Minimal BOLT11 reader: network, amount, payment hash and expiry, read by us rather than trusted from the node that
-// is about to pay. It does NOT check the signature, the feature bits (the bit-512 chain rule) or any other field;
-// the complete decoder replaces it. Format: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
+// Minimal BOLT11 reader: network, amount, payment hash and expiry. It does NOT check the signature, the feature bits
+// (the bit-512 chain rule) or any other field, so it must not decide whether to pay: `decodeBolt11` (invoice.ts) is
+// the complete decoder. This reader stays for code that reads invoices the node itself made or will be checked
+// against, and for the fake adapter's unsigned invoices.
+// Format: https://github.com/lightning/bolts/blob/master/11-payment-encoding.md
 import { bytesToHex } from '@noble/hashes/utils.js';
 import { bech32 } from '@scure/base';
 import type { Network } from '../domain.ts';
@@ -22,7 +24,7 @@ export interface Bolt11Basics {
 }
 
 // Currency prefixes: "bcrt" and "tbs" must be tried before "bc" and "tb".
-const PREFIXES: [string, Network][] = [
+export const BOLT11_PREFIXES: readonly (readonly [string, Network])[] = [
   ['bcrt', 'regtest'],
   ['tbs', 'signet'],
   ['bc', 'mainnet'],
@@ -39,10 +41,10 @@ const TAG_EXPIRY = 6;
 const DEFAULT_EXPIRY = 3600;
 // Upper bounds, so every value read fits the API schemas and makes a valid date: 21 million coins in msat, and an
 // expiry of at most 2^31 - 1 seconds (about 68 years; real invoices use hours or days).
-const MAX_AMOUNT = 2_100_000_000_000_000_000n;
-const MAX_EXPIRY = 2 ** 31 - 1;
+export const MAX_AMOUNT = 2_100_000_000_000_000_000n;
+export const MAX_EXPIRY = 2 ** 31 - 1;
 
-function readAmount(text: string): Msat | undefined {
+export function readAmount(text: string): Msat | undefined {
   if (text === '') return undefined;
   const match = /^([1-9][0-9]*)([munp]?)$/.exec(text);
   if (!match) throw new Bolt11Error('invalid amount');
@@ -76,7 +78,7 @@ export function readBolt11(input: string): Bolt11Basics {
   }
   if (!decoded.prefix.startsWith('ln')) throw new Bolt11Error('not a BOLT11 invoice');
   const hrp = decoded.prefix.slice(2);
-  const prefix = PREFIXES.find(([p]) => hrp.startsWith(p));
+  const prefix = BOLT11_PREFIXES.find(([p]) => hrp.startsWith(p));
   if (!prefix) throw new Bolt11Error('unknown currency prefix');
   const [currency, network] = prefix;
   const amount = readAmount(hrp.slice(currency.length));
