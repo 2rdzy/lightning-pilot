@@ -29,7 +29,12 @@ class TestNode {
       if (this.down) throw unreachable();
       return this.fake.chain.getTipHeader();
     };
-    this.adapter = { ...this.fake, implementation: 'cln', node: { getInfo }, chain: { getTipHeader } };
+    this.adapter = {
+      ...this.fake,
+      implementation: 'cln',
+      node: { ...this.fake.node, getInfo },
+      chain: { ...this.fake.chain, getTipHeader },
+    };
   }
   tipFetches(): number {
     return this.fake.calls.filter((c) => c === 'getTipHeader').length;

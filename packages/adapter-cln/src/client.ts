@@ -16,10 +16,13 @@ export interface ClnRestOptions {
 export interface CallOptions {
   rune: string;
   timeoutMs: number;
+  // Aborts the request (an event stream being closed); the call then fails as not sent or not definitive.
+  signal?: AbortSignal;
 }
 
 const DEFAULT_MAX_RESPONSE = 16 * 1024 * 1024;
-// CLN's "Not permitted" reply when a rune does not allow the command.
+// CLN's "Not permitted" code. clnrest answers HTTP 401 when the rune in the header does not allow the command; the
+// same code with HTTP 500 is checkrune's answer about another rune, not a refusal of ours.
 export const RUNE_REFUSED = 1502;
 
 type RawJson = (text: string) => unknown;
@@ -109,7 +112,7 @@ export class ClnRestClient {
           const nodeCode = typeof nodeError?.code === 'number' ? nodeError.code : undefined;
           const detail = typeof nodeError?.message === 'string' ? nodeError.message : text;
           // A refused or invalid rune: the node did nothing.
-          if (status === 401 || nodeCode === RUNE_REFUSED) {
+          if (status === 401) {
             fail(
               new AdapterError({
                 code: 'node_credential_revoked',
@@ -145,6 +148,16 @@ export class ClnRestClient {
       req.on('error', (err) => {
         fail(new AdapterError({ code: 'node_unreachable', sent: connected, definitive: false, detail: err.message }));
       });
+      const signal = options.signal;
+      if (signal) {
+        const abort = () => {
+          fail(new AdapterError({ code: 'node_unreachable', sent: connected, definitive: false, detail: 'aborted' }));
+          req.destroy();
+        };
+        if (signal.aborted) abort();
+        else signal.addEventListener('abort', abort, { once: true });
+        req.on('close', () => signal.removeEventListener('abort', abort));
+      }
       req.end(body);
     });
   }

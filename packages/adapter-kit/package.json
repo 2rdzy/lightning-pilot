@@ -11,6 +11,7 @@
   },
   "dependencies": {
     "@lightning-pilot/core": "workspace:*",
+    "@noble/secp256k1": "3.2.0",
     "@scure/base": "2.4.0"
   }
 }

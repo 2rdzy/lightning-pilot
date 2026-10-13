@@ -52,10 +52,12 @@ After `init`: `cln-a` → `cln-b` 2,000,000 sat (1,000,000 pushed), `cln-b` → 
 
 ## Credentials
 
-`creds <node> <level>` creates a rune once and then reuses it. The runes carry exactly the method lists of Lightning
+`creds <node> <level>` creates a rune once and then reuses it; a changed method list makes a new rune (the file
+name carries a hash of the restrictions). The runes carry exactly the method lists of Lightning
 Pilot's credential scopes (`view`, `spend`, `full`), each starting with `["id!"]` so they work over clnrest only, never
 over commando from a peer. The tests read the connection details from this output, so they use the same restricted
-credentials a real installation would. `packages/adapter-cln` checks its method table against these lists.
+credentials a real installation would. The lists are those the CLN adapter's method table generates
+(`runeRestrictions()` in `packages/adapter-cln`); its tests fail when the two differ in either direction.
 
 ## Pinned versions
 
