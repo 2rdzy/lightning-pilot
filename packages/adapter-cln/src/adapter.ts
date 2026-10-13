@@ -32,6 +32,7 @@ import {
 } from '@lightning-pilot/core';
 import { ClnRestClient } from './client.ts';
 import {
+  checkOffsetPage,
   cursorStart,
   indexPage,
   invalidRequest,
@@ -444,6 +445,7 @@ export function createClnAdapter(options: ClnAdapterOptions) {
     },
     channel: {
       async listChannels(page?: { cursor?: string; limit?: number }) {
+        checkOffsetPage(page);
         const { channels } = parse(ListPeerChannels, await call('listpeerchannels', {}));
         const result = offsetPage(channels, page);
         const names = await aliasesOf(result.items.map((c) => c.peer_id));
@@ -456,6 +458,7 @@ export function createClnAdapter(options: ClnAdapterOptions) {
         };
       },
       async listClosedChannels(page?: { cursor?: string; limit?: number }) {
+        checkOffsetPage(page);
         const { closedchannels } = parse(ListClosedChannels, await call('listclosedchannels', {}));
         const result = offsetPage(closedchannels, page);
         const names = await aliasesOf(result.items.flatMap((c) => (c.peer_id ? [c.peer_id] : [])));

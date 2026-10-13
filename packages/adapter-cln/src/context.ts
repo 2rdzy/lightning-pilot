@@ -86,6 +86,12 @@ export function indexPage<R extends { created_index: number }, T>(
 }
 
 // One page of a list the node returns whole.
+// Called before the node is asked, so a malformed page is refused as not sent.
+export function checkOffsetPage(page: PageRequest | undefined): void {
+  pageLimit(page);
+  cursorStart(page, 'o');
+}
+
 export function offsetPage<T>(all: T[], page: PageRequest | undefined): { items: T[]; nextCursor?: string } {
   const limit = pageLimit(page);
   const start = cursorStart(page, 'o');

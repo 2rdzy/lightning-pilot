@@ -277,13 +277,19 @@ describe('channels', () => {
 
   it('pages lists the node returns whole by offset', async () => {
     const channels = Array.from({ length: 3 }, (_, i) => peerChannel({ channel_id: `${i}`.repeat(64) }));
-    const { adapter: a } = adapter({ listpeerchannels: { channels }, listnodes: { nodes: [] } });
+    const { adapter: a, calls } = adapter({ listpeerchannels: { channels }, listnodes: { nodes: [] } });
     const first = await a.channel.listChannels({ limit: 2 });
     expect(first.items.map((c) => c.id)).toEqual(['0'.repeat(64), '1'.repeat(64)]);
     const second = await a.channel.listChannels({ limit: 2, cursor: first.nextCursor ?? '' });
     expect(second).toEqual({ items: [expect.objectContaining({ id: '2'.repeat(64) })] });
-    await expect(a.channel.listChannels({ cursor: 'i5' })).rejects.toMatchObject({ code: 'validation_failed' });
-    await expect(a.channel.listChannels({ limit: 0 })).rejects.toMatchObject({ code: 'validation_failed' });
+    // A malformed page is refused before anything is sent, so `sent: false` is true.
+    const sentBefore = calls.length;
+    const refused = { code: 'validation_failed', sent: false };
+    await expect(a.channel.listChannels({ cursor: 'i5' })).rejects.toMatchObject(refused);
+    await expect(a.channel.listChannels({ limit: 0 })).rejects.toMatchObject(refused);
+    await expect(a.channel.listClosedChannels({ limit: 0 })).rejects.toMatchObject(refused);
+    await expect(a.onchain.listTransactions({ cursor: 'x' })).rejects.toMatchObject(refused);
+    expect(calls.length).toBe(sentBefore);
   });
 
   it('maps closed channels with the native cause', async () => {
