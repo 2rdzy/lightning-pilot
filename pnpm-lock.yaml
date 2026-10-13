@@ -289,6 +289,9 @@ importers:
       hono:
         specifier: 4.13.13
         version: 4.13.13
+      qrcode-generator:
+        specifier: 2.0.4
+        version: 2.0.4
       react:
         specifier: 19.3.0
         version: 19.3.0

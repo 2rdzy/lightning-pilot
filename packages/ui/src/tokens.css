@@ -1,0 +1,56 @@
+/* Design tokens (style guide §2–§4). Light and dark follow the system; data-theme on <html> overrides it.
+   Keep in step with tokens.ts (a test compares them). */
+:root {
+  color-scheme: light;
+  --brand: #c4402a;
+  --brand-strong: #9c3321;
+  --bar: #822a1c;
+  --bg: #f0f4f7;
+  --surface: #ffffff;
+  --border: #e4e7eb;
+  --text: #212529;
+  --muted: #666f76;
+  --success: #177c4d;
+  --warning: #8b6700;
+  --danger: #d32535;
+  --info: #0a7697;
+  --on-danger: #ffffff;
+
+  --font-text: system-ui, -apple-system, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans', sans-serif;
+  --font-mono: ui-monospace, 'SF Mono', 'Cascadia Mono', 'Source Code Pro', Menlo, Consolas, monospace;
+  --radius-control: 8px;
+  --radius-card: 12px;
+  --shadow-float: 0 8px 24px rgb(0 0 0 / 0.16);
+}
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+  --brand-strong: #ea8774;
+  --bg: #131416;
+  --surface: #1b1d1f;
+  --border: #25282a;
+  --text: #f7fafa;
+  --muted: #b2bac2;
+  --success: #2eb872;
+  --warning: #ffc107;
+  --danger: #f06272;
+  --info: #0dcaf0;
+  --on-danger: #131416;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme='light']) {
+    color-scheme: dark;
+    --brand-strong: #ea8774;
+    --bg: #131416;
+    --surface: #1b1d1f;
+    --border: #25282a;
+    --text: #f7fafa;
+    --muted: #b2bac2;
+    --success: #2eb872;
+    --warning: #ffc107;
+    --danger: #f06272;
+    --info: #0dcaf0;
+    --on-danger: #131416;
+  }
+}

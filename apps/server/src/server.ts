@@ -22,12 +22,15 @@ export interface ServerOptions {
   adapterFactory?: AdapterFactory;
   scryptCost?: ScryptCost;
   now?: () => Date;
+  // Directory of the built web app, served for every non-API GET; omitted, the server answers the API only.
+  webRoot?: string;
 }
 
 export interface Server {
   app: Router;
   db: Db;
   auth: AuthService;
+  nodes: NodesService;
   close(): Promise<void>;
 }
 
@@ -44,7 +47,8 @@ export async function buildServer(options: ServerOptions): Promise<Server> {
   key.fill(0);
 
   const port = config.server.port === 443 ? '' : `:${config.server.port}`;
-  const setupUrl = `https://${config.server.hosts[0] ?? 'localhost'}${port}/setup`;
+  const scheme = config.tls.mode === 'off' ? 'http' : 'https';
+  const setupUrl = `${scheme}://${config.server.hosts[0] ?? 'localhost'}${port}/setup`;
   const auth = await AuthService.create({
     db,
     vault,
@@ -63,8 +67,15 @@ export async function buildServer(options: ServerOptions): Promise<Server> {
     ...(options.now ? { now: options.now } : {}),
   });
   const spend = new SpendService({ db, nodes, logger, ...(options.now ? { now: options.now } : {}) });
-  const app = createApp({ auth, nodes, spend, logger, hosts: config.server.hosts });
+  const app = createApp({
+    auth,
+    nodes,
+    spend,
+    logger,
+    hosts: config.server.hosts,
+    ...(options.webRoot ? { webRoot: options.webRoot } : {}),
+  });
   logger.info('vault opened', { keyId: vault.keyId, initialised: vault.initialised });
   await auth.issueSetupToken();
-  return { app, db, auth, close: () => db.destroy() };
+  return { app, db, auth, nodes, close: () => db.destroy() };
 }

@@ -1,0 +1,18 @@
+{
+  "dashboard.title": "Dashboard",
+  "dashboard.lightning": "Lightning",
+  "dashboard.spendable": "Spendable",
+  "dashboard.receivable": "Receivable",
+  "dashboard.local": "Local balance",
+  "dashboard.onchain": "On-chain",
+  "dashboard.confirmed": "Confirmed",
+  "dashboard.unconfirmed": "Unconfirmed",
+  "dashboard.node": "Node",
+  "dashboard.alias": "Alias",
+  "dashboard.pubkey": "Public key",
+  "dashboard.height": "Block height",
+  "dashboard.channels.one": "{count} active channel",
+  "dashboard.channels.other": "{count} active channels",
+  "dashboard.peers.one": "{count} peer",
+  "dashboard.peers.other": "{count} peers"
+}

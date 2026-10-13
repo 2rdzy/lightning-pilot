@@ -1,3 +1,3 @@
-// @lightning-pilot/ui: Design system: tokens and React components.
-// Filled in by the work packages of the build plan; empty in WP00.
-export {};
+// @lightning-pilot/ui: design system. Tokens in WP02 (tokens.ts, and tokens.css for the stylesheet); components come
+// with WP15.
+export * from './tokens.ts';

@@ -1,12 +1,15 @@
 // The HTTP app. Every request passes, in order: Host allowlist (421) → Origin check on unsafe methods → body limit →
 // security headers → the route's declared permission (with the CSRF token for live sessions) → validation.
-// Errors always have one format: { error: { code, message, details?, requestId } }.
+// Errors always have one format: { error: { code, message, details?, requestId } }. With a web root, GET requests
+// outside /api are answered with the web app's files (and its index.html for app routes, which use history routing).
 import { randomBytes } from 'node:crypto';
+import { join } from 'node:path';
+import { serveStatic } from '@hono/node-server/serve-static';
 import { createRoute, OpenAPIHono } from '@hono/zod-openapi';
 import { bodyLimit } from 'hono/body-limit';
 import { HTTPException } from 'hono/http-exception';
 import { secureHeaders } from 'hono/secure-headers';
-import type { Context } from 'hono';
+import type { Context, MiddlewareHandler } from 'hono';
 import { AdapterError, AppError, ERROR_STATUS, HealthResponse, type ErrorCode } from '@lightning-pilot/core';
 import type { Logger } from '../logging/logger.ts';
 import { nodeDetail } from '../logging/redact.ts';
@@ -24,6 +27,8 @@ export interface AppDeps {
   // Host allowlist (server.hosts).
   hosts: readonly string[];
   bodyLimitBytes?: number;
+  // Directory of the built web app (apps/web/dist); without it the server answers the API only.
+  webRoot?: string;
 }
 
 const UNSAFE = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
@@ -133,6 +138,8 @@ export function createApp(deps: AppDeps): Router {
     if (c.req.path.startsWith('/api/')) c.header('Cache-Control', 'no-store');
   });
 
+  if (deps.webRoot) app.use(webApp(deps.webRoot));
+
   app.onError((err, c) => {
     const requestId = c.get('requestId');
     if (err instanceof AppError) {
@@ -180,6 +187,30 @@ export function createApp(deps: AppDeps): Router {
   nodesRoutes(app, guard, deps.nodes);
   spendRoutes(app, guard, deps.spend);
   return app;
+}
+
+// The built web app. Files under /assets have content hashes in their names and are cached for good; index.html
+// is revalidated so a new release is picked up. A path without a file extension is an app route (history routing):
+// it gets index.html and the router in the browser shows the screen or its "not found". Unknown files and every
+// /api path fall through to the JSON 404.
+function webApp(root: string): MiddlewareHandler<AppEnv> {
+  const files = serveStatic<AppEnv>({ root });
+  const appRoute = serveStatic<AppEnv>({ path: join(root, 'index.html') });
+  return async (c, next) => {
+    const path = c.req.path;
+    if ((c.req.method !== 'GET' && c.req.method !== 'HEAD') || path.startsWith('/api/') || path === '/healthz') {
+      return next();
+    }
+    const last = path.slice(path.lastIndexOf('/') + 1);
+    const res = await (last.includes('.') ? files : appRoute)(c, next);
+    if (res instanceof Response && res.ok) {
+      res.headers.set(
+        'Cache-Control',
+        path.startsWith('/assets/') ? 'public, max-age=31536000, immutable' : 'no-cache',
+      );
+    }
+    return res;
+  };
 }
 
 export function openApiDocument(app: Router) {
