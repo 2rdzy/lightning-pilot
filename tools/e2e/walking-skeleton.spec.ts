@@ -49,7 +49,10 @@ test('setup, login, receive, pay and log out in the browser', async ({ page }, t
   await page.getByRole('button', { name: 'Create owner' }).click();
 
   // Login; a wrong password first shows the translated error.
+  // The URL changes before the new screen replaces the old one; wait for the login screen itself (the setup screen
+  // also has a "Password" field).
   await expect(page).toHaveURL(/\/login$/);
+  await expect(page.getByRole('heading', { name: 'Log in' })).toBeVisible();
   await page.getByLabel('Password').fill('Wrong-password-1!');
   await page.getByRole('button', { name: 'Log in' }).click();
   await expect(page.getByText('The password is not correct.')).toBeVisible();
@@ -105,6 +108,7 @@ test('setup, login, receive, pay and log out in the browser', async ({ page }, t
   await expect(page).toHaveURL(/\/login$/);
   await page.goto(`${aliceUrl}/receive`);
   await expect(page).toHaveURL(/\/login\?next=/);
+  await expect(page.getByRole('heading', { name: 'Log in' })).toBeVisible();
   await page.getByLabel('Password').fill(PASSWORD);
   await page.getByRole('button', { name: 'Log in' }).click();
   await expect(page).toHaveURL(new RegExp(`${aliceUrl}/receive$`));
@@ -115,6 +119,7 @@ test('setup, login, receive, pay and log out in the browser', async ({ page }, t
   await expect(page).toHaveURL(/\/login$/);
   await page.goto(`${aliceUrl}/pay?request=${bolt11}`);
   await expect(page).toHaveURL(/\/login\?next=/);
+  await expect(page.getByRole('heading', { name: 'Log in' })).toBeVisible();
   const entries = await historyLength(page);
   await page.getByLabel('Password').fill(PASSWORD);
   await page.getByRole('button', { name: 'Log in' }).click();
