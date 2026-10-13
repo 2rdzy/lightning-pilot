@@ -15,6 +15,7 @@ import type { Context, MiddlewareHandler } from 'hono';
 import { AdapterError, AppError, ERROR_STATUS, HealthResponse, type ErrorCode } from '@lightning-pilot/core';
 import type { Logger } from '../logging/logger.ts';
 import { nodeDetail } from '../logging/redact.ts';
+import { setupRoutes, type SetupService } from '../modules/setup/index.ts';
 import { authRoutes, createGuard, type AuthService } from '../modules/auth/index.ts';
 import { nodesRoutes, type NodesService } from '../modules/nodes/index.ts';
 import { spendRoutes, type SpendService } from '../modules/spend/index.ts';
@@ -22,6 +23,7 @@ import type { AppEnv, Router } from './context.ts';
 import { declare } from './declare.ts';
 
 export interface AppDeps {
+  setup: SetupService;
   auth: AuthService;
   nodes: NodesService;
   spend: SpendService;
@@ -158,6 +160,13 @@ export function createApp(deps: AppDeps): Router {
   app.onError((err, c) => {
     const requestId = c.get('requestId');
     if (err instanceof AppError) {
+      if (
+        err.code === 'too_early' &&
+        typeof err.details === 'object' &&
+        err.details !== null &&
+        'retryAfter' in err.details
+      )
+        c.header('Retry-After', String(err.details.retryAfter));
       if (err.status >= 500) log.error('request failed', { requestId, code: err.code });
       return errorResponse(c, err.code, err.message, err.details);
     }
@@ -199,6 +208,7 @@ export function createApp(deps: AppDeps): Router {
     (c) => c.json(HealthResponse.parse({ status: 'ok' }), 200),
   );
   authRoutes(app, guard, deps.auth);
+  setupRoutes(app, guard, deps.setup);
   nodesRoutes(app, guard, deps.nodes);
   spendRoutes(app, guard, deps.spend);
   return app;

@@ -30,6 +30,8 @@ export interface CallOptions<N extends EndpointName> {
   body?: BodyOf<(typeof ENDPOINTS)[N]>;
   idempotencyKey?: string;
   signal?: AbortSignal;
+  // Browser-bound setup has its own CSRF token; it does not create an authenticated app session.
+  setupCsrfToken?: string;
 }
 
 export interface ApiClientOptions {
@@ -58,6 +60,7 @@ export function newIdempotencyKey(): string {
 
 export class ApiClient {
   #csrfToken: string | undefined;
+  #recoveryRequired = false;
   // Counts session changes (logout, login): a 401 ends the session only if it answers a request sent under it.
   #generation = 0;
   readonly #fetch: typeof fetch;
@@ -72,7 +75,12 @@ export class ApiClient {
     return this.#csrfToken !== undefined;
   }
 
-  setCsrfToken(token: string | undefined): void {
+  get requiresRecovery(): boolean {
+    return this.#recoveryRequired;
+  }
+
+  setCsrfToken(token: string | undefined, recoveryRequired = false): void {
+    this.#recoveryRequired = token !== undefined && recoveryRequired;
     if (token !== this.#csrfToken) this.#generation++;
     this.#csrfToken = token;
   }
@@ -88,7 +96,8 @@ export class ApiClient {
       body = JSON.stringify(endpoint.body.parse(options.body));
       headers['content-type'] = 'application/json';
     }
-    if (endpoint.method !== 'GET' && this.#csrfToken) headers['x-csrf-token'] = this.#csrfToken;
+    if (endpoint.method !== 'GET' && (options.setupCsrfToken ?? this.#csrfToken))
+      headers['x-csrf-token'] = options.setupCsrfToken ?? this.#csrfToken ?? '';
     if (endpoint.idempotent) {
       if (!options.idempotencyKey) throw new Error(`${name} needs an idempotency key`);
       headers['idempotency-key'] = options.idempotencyKey;

@@ -1,10 +1,33 @@
 // Table types for Kysely, matching the SQL migrations in ./migrations.
 
+import type { Generated } from 'kysely';
+
 export interface DB {
+  auth_totp: { id: number; key_id: string; nonce: Uint8Array; ciphertext: Uint8Array; last_counter: string };
+  recovery_codes: { code_hash: string; used_at: string | null };
+  known_devices: { id_hash: string; created_at: string; last_seen_at: string; expires_at: string };
+  spend_limits: {
+    chain: string;
+    pubkey: string;
+    max_per_payment_sat: string | null;
+    max_24h_sat: string | null;
+    step_up_above_sat: string | null;
+    max_fee_rate: string;
+    max_fee_share_percent: number;
+    max_routing_fee_share_percent: number;
+    routing_fee_allowance_sat: string;
+  };
   settings: { key: string; value: string };
   owner: { id: number; password_hash: string; created_at: string };
   setup_token: { id: number; token_hash: string; expires_at: string };
-  sessions: { id_hash: string; handle: string; created_at: string; last_seen_at: string; expires_at: string };
+  sessions: {
+    recovery_required: Generated<number>;
+    id_hash: string;
+    handle: string;
+    created_at: string;
+    last_seen_at: string;
+    expires_at: string;
+  };
   nodes: {
     id: string;
     name: string;

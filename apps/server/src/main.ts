@@ -1,6 +1,7 @@
 // Entry point: lightning-pilot [--config <path>] [--dev]. Any configuration or vault problem stops start-up with a
 // clear message and a non-zero exit code.
-import { existsSync } from 'node:fs';
+import { existsSync, mkdirSync } from 'node:fs';
+import { acquireServiceLock, requireDataOwner, resetAuth } from './modules/setup/reset.ts';
 import { fileURLToPath } from 'node:url';
 import { ConfigError, loadConfig } from './config/config.ts';
 import { listen } from './http/listen.ts';
@@ -9,7 +10,17 @@ import { VaultError } from './modules/vault/index.ts';
 import { buildServer } from './server.ts';
 
 async function main(): Promise<void> {
-  const { config, vaultKeyPath, dev } = loadConfig({ argv: process.argv.slice(2), env: process.env });
+  const argv = process.argv.slice(2);
+  const reset = argv[0] === 'reset-auth';
+  const tokenOnly = argv[0] === 'setup-token';
+  const { config, vaultKeyPath, dev } = loadConfig({
+    argv: reset || tokenOnly ? argv.slice(1) : argv,
+    env: process.env,
+  });
+  if (reset || tokenOnly) requireDataOwner(config.paths.dataDir);
+  mkdirSync(config.paths.dataDir, { recursive: true, mode: 0o700 });
+  const release = acquireServiceLock(config.paths.dataDir);
+  process.once('exit', release);
   const logger = createLogger({ level: config.log.level, modules: config.log.modules });
   // The effective configuration holds no secrets, so it is logged as a whole.
   logger.info('starting', { config, dev });
@@ -21,9 +32,26 @@ async function main(): Promise<void> {
     vaultKeyPath,
     dev,
     logger,
+    issueSetupToken: !(reset || tokenOnly),
     ...(existsSync(webRoot) ? { webRoot } : {}),
   });
 
+  if (tokenOnly) {
+    if (!server.auth.setupMode) {
+      await server.close();
+      throw new Error('Setup has already been completed.');
+    }
+    await server.auth.issueSetupToken();
+    await server.close();
+    return;
+  }
+  if (reset) {
+    await resetAuth(server.db, logger);
+    server.setup.close();
+    await server.auth.resetState();
+    await server.close();
+    return;
+  }
   const listener = listen(server.app, config, logger);
   // Chain identity of every node now, then on every new block (identity monitor).
   server.nodes.monitor.start();

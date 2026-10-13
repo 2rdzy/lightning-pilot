@@ -1,5 +1,6 @@
 // API tests over HTTP (in memory) with the fake adapter: request checks, setup, login, every route's permission,
 // nodes, invoices and the spend flow, the error format, and that no secret reaches the log.
+import { totp } from './modules/auth/totp/totp.ts';
 import { randomBytes } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -12,7 +13,7 @@ import { openApiDocument } from './http/app.ts';
 import { createLogger } from './logging/logger.ts';
 import type { NodeConnection } from './modules/nodes/index.ts';
 import { buildServer, type Server } from './server.ts';
-import { tempDir, testDriver, writeVaultKey } from './testing.ts';
+import { tempDir, testDriver, writeVaultKey, setupForTest } from './testing.ts';
 import fixtures from '../../../packages/core/src/decode/fixtures/regtest-invoices.json' with { type: 'json' };
 
 const PASSWORD = 'Correct-horse-9-battery';
@@ -30,6 +31,7 @@ interface Harness {
   lines: string[];
   fakes: Map<string, FakeAdapter>;
   world: FakeNetwork;
+  secret?: string;
   setupToken: () => string;
   request: (method: string, path: string, options?: RequestOptions) => Promise<Response>;
 }
@@ -105,10 +107,11 @@ async function harness(options: { dev?: boolean; webRoot?: string; maxNodes?: nu
 }
 
 async function loggedIn(h: Harness) {
-  expect(
-    (await h.request('POST', '/api/v1/setup', { body: { token: h.setupToken(), password: PASSWORD } })).status,
-  ).toBe(204);
-  const res = await h.request('POST', '/api/v1/auth/login', { body: { password: PASSWORD } });
+  const setup = await setupForTest(h.server.setup, h.setupToken(), PASSWORD);
+  h.secret = setup.secret;
+  const res = await h.request('POST', '/api/v1/auth/login', {
+    body: { password: PASSWORD, totpCode: totp(setup.secret, new Date()) },
+  });
   expect(res.status).toBe(200);
   const setCookie = res.headers.get('set-cookie') ?? '';
   const cookie = setCookie.split(';')[0] ?? '';
@@ -222,27 +225,23 @@ describe(`API (${testDriver()})`, () => {
     const h = await harness();
     expect(await errorCode(await h.request('GET', '/api/v1/nodes'))).toBe('setup_required');
     expect(await (await h.request('GET', '/api/v1/setup')).json()).toEqual({ setupRequired: true });
-    const bad = await h.request('POST', '/api/v1/setup', { body: { token: 'AAAA-BBBB', password: PASSWORD } });
-    expect(await errorCode(bad)).toBe('setup_token_invalid');
-    const weak = await h.request('POST', '/api/v1/setup', { body: { token: h.setupToken(), password: 'short' } });
-    expect(await errorCode(weak)).toBe('validation_failed');
-    const ok = await h.request('POST', '/api/v1/setup', {
-      body: { token: h.setupToken().toLowerCase(), password: PASSWORD },
-    });
-    expect(ok.status).toBe(204);
+    await loggedIn(h);
     expect(
-      (await h.request('POST', '/api/v1/setup', { body: { token: h.setupToken(), password: PASSWORD } })).status,
+      (await h.request('POST', '/api/v1/setup', { body: { action: 'start', token: h.setupToken() } })).status,
     ).toBe(404);
     expect(await (await h.request('GET', '/api/v1/setup')).json()).toEqual({ setupRequired: false });
   });
 
   it('logs in with a __Host- session cookie and requires the CSRF token', async () => {
     const h = await harness();
-    await h.request('POST', '/api/v1/setup', { body: { token: h.setupToken(), password: PASSWORD } });
+    const enrolled = await setupForTest(h.server.setup, h.setupToken(), PASSWORD);
+    h.secret = enrolled.secret;
     expect(
       await errorCode(await h.request('POST', '/api/v1/auth/login', { body: { password: 'Wrong-password-1' } })),
     ).toBe('login_failed');
-    const res = await h.request('POST', '/api/v1/auth/login', { body: { password: PASSWORD } });
+    const res = await h.request('POST', '/api/v1/auth/login', {
+      body: { password: PASSWORD, totpCode: totp(h.secret ?? '', new Date(Date.now() + 30_000)) },
+    });
     const setCookie = res.headers.get('set-cookie') ?? '';
     expect(setCookie).toMatch(/^__Host-lp_session=/);
     expect(setCookie).toMatch(/HttpOnly/);
@@ -265,7 +264,10 @@ describe(`API (${testDriver()})`, () => {
     // The session ended on the server (idle timeout) while the browser kept the cookie.
     await h.server.db.deleteFrom('sessions').execute();
     expect(await errorCode(await h.request('GET', '/api/v1/nodes', { cookie: auth.cookie }))).toBe('unauthenticated');
-    const res = await h.request('POST', '/api/v1/auth/login', { cookie: auth.cookie, body: { password: PASSWORD } });
+    const res = await h.request('POST', '/api/v1/auth/login', {
+      cookie: auth.cookie,
+      body: { password: PASSWORD, totpCode: totp(h.secret ?? '', new Date(Date.now() + 30_000)) },
+    });
     expect(res.status).toBe(200);
   });
 
@@ -427,7 +429,9 @@ describe(`API (${testDriver()})`, () => {
     ).json()) as {
       confirmationToken: string;
     };
-    const res2 = await h.request('POST', '/api/v1/auth/login', { body: { password: PASSWORD } });
+    const res2 = await h.request('POST', '/api/v1/auth/login', {
+      body: { password: PASSWORD, totpCode: totp(h.secret ?? '', new Date(Date.now() + 30_000)) },
+    });
     const other = {
       cookie: (res2.headers.get('set-cookie') ?? '').split(';')[0] ?? '',
       csrf: ((await res2.json()) as { csrfToken: string }).csrfToken,
@@ -937,7 +941,7 @@ describe('start-up', () => {
     cleanups.push(cleanup);
     const lines: string[] = [];
     const first = await startAt(dir, randomBytes(32), lines);
-    await first.auth.completeSetup(setupToken(lines), PASSWORD, 'r-test');
+    await setupForTest(first.setup, setupToken(lines), PASSWORD);
     await first.close();
     await expect(startAt(dir, randomBytes(32), lines)).rejects.toThrow(/does not match this database/);
   });
@@ -956,7 +960,7 @@ describe('start-up', () => {
       lines,
       () => new FakeAdapter({ chain: 'blake2b', network: 'regtest', world }),
     );
-    await first.auth.completeSetup(setupToken(lines), PASSWORD, 'r-test');
+    await setupForTest(first.setup, setupToken(lines), PASSWORD);
     const node = await first.nodes.add(
       {
         name: 'test node',

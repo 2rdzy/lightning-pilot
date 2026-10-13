@@ -13,7 +13,10 @@ import {
   PaymentPreviewResponse,
   PaymentResultResponse,
   SessionResponse,
-  SetupRequest,
+  SetupAction,
+  SetupProgress,
+  RecoveryEnrollment,
+  RecoveryConfirm,
   SetupStatusResponse,
 } from '@lightning-pilot/core';
 import type { z } from 'zod';
@@ -33,6 +36,20 @@ export interface Endpoint<Body extends z.ZodType | undefined, Response extends z
 const endpoint = <B extends z.ZodType | undefined, R extends z.ZodType | undefined>(e: Endpoint<B, R>) => e;
 
 export const ENDPOINTS = {
+  recoveryEnrol: endpoint({
+    method: 'POST',
+    path: '/api/v1/auth/totp/enrol',
+    status: 200,
+    body: undefined,
+    response: RecoveryEnrollment,
+  }),
+  recoveryConfirm: endpoint({
+    method: 'POST',
+    path: '/api/v1/auth/totp/confirm',
+    status: 204,
+    body: RecoveryConfirm,
+    response: undefined,
+  }),
   setupStatus: endpoint({
     method: 'GET',
     path: '/api/v1/setup',
@@ -40,7 +57,7 @@ export const ENDPOINTS = {
     body: undefined,
     response: SetupStatusResponse,
   }),
-  setup: endpoint({ method: 'POST', path: '/api/v1/setup', status: 204, body: SetupRequest, response: undefined }),
+  setup: endpoint({ method: 'POST', path: '/api/v1/setup', status: 200, body: SetupAction, response: SetupProgress }),
   login: endpoint({
     method: 'POST',
     path: '/api/v1/auth/login',

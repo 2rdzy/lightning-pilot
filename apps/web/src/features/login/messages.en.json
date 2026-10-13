@@ -2,5 +2,14 @@
   "login.title": "Log in",
   "login.password": "Password",
   "login.required": "Enter the password.",
-  "login.submit": "Log in"
+  "login.submit": "Log in",
+  "login.totpCode": "Authenticator code",
+  "login.useRecovery": "Use a recovery code instead",
+  "login.recoveryCode": "Recovery code",
+  "login.recoverTitle": "Enrol a new authenticator",
+  "login.recoverNote": "Your recovery code has been used. Verify a new authenticator before using the application. Other sessions will be ended.",
+  "login.enrol": "Create a new authenticator",
+  "login.verify": "Verify authenticator",
+  "login.secret": "Authenticator secret",
+  "login.restartEnrol": "Restart authenticator enrolment"
 }
