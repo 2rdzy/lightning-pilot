@@ -109,6 +109,28 @@ describe('API client', () => {
     expect(onUnauthenticated).toHaveBeenCalledOnce();
   });
 
+  it('ignores a 401 for a request sent under an earlier session', async () => {
+    let answer: (res: Response) => void = () => {};
+    const { api, onUnauthenticated } = client(() => new Promise<Response>((resolve) => (answer = resolve)));
+    api.setCsrfToken('csrf-old');
+    const stale = api.call('nodes');
+    // Logged out and in again while the request was on its way.
+    api.setCsrfToken(undefined);
+    api.setCsrfToken('csrf-new');
+    answer(json(401, { error: { code: 'unauthenticated', message: 'Please log in.', requestId: 'r-3' } }));
+    await expect(stale).rejects.toMatchObject({ code: 'unauthenticated' });
+    expect(api.hasSession).toBe(true);
+    expect(onUnauthenticated).not.toHaveBeenCalled();
+    // The same token set again (the probe after a reload) is the same session: its 401 still ends it.
+    api.setCsrfToken('csrf-new');
+    const current = api.call('nodes');
+    api.setCsrfToken('csrf-new');
+    answer(json(401, { error: { code: 'unauthenticated', message: 'Please log in.', requestId: 'r-4' } }));
+    await expect(current).rejects.toMatchObject({ code: 'unauthenticated' });
+    expect(api.hasSession).toBe(false);
+    expect(onUnauthenticated).toHaveBeenCalledOnce();
+  });
+
   it('reports unusable replies and network failures with their own codes', async () => {
     await expect(client(() => json(200, { setupRequired: 'yes' })).api.call('setupStatus')).rejects.toMatchObject({
       code: 'bad_response',

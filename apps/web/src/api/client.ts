@@ -58,6 +58,8 @@ export function newIdempotencyKey(): string {
 
 export class ApiClient {
   #csrfToken: string | undefined;
+  // Counts session changes (logout, login): a 401 ends the session only if it answers a request sent under it.
+  #generation = 0;
   readonly #fetch: typeof fetch;
   readonly #onUnauthenticated: (() => void) | undefined;
 
@@ -71,6 +73,7 @@ export class ApiClient {
   }
 
   setCsrfToken(token: string | undefined): void {
+    if (token !== this.#csrfToken) this.#generation++;
     this.#csrfToken = token;
   }
 
@@ -91,6 +94,7 @@ export class ApiClient {
       headers['idempotency-key'] = options.idempotencyKey;
     }
 
+    const generation = this.#generation;
     let res: Response;
     try {
       res = await this.#fetch(buildPath(endpoint.path, options.params), {
@@ -105,7 +109,7 @@ export class ApiClient {
       throw new ApiError('network', 'The server could not be reached.', 0);
     }
 
-    if (res.status !== endpoint.status) throw await this.#error(res);
+    if (res.status !== endpoint.status) throw await this.#error(res, generation);
     if (!endpoint.response) return undefined as ResponseOf<(typeof ENDPOINTS)[N]>;
     const parsed = endpoint.response.safeParse(await res.json().catch(() => undefined));
     if (!parsed.success)
@@ -113,15 +117,16 @@ export class ApiClient {
     return parsed.data as ResponseOf<(typeof ENDPOINTS)[N]>;
   }
 
-  async #error(res: Response): Promise<ApiError> {
+  async #error(res: Response, generation: number): Promise<ApiError> {
     const parsed = ErrorBody.safeParse(await res.json().catch(() => undefined));
     if (!parsed.success) {
       return new ApiError('bad_response', 'The server sent a reply that could not be used.', res.status);
     }
     const { code, message, requestId, details } = parsed.data.error;
     // Only a session that existed can end: the probe after a reload (GET /auth/session without a token) answers
-    // 401 too, and must not send the app to the login screen in a loop.
-    if (code === 'unauthenticated' && this.#csrfToken !== undefined) {
+    // 401 too, and must not send the app to the login screen in a loop. A late answer to a request of an earlier
+    // session must not end the current one.
+    if (code === 'unauthenticated' && this.#csrfToken !== undefined && generation === this.#generation) {
       this.#csrfToken = undefined;
       this.#onUnauthenticated?.();
     }
