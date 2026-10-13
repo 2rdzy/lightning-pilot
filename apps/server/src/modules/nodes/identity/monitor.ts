@@ -96,6 +96,9 @@ export class IdentityMonitor {
   readonly #unreachable = new Set<string>();
   // One full check per node at a time: callers that ask while one runs share its result.
   readonly #running = new Map<string, Promise<ChainIdentityState>>();
+  // Per node, full checks and spend admissions (admit) run one after the other, so each admission sees the outcome
+  // of every check that started before it, and a check that starts later finds the spend already admitted.
+  readonly #turns = new Map<string, Promise<unknown>>();
   #timer: ReturnType<typeof setInterval> | undefined;
   #polling: Promise<void> | undefined;
 
@@ -192,17 +195,38 @@ export class IdentityMonitor {
           : this.#unreachable.has(nodeId)
             ? 'reconnect'
             : changeOf(this.#baselines.get(nodeId), facts);
-    if (!reason) return identityOfRow(row);
-    await this.fullCheck(nodeId, reason);
-    const fresh = await this.#db.selectFrom('nodes').selectAll().where('id', '=', nodeId).executeTakeFirstOrThrow();
-    return identityOfRow(fresh);
+    if (reason) await this.fullCheck(nodeId, reason);
+    // Read after any check that ran meanwhile: the row loaded above may be older than it.
+    return this.#inTurn(nodeId, async () =>
+      identityOfRow(await this.#db.selectFrom('nodes').selectAll().where('id', '=', nodeId).executeTakeFirstOrThrow()),
+    );
+  }
+
+  // Runs a new spend's admission (the transaction that claims it, which checks the stored state again) in the node's
+  // turn: after every full check that started before it, and before any that starts later. Spends admitted before a
+  // refusal are in flight and stay tracked (chain-identity spec §5). No node call may run inside `admit`.
+  admit<T>(nodeId: string, admission: () => Promise<T>): Promise<T> {
+    return this.#inTurn(nodeId, admission);
   }
 
   fullCheck(nodeId: string, reason: CheckReason): Promise<ChainIdentityState> {
     const running = this.#running.get(nodeId);
     if (running) return running;
-    const run = this.#fullCheck(nodeId, reason).finally(() => this.#running.delete(nodeId));
+    const run = this.#inTurn(nodeId, () => this.#fullCheck(nodeId, reason)).finally(() => this.#running.delete(nodeId));
     this.#running.set(nodeId, run);
+    return run;
+  }
+
+  #inTurn<T>(nodeId: string, task: () => Promise<T>): Promise<T> {
+    const run = (this.#turns.get(nodeId) ?? Promise.resolve()).then(task);
+    const done = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    this.#turns.set(nodeId, done);
+    void done.then(() => {
+      if (this.#turns.get(nodeId) === done) this.#turns.delete(nodeId);
+    });
     return run;
   }
 

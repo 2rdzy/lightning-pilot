@@ -50,6 +50,12 @@ function blockedBy(state: string): AppError {
     : new AppError('spend_unknown', 'An earlier payment of this invoice has no known outcome yet.');
 }
 
+// No new spend unless the node's chain identity is confirmed (chain-identity spec §5).
+function refuseUnlessConfirmed(identity: ChainIdentityState): void {
+  if (identity.state === 'waiting') throw new AppError('chain_waiting', 'The node is not ready on its chain yet.');
+  if (identity.state !== 'confirmed') throw new AppError('chain_refused', 'The node failed the chain identity check.');
+}
+
 const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
 
 interface PreviewPayload {
@@ -104,9 +110,7 @@ export class SpendService {
     // A cheap getinfo against the last full identity check; a full check runs first if the node changed (new
     // block, new version, another public key, back from unreachable).
     const identity = await this.#nodes.monitor.ensureFresh(nodeId);
-    if (identity.state === 'waiting') throw new AppError('chain_waiting', 'The node is not ready on its chain yet.');
-    if (identity.state !== 'confirmed')
-      throw new AppError('chain_refused', 'The node failed the chain identity check.');
+    refuseUnlessConfirmed(identity);
 
     let decoded;
     try {
@@ -202,14 +206,9 @@ export class SpendService {
       .where('idempotency_key', '=', idempotencyKey)
       .executeTakeFirst();
     // No new spend on a node whose chain identity is not confirmed (chain-identity spec §5): the identity monitor may
-    // have refused it since the preview. A retry with a known key only returns the first result, so it goes on.
-    if (!retried) {
-      const identity = this.#nodes.identity(row);
-      if (identity.state === 'waiting') throw new AppError('chain_waiting', 'The node is not ready on its chain yet.');
-      if (identity.state !== 'confirmed') {
-        throw new AppError('chain_refused', 'The node failed the chain identity check.');
-      }
-    }
+    // have refused it since the preview. A retry with a known key only returns the first result, so it goes on. This
+    // early check only avoids node calls for a refused node; the claim below checks the state again.
+    if (!retried) refuseUnlessConfirmed(this.#nodes.identity(row));
     if (pending && !retried) {
       const { paymentHash } = JSON.parse(pending.payload) as PreviewPayload;
       await this.#guardInvoice(nodeId, adapter, parsePaymentHash(paymentHash), requestId);
@@ -217,7 +216,9 @@ export class SpendService {
 
     const now = this.#now();
 
-    const claimed = await writeTx(this.#db, async (trx) => {
+    // The claim is the admission point: it runs in the node's identity turn, so it sees every refusal stored before
+    // it (see IdentityMonitor.admit).
+    const claim = async (trx: Db) => {
       const confirmation = await trx
         .selectFrom('spend_confirmations')
         .selectAll()
@@ -236,6 +237,9 @@ export class SpendService {
         if (!same) throw new AppError('idempotency_conflict', 'This idempotency key was used for another request.');
         return { replay: existing } as const;
       }
+
+      const node = await trx.selectFrom('nodes').selectAll().where('id', '=', nodeId).executeTakeFirstOrThrow();
+      refuseUnlessConfirmed(this.#nodes.identity(node));
 
       const valid =
         confirmation !== undefined &&
@@ -284,7 +288,8 @@ export class SpendService {
         })
         .execute();
       return { intentId, payload } as const;
-    });
+    };
+    const claimed = await this.#nodes.monitor.admit(nodeId, () => writeTx(this.#db, claim));
 
     if ('replay' in claimed) {
       const intent = claimed.replay;
