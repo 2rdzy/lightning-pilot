@@ -83,6 +83,7 @@ export async function buildServer(options: ServerOptions): Promise<Server> {
   const close = async () => {
     await nodes.monitor.stop();
     await db.destroy();
+    vault.close();
   };
   return { app, db, auth, nodes, close };
 }

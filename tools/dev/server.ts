@@ -9,13 +9,14 @@
 // --nodes regtest: cln-a and cln-b of the tools/regtest environment of LP_REGTEST_CHAIN (blake2b | sha256d), added as
 //   alice and bob with the same restricted runes a real installation uses. Start the environment first.
 // --web: serve a built web app (apps/web/dist) as the release does; without it, use the Vite dev server's proxy.
-// --data: keep the database there; by default a new temporary directory is used and removed on exit.
+// --data: keep the database and its vault key there; by default a new temporary directory is used and removed on
+//   exit. The fake nodes' state is in memory and starts afresh on every run.
 //
 // The setup token is printed in the log as in production; the nodes are added as soon as setup has created the
 // owner (the vault holding their credentials is initialised then). Configuration comes from the flags only: no LP_*
 // variable of the environment is read (the config loader refuses unknown ones, and the regtest script uses some).
 import { randomBytes } from 'node:crypto';
-import { mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -42,7 +43,9 @@ const port = Number(values.port);
 
 const temporary = values.data === undefined;
 const dataDir = values.data ? resolve(values.data) : mkdtempSync(join(tmpdir(), 'lp-dev-'));
-const vaultKey = writeVaultKey(dataDir, randomBytes(32));
+// A key already in --data belongs to its database: reuse it, never replace it.
+const existingKey = join(dataDir, 'vault-key');
+const vaultKey = existsSync(existingKey) ? existingKey : writeVaultKey(dataDir, randomBytes(32));
 const { config } = loadConfig({
   env: {},
   readFile: () =>

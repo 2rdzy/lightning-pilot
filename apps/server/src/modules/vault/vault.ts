@@ -57,9 +57,11 @@ export class Vault {
   readonly keyId: string;
   #key: Buffer;
   #initialised: boolean;
+  #closed = false;
 
+  // The vault keeps its own copy of the key: the caller wipes the buffer it read from the file once start() returns.
   private constructor(key: Buffer, initialised: boolean) {
-    this.#key = key;
+    this.#key = Buffer.from(key);
     this.keyId = keyIdOf(key);
     this.#initialised = initialised;
   }
@@ -95,6 +97,7 @@ export class Vault {
   // Called once, inside the transaction that completes setup. If that transaction rolls back, the caller calls
   // reload() so the in-memory state follows the database again.
   async initialise(trx: Db): Promise<void> {
+    this.#open();
     if ((await setting(trx, 'vault_key_id')) !== undefined) {
       throw new VaultError('vault already initialised');
     }
@@ -114,6 +117,7 @@ export class Vault {
   }
 
   async put(trx: Db, nodeId: string, kind: CredentialKind, secret: string): Promise<void> {
+    this.#open();
     if (!this.#initialised) throw new VaultError('vault not initialised');
     const { nonce, ciphertext } = seal(this.#key, Buffer.from(secret, 'utf8'), `${this.keyId}|${nodeId}|${kind}`);
     await trx
@@ -124,6 +128,7 @@ export class Vault {
   }
 
   async get(db: Db, nodeId: string, kind: CredentialKind): Promise<string | undefined> {
+    this.#open();
     const row = await db
       .selectFrom('credentials')
       .select(['key_id', 'nonce', 'ciphertext'])
@@ -133,5 +138,15 @@ export class Vault {
     if (!row) return undefined;
     if (row.key_id !== this.keyId) throw new VaultError('credential encrypted under another key');
     return open(this.#key, row.nonce, row.ciphertext, `${this.keyId}|${nodeId}|${kind}`).toString('utf8');
+  }
+
+  // Wipes the key; the vault refuses every use afterwards.
+  close(): void {
+    this.#key.fill(0);
+    this.#closed = true;
+  }
+
+  #open(): void {
+    if (this.#closed) throw new VaultError('vault closed');
   }
 }
