@@ -25,6 +25,8 @@ async function main(): Promise<void> {
   });
 
   const listener = listen(server.app, config, logger);
+  // Chain identity of every node now, then on every new block (identity monitor).
+  server.nodes.monitor.start();
   const stop = () => {
     logger.info('stopping');
     void listener

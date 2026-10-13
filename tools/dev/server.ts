@@ -145,6 +145,7 @@ const app = {
 };
 
 const listener = listen(app, config, logger);
+server.nodes.monitor.start();
 logger.info('development server ready', {
   url: `http://localhost:${await listener.port}`,
   nodes: values.nodes,

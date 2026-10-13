@@ -24,6 +24,8 @@ export interface ServerOptions {
   now?: () => Date;
   // Directory of the built web app, served for every non-API GET; omitted, the server answers the API only.
   webRoot?: string;
+  // Chain identity polling interval (ms); tests set it short.
+  identityIntervalMs?: number;
 }
 
 export interface Server {
@@ -65,6 +67,7 @@ export async function buildServer(options: ServerOptions): Promise<Server> {
     maxNodes: config.limits.maxNodes,
     ...(options.adapterFactory ? { adapterFactory: options.adapterFactory } : {}),
     ...(options.now ? { now: options.now } : {}),
+    ...(options.identityIntervalMs === undefined ? {} : { identityIntervalMs: options.identityIntervalMs }),
   });
   const spend = new SpendService({ db, nodes, logger, ...(options.now ? { now: options.now } : {}) });
   const app = createApp({
@@ -77,5 +80,9 @@ export async function buildServer(options: ServerOptions): Promise<Server> {
   });
   logger.info('vault opened', { keyId: vault.keyId, initialised: vault.initialised });
   await auth.issueSetupToken();
-  return { app, db, auth, nodes, close: () => db.destroy() };
+  const close = async () => {
+    await nodes.monitor.stop();
+    await db.destroy();
+  };
+  return { app, db, auth, nodes, close };
 }

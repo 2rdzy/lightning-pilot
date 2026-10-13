@@ -5,7 +5,8 @@ import { defineConfig } from 'vitest/config';
 // the regtest nodes (`*.regtest.test.ts`) run separately: vitest.regtest.config.ts.
 //
 // Coverage gates (repository conventions §7): 95 % of lines and branches for money and the security modules
-// (vault, auth with its sessions, spend, and the payment request decoders, threat T18), 80 % everywhere else. The entry point (main.ts) is left out: it only wires
+// (vault, auth with its sessions, spend), the payment request decoders (threat T18) and the chain identity check
+// (chain profiles, header parsing and the identity monitor, threat T20), 80 % everywhere else. The entry point (main.ts) is left out: it only wires
 // the parts together and is checked by starting it. The web app's React components (*.tsx) are left out too: there
 // is no DOM test environment in the agreed dependencies, so they are covered by the Playwright tests (pnpm test:e2e,
 // CI job e2e) instead; the web app's logic lives in plain .ts modules, which count.
@@ -33,6 +34,8 @@ export default defineConfig({
         branches: 80,
         'packages/core/src/money.ts': GATED,
         'packages/core/src/decode/**': GATED,
+        'packages/chain/src/**': GATED,
+        'apps/server/src/modules/nodes/identity/**': GATED,
         'apps/server/src/modules/vault/**': GATED,
         'apps/server/src/modules/auth/**': GATED,
         'apps/server/src/modules/spend/**': GATED,

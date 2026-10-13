@@ -2,22 +2,21 @@
 // its info and balances. Credentials are encrypted by the vault and never leave the server.
 import { randomUUID } from 'node:crypto';
 import { createClnAdapter } from '@lightning-pilot/adapter-cln';
-import { checkChainIdentity, PROFILES } from '@lightning-pilot/chain';
+import { PROFILES } from '@lightning-pilot/chain';
 import {
   AppError,
   parsePubkey,
   type AddNodeRequest,
   type Chain,
   type ChainIdentityState,
-  type FailedCheck,
   type Network,
   type NodeAdapter,
-  type NodeFacts,
 } from '@lightning-pilot/core';
 import { writeTx, type Db } from '../../storage/db.ts';
 import type { DB } from '../../storage/schema.ts';
 import type { Logger } from '../../logging/logger.ts';
 import type { Vault } from '../vault/index.ts';
+import { IdentityMonitor, identityOfRow, runIdentityCheck, type IdentityListener } from './identity/index.ts';
 
 export type NodeRow = DB['nodes'];
 
@@ -41,6 +40,9 @@ export interface NodesOptions {
   maxNodes: number;
   adapterFactory?: AdapterFactory;
   now?: () => Date;
+  // How often the identity monitor polls each node (ms), and who hears about identity changes.
+  identityIntervalMs?: number;
+  onIdentityUpdate?: IdentityListener;
 }
 
 export interface NodeSummaryData {
@@ -55,14 +57,6 @@ export interface NodeSummaryData {
   createdAt: string;
 }
 
-const identityOf = (row: NodeRow): ChainIdentityState => ({
-  state: row.identity_state as ChainIdentityState['state'],
-  profile: row.chain as Chain,
-  checkedAt: row.identity_checked_at,
-  ...(row.identity_failed_check ? { failedCheck: row.identity_failed_check as FailedCheck } : {}),
-  ...(row.identity_detail ? { detail: row.identity_detail } : {}),
-});
-
 export class NodesService {
   readonly #db: Db;
   readonly #vault: Vault;
@@ -72,6 +66,8 @@ export class NodesService {
   readonly #factory: AdapterFactory;
   readonly #now: () => Date;
   readonly #adapters = new Map<string, NodeAdapter>();
+  // Keeps the stored chain identity current (identity/monitor.ts); started by main.ts, not by buildServer.
+  readonly monitor: IdentityMonitor;
 
   constructor(options: NodesOptions) {
     this.#db = options.db;
@@ -81,34 +77,19 @@ export class NodesService {
     this.#maxNodes = options.maxNodes;
     this.#factory = options.adapterFactory ?? clnAdapterFactory;
     this.#now = options.now ?? (() => new Date());
+    this.monitor = new IdentityMonitor({
+      db: this.#db,
+      logger: options.logger,
+      load: async (id) => this.adapter(id),
+      ...(options.identityIntervalMs === undefined ? {} : { intervalMs: options.identityIntervalMs }),
+      ...(options.onIdentityUpdate ? { onUpdate: options.onIdentityUpdate } : {}),
+      ...(options.now ? { now: options.now } : {}),
+    });
   }
 
-  // Runs the chain identity check against a node: network, software, fork height, tip header, sync. A node that
-  // cannot answer is refused ("cannot tell" is never "probably fine").
-  async checkIdentity(
-    adapter: NodeAdapter,
-    chain: Chain,
-    network: Network,
-  ): Promise<{ facts: NodeFacts | undefined; identity: ChainIdentityState; error: unknown }> {
-    let facts;
-    let tip;
-    try {
-      facts = await adapter.node.getInfo();
-      tip = await adapter.chain.getTipHeader();
-    } catch (err) {
-      return {
-        facts: undefined,
-        identity: {
-          state: 'refused',
-          profile: chain,
-          checkedAt: this.#now().toISOString(),
-          failedCheck: 'unreachable',
-        },
-        error: err,
-      };
-    }
-    const identity = checkChainIdentity({ profile: chain, network, facts, tip, now: this.#now() });
-    return { facts, identity, error: undefined };
+  // Runs the chain identity check against a node (identity/check.ts).
+  checkIdentity(adapter: NodeAdapter, chain: Chain, network: Network) {
+    return runIdentityCheck(adapter, chain, network, this.#now());
   }
 
   async add(input: AddNodeRequest & { serverName: string }, requestId: string): Promise<NodeSummaryData> {
@@ -182,6 +163,7 @@ export class NodesService {
       throw err;
     }
     this.#adapters.set(id, adapter);
+    this.monitor.recordBaseline(id, facts);
     this.#log.info('node added', {
       requestId,
       nodeId: id,
@@ -219,7 +201,7 @@ export class NodesService {
       implementation: row.implementation as 'cln' | 'lnd',
       pubkey: parsePubkey(row.pubkey),
       canSpend: await this.#canSpend(row.id),
-      chainIdentity: identityOf(row),
+      chainIdentity: identityOfRow(row),
       createdAt: row.created_at,
     };
   }
@@ -254,6 +236,6 @@ export class NodesService {
   }
 
   identity(row: NodeRow): ChainIdentityState {
-    return identityOf(row);
+    return identityOfRow(row);
   }
 }

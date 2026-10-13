@@ -3,7 +3,8 @@ import type { Chain, Network } from '@lightning-pilot/core';
 import fixtures from './fixtures/regtest-blocks.json' with { type: 'json' };
 import { HeaderError, parseBlockHeader } from './header.ts';
 import { checkChainIdentity, type IdentityInput } from './identity.ts';
-import { BLAKE2B_ACTIVATION_HEIGHT, hasFeature } from './profile.ts';
+import { readFileSync } from 'node:fs';
+import { BLAKE2B_ACTIVATION_HEIGHT, FORK_VERSIONS, hasFeature, versionTested } from './profile.ts';
 
 const blake2b = fixtures.blake2b;
 const sha256d = fixtures.sha256d;
@@ -43,6 +44,23 @@ describe('parseBlockHeader', () => {
     expect(() => parseBlockHeader(sha256d.block.slice(0, 160) + '00')).toThrow(HeaderError);
     expect(() => parseBlockHeader(sha256d.block.slice(0, 160) + 'fd0100')).toThrow(HeaderError);
     expect(() => parseBlockHeader('zz')).toThrow(HeaderError);
+  });
+});
+
+describe('parseBlockHeader: transaction count', () => {
+  const header = sha256d.block.slice(0, 160);
+  it('reads every width of the count when it is canonical', () => {
+    expect(parseBlockHeader(header + 'fc').txCount).toBe(252n);
+    expect(parseBlockHeader(header + 'fdfd00').txCount).toBe(253n);
+    expect(parseBlockHeader(header + 'fe00000100').txCount).toBe(65_536n);
+    expect(parseBlockHeader(header + 'ff0000000001000000').txCount).toBe(4_294_967_296n);
+  });
+
+  it('refuses truncated and non-canonical counts and blocks too short to have a version', () => {
+    for (const count of ['fd01', 'fe000001', 'ff00000000010000', 'fdfc00', 'feffff0000', 'ffffffffff00000000']) {
+      expect(() => parseBlockHeader(header + count), count).toThrow(HeaderError);
+    }
+    expect(() => parseBlockHeader('0000')).toThrow(HeaderError);
   });
 });
 
@@ -118,10 +136,67 @@ describe('checkChainIdentity', () => {
     });
   });
 
+  it('dates the result with the current time when no time is given', () => {
+    const withoutNow: IdentityInput = { ...input('bitcoin', sha256d) };
+    delete withoutNow.now;
+    const before = Date.now();
+    expect(Date.parse(checkChainIdentity(withoutNow).checkedAt)).toBeGreaterThanOrEqual(before - 1000);
+  });
+
   it('refuses unreadable feature bits', () => {
     expect(checkChainIdentity(input('blake2b', blake2b, { features: 'zz' }))).toMatchObject({
       state: 'refused',
       failedCheck: 'software',
     });
+  });
+
+  it('refuses a stock node whose backend follows the BLAKE2b chain under the Bitcoin profile (header)', () => {
+    const wrongBackend = { ...input('bitcoin', sha256d), tip: { height: blake2b.height, raw: blake2b.block } };
+    expect(checkChainIdentity(wrongBackend)).toMatchObject({ state: 'refused', failedCheck: 'header' });
+  });
+
+  it('waits on an unsynced backend under the Bitcoin profile too', () => {
+    expect(checkChainIdentity(input('bitcoin', sha256d, { synced: false }))).toMatchObject({
+      state: 'waiting',
+      failedCheck: 'sync',
+    });
+  });
+
+  it('uses the activation height of each network: testnet4 at 150,308', () => {
+    const at = (blockHeight: number) => ({
+      ...input('blake2b', blake2b, { network: 'testnet4', networkRaw: 'testnet4', blockHeight }),
+      network: 'testnet4' as Network,
+    });
+    expect(BLAKE2B_ACTIVATION_HEIGHT).toEqual({ mainnet: 961_640, testnet4: 150_308, signet: null, regtest: 1 });
+    expect(checkChainIdentity(at(150_307))).toMatchObject({ state: 'waiting', failedCheck: 'fork_height' });
+    expect(checkChainIdentity(at(150_308))).toMatchObject({ state: 'confirmed' });
+  });
+
+  it('cleans and shortens the network name the node reports before putting it in the detail', () => {
+    const rlo = String.fromCharCode(0x202e);
+    const odd = input('bitcoin', sha256d, { network: 'unknown', networkRaw: `liq${rlo}uid${'x'.repeat(100)}` });
+    const detail = checkChainIdentity(odd).detail ?? '';
+    expect(detail).not.toContain(rlo);
+    expect(detail.startsWith(`node is on liquid${'x'.repeat(26)}, profile`)).toBe(true);
+  });
+});
+
+describe('fork-version table', () => {
+  it('matches the CLN pins of tools/regtest/versions.json', () => {
+    const pins = JSON.parse(readFileSync(new URL('../../../tools/regtest/versions.json', import.meta.url), 'utf8')) as {
+      blake2b: { cln: { version: string } };
+      sha256d: { cln: { version: string } };
+    };
+    expect(FORK_VERSIONS.blake2b.cln).toBe(pins.blake2b.cln.version);
+    expect(FORK_VERSIONS.bitcoin.cln).toBe(pins.sha256d.cln.version);
+  });
+
+  it('tells tested versions from others, reading only the first word of LND versions', () => {
+    expect(versionTested('blake2b', 'cln', 'v26.06.9-blake2b.7')).toBe(true);
+    expect(versionTested('blake2b', 'cln', 'v26.06.9-blake2b.7-2-g67513b1')).toBe(false);
+    expect(versionTested('bitcoin', 'cln', 'v26.06.9-blake2b.7')).toBe(false);
+    expect(versionTested('blake2b', 'lnd', '0.21.4-beta-blake2b.18 commit=')).toBe(true);
+    expect(versionTested('bitcoin', 'lnd', '0.21.4-beta commit=')).toBe(true);
+    expect(versionTested('bitcoin', 'lnd', '')).toBe(false);
   });
 });
