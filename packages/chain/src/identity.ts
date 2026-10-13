@@ -65,6 +65,15 @@ export function checkChainIdentity(input: IdentityInput): ChainIdentityState {
   if (activation !== null && input.facts.blockHeight < activation) {
     return result('waiting', 'fork_height', `height ${input.facts.blockHeight} is below ${activation}`);
   }
+  // The tip header comes from a separate call: it proves the chain only if it is past the fork too. A node that
+  // reports a height past the fork but serves a tip from before it is incoherent (or rolled back across the fork).
+  if (activation !== null && input.tip.height < activation) {
+    return result(
+      'refused',
+      'header',
+      `tip block ${input.tip.height} is below ${activation}, but the node reports height ${input.facts.blockHeight}`,
+    );
+  }
 
   let header;
   try {
