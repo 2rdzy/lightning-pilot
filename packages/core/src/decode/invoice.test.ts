@@ -285,6 +285,10 @@ describe('decodeBolt11: field rules', () => {
     if (!p) throw new Error('fields');
     expect(await reasonSigned([p, s, bytesField(TAGS.d, Uint8Array.of(0xff, 0xfe)), f])).toBe('malformed');
     expect(await reasonSigned(BASE_FIELDS([bytesField(TAGS.r, new Uint8Array(50))]))).toBe('malformed');
+    // A hop's node key must be a point on the curve, like the payee's: not an uncompressed prefix, not an x off it.
+    const hop = (key: number[]) => bytesField(TAGS.r, Uint8Array.from([...key, ...new Array<number>(18).fill(0)]));
+    expect(await reasonSigned(BASE_FIELDS([hop([0x04, ...new Array<number>(32).fill(1)])]))).toBe('malformed');
+    expect(await reasonSigned(BASE_FIELDS([hop([0x02, ...new Array<number>(32).fill(0xff)])]))).toBe('malformed');
   });
 
   it('strips bidirectional controls from the description', async () => {

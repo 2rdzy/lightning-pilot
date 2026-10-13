@@ -84,8 +84,11 @@ function readRouteHint(data: number[]): RouteHintHop[] {
   const hops: RouteHintHop[] = [];
   for (let at = 0; at < bytes.length; at += HOP) {
     const scid = view.getBigUint64(at + 33);
+    // Checked as a point on the curve, like the payee's key.
+    const pubkey = readPubkey(bytes.subarray(at, at + 33));
+    if (!pubkey) throw malformed("The invoice's routing hint has an invalid node key.");
     hops.push({
-      pubkey: parsePubkey(bytesToHex(bytes.subarray(at, at + 33))),
+      pubkey,
       shortChannelId: `${scid >> 40n}x${(scid >> 16n) & 0xffffffn}x${scid & 0xffffn}`,
       feeBaseMsat: view.getUint32(at + 41),
       feeProportionalMillionths: view.getUint32(at + 45),
