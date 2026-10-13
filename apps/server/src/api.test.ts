@@ -1,6 +1,8 @@
 // API tests over HTTP (in memory) with the fake adapter: request checks, setup, login, every route's permission,
 // nodes, invoices and the spend flow, the error format, and that no secret reaches the log.
 import { randomBytes } from 'node:crypto';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { FakeAdapter, FakeNetwork } from '@lightning-pilot/adapter-kit';
 import { AdapterError, msat, type Chain, type Network } from '@lightning-pilot/core';
@@ -39,7 +41,7 @@ interface RequestOptions {
   headers?: Record<string, string>;
 }
 
-async function harness(options: { dev?: boolean } = {}): Promise<Harness> {
+async function harness(options: { dev?: boolean; webRoot?: string } = {}): Promise<Harness> {
   const { dir, cleanup } = tempDir();
   const vaultKey = writeVaultKey(dir);
   const { config } = loadConfig({
@@ -64,6 +66,7 @@ async function harness(options: { dev?: boolean } = {}): Promise<Harness> {
     logger,
     driver: testDriver(),
     scryptCost: { log2N: 10, r: 8, p: 1 },
+    ...(options.webRoot ? { webRoot: options.webRoot } : {}),
     adapterFactory: (c: NodeConnection) => {
       const adapter = fakes.get(c.url);
       if (!adapter) throw new Error(`no fake at ${c.url}`);
@@ -135,6 +138,51 @@ describe(`API (${testDriver()})`, () => {
     expect([...routes].sort()).toEqual([...declared.keys()].sort());
     const doc = openApiDocument(h.server.app);
     expect(Object.keys(doc.paths ?? {}).length).toBe(new Set([...declared.keys()].map((k) => k.split(' ')[1])).size);
+  });
+
+  it('serves the web app outside /api, with index.html for app routes', async () => {
+    const { dir, cleanup } = tempDir();
+    cleanups.push(cleanup);
+    mkdirSync(join(dir, 'assets'));
+    writeFileSync(join(dir, 'index.html'), '<!doctype html><title>app</title>');
+    writeFileSync(join(dir, 'assets', 'app-1234.js'), 'console.log(1)');
+    const h = await harness({ webRoot: dir });
+
+    // The route table still holds only declared routes: the web app is middleware.
+    const routes = new Set(h.server.app.routes.filter((r) => r.method !== 'ALL').map((r) => `${r.method} ${r.path}`));
+    expect([...routes].sort()).toEqual([...declaredPermissions(h.server.app).keys()].sort());
+
+    for (const path of ['/', '/login', '/n/0b6c4b8e-0000-4000-8000-000000000000/pay']) {
+      const res = await h.request('GET', path);
+      expect(res.status, path).toBe(200);
+      expect(await res.text()).toContain('<title>app</title>');
+      expect(res.headers.get('content-type')).toMatch(/^text\/html/);
+      expect(res.headers.get('cache-control')).toBe('no-cache');
+      expect(res.headers.get('content-security-policy')).toContain("script-src 'self'");
+      expect(res.headers.get('x-frame-options')).toBe('DENY');
+    }
+    const asset = await h.request('GET', '/assets/app-1234.js');
+    expect(asset.status).toBe(200);
+    expect(asset.headers.get('cache-control')).toBe('public, max-age=31536000, immutable');
+
+    // Unknown files, API paths, other methods and traversal attempts get the JSON 404, never index.html.
+    for (const [method, path] of [
+      ['GET', '/assets/missing.js'],
+      ['GET', '/api/v1/unknown'],
+      ['GET', '/api/v1'],
+      ['GET', '/assets/%2e%2e/%2e%2e/%2e%2e/etc/os-release.txt'],
+      ['GET', '/assets/..%2f..%2f..%2fetc%2fhost.conf'],
+      ['POST', '/login'],
+    ] as const) {
+      const res = await h.request(method, path, method === 'POST' ? { body: {} } : {});
+      expect(res.status, `${method} ${path}`).toBe(404);
+      expect(await errorCode(res)).toBe('not_found');
+    }
+    // A traversal attempt without a file extension is an app route: it gets index.html, never the file.
+    const traversal = await h.request('GET', '/%2e%2e/%2e%2e/%2e%2e/etc/passwd');
+    expect(await traversal.text()).toContain('<title>app</title>');
+    // The Host allowlist applies to the web app too.
+    expect((await h.request('GET', '/login', { headers: { host: 'evil.example' } })).status).toBe(421);
   });
 
   it('refuses unknown hosts before routing, with the error format', async () => {

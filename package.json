@@ -19,7 +19,11 @@
     "check": "pnpm format:check && pnpm lint && pnpm typecheck && pnpm test && pnpm licenses:check",
     "test:regtest": "vitest run --config vitest.regtest.config.ts",
     "test:better-sqlite3": "TEST_SQLITE_DRIVER=better-sqlite3 vitest run apps/server",
-    "test:coverage": "vitest run --coverage"
+    "test:coverage": "vitest run --coverage",
+    "dev:server": "node tools/dev/server.ts",
+    "dev:web": "pnpm --filter @lightning-pilot/web dev",
+    "build:web": "pnpm --filter @lightning-pilot/web build",
+    "test:e2e": "playwright test"
   },
   "devDependencies": {
     "@cyclonedx/cyclonedx-npm": "6.0.1",

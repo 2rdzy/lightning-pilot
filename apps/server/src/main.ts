@@ -1,9 +1,9 @@
 // Entry point: lightning-pilot [--config <path>] [--dev]. Any configuration or vault problem stops start-up with a
 // clear message and a non-zero exit code.
-import { readFileSync } from 'node:fs';
-import { createSecureServer } from 'node:http2';
-import { serve } from '@hono/node-server';
+import { existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
 import { ConfigError, loadConfig } from './config/config.ts';
+import { listen } from './http/listen.ts';
 import { createLogger } from './logging/logger.ts';
 import { VaultError } from './modules/vault/index.ts';
 import { buildServer } from './server.ts';
@@ -13,24 +13,24 @@ async function main(): Promise<void> {
   const logger = createLogger({ level: config.log.level, modules: config.log.modules });
   // The effective configuration holds no secrets, so it is logged as a whole.
   logger.info('starting', { config, dev });
-  const server = await buildServer({ config, vaultKeyPath, dev, logger });
+  // The web app built next to the server (pnpm build in apps/web); packaging may move it (WP21).
+  const webRoot = fileURLToPath(new URL('../../web/dist', import.meta.url));
+  if (!existsSync(webRoot)) logger.warn('web app not built: serving the API only', { webRoot });
+  const server = await buildServer({
+    config,
+    vaultKeyPath,
+    dev,
+    logger,
+    ...(existsSync(webRoot) ? { webRoot } : {}),
+  });
 
-  const tls =
-    config.tls.mode === 'files' && config.tls.certFile && config.tls.keyFile
-      ? { cert: readFileSync(config.tls.certFile), key: readFileSync(config.tls.keyFile) }
-      : undefined;
-  serve(
-    {
-      fetch: server.app.fetch,
-      hostname: config.server.listen,
-      port: config.server.port,
-      ...(tls ? { createServer: createSecureServer, serverOptions: { ...tls, allowHTTP1: true } } : {}),
-    },
-    (info) => logger.info('listening', { address: info.address, port: info.port, tls: config.tls.mode }),
-  );
+  const listener = listen(server.app, config, logger);
   const stop = () => {
     logger.info('stopping');
-    void server.close().finally(() => process.exit(0));
+    void listener
+      .close()
+      .then(() => server.close())
+      .finally(() => process.exit(0));
   };
   process.on('SIGTERM', stop);
   process.on('SIGINT', stop);

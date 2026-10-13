@@ -6,7 +6,9 @@ import { defineConfig } from 'vitest/config';
 //
 // Coverage gates (repository conventions §7): 95 % of lines and branches for money and the security modules
 // (vault, auth with its sessions, spend), 80 % everywhere else. The entry point (main.ts) is left out: it only wires
-// the parts together and is checked by starting it.
+// the parts together and is checked by starting it. The web app's React components (*.tsx) are left out too: there
+// is no DOM test environment in the agreed dependencies, so they are covered by the Playwright tests (pnpm test:e2e,
+// CI job e2e) instead; the web app's logic lives in plain .ts modules, which count.
 const GATED = { lines: 95, branches: 95 };
 
 export default defineConfig({
@@ -23,6 +25,7 @@ export default defineConfig({
         '**/fixtures/**',
         'apps/server/src/main.ts',
         'apps/server/src/testing.ts',
+        'apps/web/src/**/*.tsx',
       ],
       reporter: ['text-summary', 'text'],
       thresholds: {

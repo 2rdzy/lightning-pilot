@@ -1,0 +1,77 @@
+@import 'tailwindcss';
+@import '@lightning-pilot/ui/tokens.css';
+
+/* Tailwind names for the design tokens, so classes such as bg-surface or text-muted follow the theme. */
+@theme inline {
+  --color-brand: var(--brand);
+  --color-brand-strong: var(--brand-strong);
+  --color-bar: var(--bar);
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-border: var(--border);
+  --color-text: var(--text);
+  --color-muted: var(--muted);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-danger: var(--danger);
+  --color-info: var(--info);
+  --color-on-danger: var(--on-danger);
+  --font-sans: var(--font-text);
+  --font-mono: var(--font-mono);
+  --radius-control: var(--radius-control);
+  --radius-card: var(--radius-card);
+}
+
+@layer base {
+  html {
+    font-size: 16px;
+  }
+  @media (max-width: 767px) {
+    html {
+      font-size: 15px;
+    }
+  }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-text);
+  }
+  :focus-visible {
+    outline: 2px solid var(--brand);
+    outline-offset: 2px;
+  }
+}
+
+@layer components {
+  .input {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-control);
+    background: var(--surface);
+    color: var(--text);
+    padding: 0.5rem 0.75rem;
+    min-height: 44px;
+  }
+  .btn-primary {
+    background: var(--brand);
+    color: #fff;
+    border-radius: var(--radius-control);
+    padding: 0.5rem 1rem;
+    min-height: 44px;
+    font-weight: 500;
+  }
+  .btn-primary:hover {
+    background: var(--brand-strong);
+  }
+  .btn-secondary {
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+    border-radius: var(--radius-control);
+    padding: 0.5rem 1rem;
+    min-height: 44px;
+  }
+  .btn-primary:disabled,
+  .btn-secondary:disabled {
+    opacity: 0.6;
+  }
+}

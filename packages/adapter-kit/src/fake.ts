@@ -66,7 +66,9 @@ function numberWords(value: number, length: number): number[] {
 function fakeBolt11(network: Network, amount: Msat, paymentHash: string, expirySeconds: number): string {
   const timestamp = Math.floor(Date.now() / 1000);
   const hashWords = bech32.toWords(Buffer.from(paymentHash, 'hex'));
-  const expiryWords = bech32.toWords(Buffer.from(expirySeconds.toString(16).padStart(8, '0'), 'hex'));
+  // A number field is a big-endian integer in as many 5-bit words as it needs (BOLT11); converting bytes with
+  // toWords would add padding bits and multiply the value.
+  const expiryWords = numberWords(expirySeconds, Math.max(1, Math.ceil(expirySeconds.toString(2).length / 5)));
   const words = [
     ...numberWords(timestamp, 7),
     1,

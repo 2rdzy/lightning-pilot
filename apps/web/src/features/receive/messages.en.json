@@ -1,0 +1,13 @@
+{
+  "receive.title": "Receive",
+  "receive.amount": "Amount (sat)",
+  "receive.amountInvalid": "Enter a whole number of sats above zero.",
+  "receive.amountReadBack": "Invoice for {amount} sat",
+  "receive.description": "Description (shown to the payer)",
+  "receive.submit": "Create invoice",
+  "receive.created": "Invoice created",
+  "receive.invoice": "Invoice",
+  "receive.qr": "QR code of the invoice",
+  "receive.expires": "Expires {time}",
+  "receive.another": "New invoice"
+}

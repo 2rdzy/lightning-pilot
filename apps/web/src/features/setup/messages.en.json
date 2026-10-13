@@ -1,0 +1,12 @@
+{
+  "setup.title": "Set up Lightning Pilot",
+  "setup.intro": "Enter the setup token printed in the server log, then choose the owner password.",
+  "setup.token": "Setup token",
+  "setup.password": "Password",
+  "setup.passwordRules": "At least 12 characters, with lowercase, uppercase, a digit and a symbol.",
+  "setup.confirm": "Repeat the password",
+  "setup.mismatch": "The passwords are not the same.",
+  "setup.tokenRequired": "Enter the setup token.",
+  "setup.submit": "Create owner",
+  "setup.done": "The owner is created. Log in with the new password."
+}
