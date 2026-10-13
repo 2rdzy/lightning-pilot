@@ -208,7 +208,10 @@ export class SpendService {
     // No new spend on a node whose chain identity is not confirmed (chain-identity spec §5): the identity monitor may
     // have refused it since the preview. A retry with a known key only returns the first result, so it goes on. This
     // early check only avoids node calls for a refused node; the claim below checks the state again.
-    if (!retried) refuseUnlessConfirmed(this.#nodes.identity(row));
+    if (!retried) {
+      await this.#nodes.monitor.ensureChecked(nodeId);
+      refuseUnlessConfirmed(this.#nodes.identity(row));
+    }
     if (pending && !retried) {
       const { paymentHash } = JSON.parse(pending.payload) as PreviewPayload;
       await this.#guardInvoice(nodeId, adapter, parsePaymentHash(paymentHash), requestId);

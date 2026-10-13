@@ -705,6 +705,20 @@ describe(`spend edge cases (${testDriver()})`, () => {
     expect(await h.server.db.selectFrom('spend_intents').select('id').execute()).toEqual([]);
   });
 
+  // After a restart the stored state and any stored confirmation are from the previous run: the first spend checks the
+  // node before it is admitted, rather than trust them (the start-up pass may not have reached it yet).
+  it('runs a full check before the first spend on a node not checked since start-up', async () => {
+    const { h, id, invoice, token, execute } = await setupNode();
+    const fake = h.fakes.get('https://a.blake2b.test');
+    if (!fake) throw new Error('no fake');
+    const t = await token(await invoice());
+    h.server.nodes.monitor.forget(id);
+    fake.blockHeight += 1;
+    fake.featuresOverride = '';
+    expect(await (await execute(t)).json()).toMatchObject({ error: { code: 'chain_refused' } });
+    expect(await h.server.db.selectFrom('spend_intents').select('id').execute()).toEqual([]);
+  });
+
   it('waits for a full check that is already running before it admits a spend', async () => {
     const { h, id, invoice, token, execute } = await setupNode();
     const fake = h.fakes.get('https://a.blake2b.test');

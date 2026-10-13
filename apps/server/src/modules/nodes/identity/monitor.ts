@@ -202,6 +202,12 @@ export class IdentityMonitor {
     );
   }
 
+  // Before a new spend: a node without a full check in this process (start-up has not reached it yet, or it was
+  // unreachable) is checked first, so a state stored by an earlier run is never what admits a spend.
+  async ensureChecked(nodeId: string): Promise<void> {
+    if (!this.#baselines.has(nodeId)) await this.fullCheck(nodeId, 'start');
+  }
+
   // Runs a new spend's admission (the transaction that claims it, which checks the stored state again) in the node's
   // turn: after every full check that started before it, and before any that starts later. Spends admitted before a
   // refusal are in flight and stay tracked (chain-identity spec §5). No node call may run inside `admit`.

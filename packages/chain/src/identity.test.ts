@@ -119,6 +119,18 @@ describe('checkChainIdentity', () => {
     }
   });
 
+  // The facts and the tip header come from two calls: the header inspected must itself be past the fork, or it
+  // proves nothing about the chain.
+  it('refuses a tip header from below the activation height when the facts are past it', () => {
+    for (const [profile, chain] of [
+      ['blake2b', blake2b],
+      ['bitcoin', sha256d],
+    ] as const) {
+      const early = { ...input(profile, chain, { blockHeight: 1000 }), tip: { height: 0, raw: chain.block } };
+      expect(checkChainIdentity(early)).toMatchObject({ state: 'refused', failedCheck: 'header' });
+    }
+  });
+
   it('skips the height check on signet but still checks the header', () => {
     const signet = (raw: string) => ({
       ...input('bitcoin', sha256d, { network: 'signet', networkRaw: 'signet', blockHeight: 0 }),
@@ -166,6 +178,7 @@ describe('checkChainIdentity', () => {
     const at = (blockHeight: number) => ({
       ...input('blake2b', blake2b, { network: 'testnet4', networkRaw: 'testnet4', blockHeight }),
       network: 'testnet4' as Network,
+      tip: { height: blockHeight, raw: blake2b.block },
     });
     expect(BLAKE2B_ACTIVATION_HEIGHT).toEqual({ mainnet: 961_640, testnet4: 150_308, signet: null, regtest: 1 });
     expect(checkChainIdentity(at(150_307))).toMatchObject({ state: 'waiting', failedCheck: 'fork_height' });
