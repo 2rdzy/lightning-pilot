@@ -1,9 +1,12 @@
-// Authentication (minimal): the one-time setup token, the owner's password and server-side sessions. TOTP, login
-// throttling, step-up and the session list come in later work packages.
+// Password + TOTP authentication, setup-token issuance and server-side sessions. Shared throttling and step-up
+// are separate work packages; accepted TOTP counters commit atomically with sessions.
 import { createHash, randomBytes, scrypt as scryptCallback, timingSafeEqual, type ScryptOptions } from 'node:crypto';
 import { randomUUID } from 'node:crypto';
 import { AppError } from '@lightning-pilot/core';
 import { writeTx, type Db } from '../../storage/db.ts';
+import { hashRecoveryCode } from './totp/recovery.ts';
+import { generateTotpSecret, otpauthUri } from './totp/totp.ts';
+import { matchTotp } from './totp/totp.ts';
 import type { Logger } from '../../logging/logger.ts';
 import type { Vault } from '../vault/index.ts';
 
@@ -53,12 +56,6 @@ export async function verifyPassword(password: string, stored: string): Promise<
 
 const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
 
-function equalHex(a: string, b: string): boolean {
-  const x = Buffer.from(a, 'hex');
-  const y = Buffer.from(b, 'hex');
-  return x.length === y.length && timingSafeEqual(x, y);
-}
-
 // 136 random bits as 28 base32 characters in groups of four.
 function newSetupToken(): string {
   const bytes = randomBytes(17);
@@ -93,6 +90,7 @@ export interface NewSession {
   cookieValue: string;
   csrfToken: string;
   expiresAt: Date;
+  recoveryRequired: boolean;
 }
 
 export class AuthService {
@@ -100,16 +98,15 @@ export class AuthService {
   readonly #vault: Vault;
   readonly #log: Logger;
   readonly #setupUrl: string;
-  readonly #cost: ScryptCost;
   readonly #now: () => Date;
   #ownerExists = false;
+  readonly #recovery = new Map<string, { secret: string; expires: number }>();
 
   private constructor(options: AuthOptions) {
     this.#db = options.db;
     this.#vault = options.vault;
     this.#log = options.logger.child('auth');
     this.#setupUrl = options.setupUrl;
-    this.#cost = options.scryptCost ?? DEFAULT_SCRYPT;
     this.#now = options.now ?? (() => new Date());
   }
 
@@ -138,63 +135,82 @@ export class AuthService {
     this.#log.setupToken(token, this.#setupUrl);
   }
 
-  async completeSetup(token: string, password: string, requestId: string): Promise<void> {
-    const row = await this.#db.selectFrom('setup_token').selectAll().executeTakeFirst();
-    const valid =
-      row !== undefined &&
-      Date.parse(row.expires_at) > this.#now().getTime() &&
-      equalHex(sha256(normaliseToken(token)), row.token_hash);
-    if (!valid) {
-      this.#log.warn('setup token refused', { requestId });
-      throw new AppError('setup_token_invalid', 'The setup token is not valid.');
-    }
-    const passwordHash = await hashPassword(password, this.#cost);
-    try {
-      await writeTx(this.#db, async (trx) => {
-        const exists = await trx.selectFrom('owner').select('id').executeTakeFirst();
-        if (exists) throw new AppError('not_found', 'Not found.');
-        await trx
-          .insertInto('owner')
-          .values({ id: 1, password_hash: passwordHash, created_at: this.#now().toISOString() })
-          .execute();
-        await trx.deleteFrom('setup_token').execute();
-        await this.#vault.initialise(trx);
-      });
-    } catch (err) {
-      await this.#vault.reload(this.#db);
-      throw err;
-    }
+  setupCompleted(): void {
     this.#ownerExists = true;
-    this.#log.info('setup completed', { requestId, keyId: this.#vault.keyId });
   }
 
-  async login(password: string, requestId: string): Promise<NewSession> {
-    const owner = await this.#db.selectFrom('owner').select('password_hash').executeTakeFirst();
-    if (!owner) throw new AppError('setup_required', 'Setup has not been completed.');
-    if (!(await verifyPassword(password, owner.password_hash))) {
-      this.#log.warn('login failed', { requestId, reason: 'bad_password' });
-      throw new AppError('login_failed', 'Login failed.');
-    }
+  async newSession(db: Db, now: Date, recoveryRequired = false): Promise<NewSession> {
     const cookieValue = randomBytes(32).toString('base64url');
-    const now = this.#now();
     const expiresAt = new Date(now.getTime() + SESSION_ABSOLUTE_MS);
-    await this.#db
+    await db
       .insertInto('sessions')
       .values({
         id_hash: sha256(cookieValue),
+        recovery_required: recoveryRequired ? 1 : 0,
         handle: randomUUID(),
         created_at: now.toISOString(),
         last_seen_at: now.toISOString(),
         expires_at: expiresAt.toISOString(),
       })
       .execute();
-    this.#log.info('login succeeded', { requestId });
-    return { cookieValue, csrfToken: csrfTokenFor(cookieValue), expiresAt };
+    return { cookieValue, csrfToken: csrfTokenFor(cookieValue), expiresAt, recoveryRequired };
+  }
+
+  async resetState(): Promise<void> {
+    this.#ownerExists = false;
+    this.#recovery.clear();
+    await this.issueSetupToken();
+  }
+
+  async login(password: string, requestId: string, totpCode?: string, recoveryCode?: string): Promise<NewSession> {
+    const owner = await this.#db.selectFrom('owner').select('password_hash').executeTakeFirst();
+    if (!owner) throw new AppError('setup_required', 'Setup has not been completed.');
+    if (!(await verifyPassword(password, owner.password_hash))) {
+      this.#log.warn('login failed', { requestId, reason: 'bad_password' });
+      throw new AppError('login_failed', 'Login failed.');
+    }
+    const session = await writeTx(this.#db, async (trx) => {
+      if (recoveryCode) {
+        if (totpCode) throw new AppError('login_failed', 'Login failed.');
+        let hash;
+        try {
+          hash = hashRecoveryCode(recoveryCode);
+        } catch {
+          throw new AppError('login_failed', 'Login failed.');
+        }
+        const code = await trx
+          .selectFrom('recovery_codes')
+          .selectAll()
+          .where('code_hash', '=', hash)
+          .where('used_at', 'is', null)
+          .executeTakeFirst();
+        if (!code) throw new AppError('login_failed', 'Login failed.');
+        await trx
+          .updateTable('recovery_codes')
+          .set({ used_at: this.#now().toISOString() })
+          .where('code_hash', '=', hash)
+          .execute();
+        this.#log.warn('recovery code used', { requestId, security: true });
+        return this.newSession(trx, this.#now(), true);
+      }
+      const factor = await trx.selectFrom('auth_totp').selectAll().executeTakeFirst();
+      const counter =
+        factor && totpCode
+          ? matchTotp(this.#vault.openSecret(factor, 'totp'), totpCode, this.#now(), BigInt(factor.last_counter))
+          : undefined;
+      if (counter === undefined) throw new AppError('login_failed', 'Login failed.');
+      await trx.updateTable('auth_totp').set({ last_counter: counter.toString() }).where('id', '=', 1).execute();
+      return this.newSession(trx, this.#now());
+    });
+    this.#log.info('login succeeded', { requestId, security: true });
+    return session;
   }
 
   // The session behind a cookie value, or undefined if there is none or it has expired (idle 1 hour, absolute
   // 7 days). Expired sessions are deleted.
-  async session(cookieValue: string): Promise<{ idHash: string; handle: string; expiresAt: Date } | undefined> {
+  async session(
+    cookieValue: string,
+  ): Promise<{ idHash: string; handle: string; expiresAt: Date; recoveryRequired: boolean } | undefined> {
     const idHash = sha256(cookieValue);
     const row = await this.#db.selectFrom('sessions').selectAll().where('id_hash', '=', idHash).executeTakeFirst();
     if (!row) return undefined;
@@ -202,6 +218,7 @@ export class AuthService {
     const lastSeen = Date.parse(row.last_seen_at);
     if (now >= Date.parse(row.expires_at) || now - lastSeen >= SESSION_IDLE_MS) {
       await this.#db.deleteFrom('sessions').where('id_hash', '=', idHash).execute();
+      this.#recovery.delete(idHash);
       return undefined;
     }
     if (now - lastSeen >= TOUCH_INTERVAL_MS) {
@@ -213,13 +230,63 @@ export class AuthService {
     }
     return {
       idHash,
+      recoveryRequired: row.recovery_required === 1,
       handle: row.handle,
       expiresAt: new Date(Math.min(Date.parse(row.expires_at), now + SESSION_IDLE_MS)),
     };
   }
 
+  async beginRecovery(idHash: string): Promise<{ secret: string; uri: string }> {
+    const row = await this.#db
+      .selectFrom('sessions')
+      .select('recovery_required')
+      .where('id_hash', '=', idHash)
+      .executeTakeFirst();
+    if (row?.recovery_required !== 1)
+      throw new AppError('step_up_required', 'Use a recovery login before enrolling a new authenticator.');
+    const now = this.#now().getTime();
+    for (const [id, pending] of this.#recovery) if (pending.expires <= now) this.#recovery.delete(id);
+    const existing = this.#recovery.get(idHash);
+    if (existing) return { secret: existing.secret, uri: otpauthUri(existing.secret, 'owner') };
+    const secret = generateTotpSecret();
+    this.#recovery.set(idHash, { secret, expires: this.#now().getTime() + 15 * 60_000 });
+    return { secret, uri: otpauthUri(secret, 'owner') };
+  }
+
+  async finishRecovery(idHash: string, code: string, requestId: string): Promise<void> {
+    const pending = this.#recovery.get(idHash);
+    const counter =
+      pending && pending.expires > this.#now().getTime() ? matchTotp(pending.secret, code, this.#now()) : undefined;
+    if (counter === undefined || !pending) throw new AppError('validation_failed', 'The enrolment code is not valid.');
+    await writeTx(this.#db, async (trx) => {
+      if (this.#recovery.get(idHash) !== pending || pending.expires <= this.#now().getTime())
+        throw new AppError('validation_failed', 'The enrolment expired. Start again.');
+      const row = await trx
+        .selectFrom('sessions')
+        .select('recovery_required')
+        .where('id_hash', '=', idHash)
+        .executeTakeFirst();
+      if (row?.recovery_required !== 1)
+        throw new AppError('step_up_required', 'Use a recovery login before enrolling a new authenticator.');
+      await trx
+        .updateTable('auth_totp')
+        .set({ ...this.#vault.sealSecret(pending.secret, 'totp'), last_counter: counter.toString() })
+        .where('id', '=', 1)
+        .execute();
+      await trx.deleteFrom('sessions').where('id_hash', '!=', idHash).execute();
+      await trx.updateTable('sessions').set({ recovery_required: 0 }).where('id_hash', '=', idHash).execute();
+    });
+    this.#recovery.clear();
+    this.#log.warn('authenticator recovered', { requestId, security: true });
+  }
+
+  close(): void {
+    this.#recovery.clear();
+  }
+
   async logout(idHash: string, requestId: string): Promise<void> {
     await this.#db.deleteFrom('sessions').where('id_hash', '=', idHash).execute();
+    this.#recovery.delete(idHash);
     this.#log.info('logout', { requestId });
   }
 }

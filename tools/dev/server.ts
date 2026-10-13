@@ -15,8 +15,9 @@
 // The setup token is printed in the log as in production; the nodes are added as soon as setup has created the
 // owner (the vault holding their credentials is initialised then). Configuration comes from the flags only: no LP_*
 // variable of the environment is read (the config loader refuses unknown ones, and the regtest script uses some).
+import { acquireServiceLock } from '../../apps/server/src/modules/setup/reset.ts';
 import { randomBytes } from 'node:crypto';
-import { existsSync, mkdtempSync, rmSync } from 'node:fs';
+import { existsSync, mkdtempSync, rmSync, mkdirSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
@@ -43,6 +44,8 @@ const port = Number(values.port);
 
 const temporary = values.data === undefined;
 const dataDir = values.data ? resolve(values.data) : mkdtempSync(join(tmpdir(), 'lp-dev-'));
+mkdirSync(dataDir, { recursive: true, mode: 0o700 });
+const release = acquireServiceLock(dataDir);
 // A key already in --data belongs to its database: reuse it, never replace it.
 const existingKey = join(dataDir, 'vault-key');
 const vaultKey = existsSync(existingKey) ? existingKey : writeVaultKey(dataDir, randomBytes(32));
@@ -140,7 +143,12 @@ if (!server.auth.setupMode) await addNodes();
 const app = {
   fetch: async (request: Request, env?: unknown) => {
     const res = await server.app.fetch(request, env);
-    if (request.method === 'POST' && new URL(request.url).pathname === '/api/v1/setup' && res.status === 204) {
+    if (
+      request.method === 'POST' &&
+      new URL(request.url).pathname === '/api/v1/setup' &&
+      res.status === 200 &&
+      !server.auth.setupMode
+    ) {
       await addNodes();
     }
     return res;
@@ -157,6 +165,7 @@ logger.info('development server ready', {
 
 const stop = () => {
   void Promise.all([listener.close(), server.close()]).finally(() => {
+    release();
     if (temporary) rmSync(dataDir, { recursive: true, force: true });
     process.exit(0);
   });

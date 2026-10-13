@@ -5,6 +5,7 @@ import { AppError } from '@lightning-pilot/core';
 
 export interface SessionInfo {
   idHash: string;
+  recoveryRequired: boolean;
   // Internal id, stable for the life of the session; spend confirmations are bound to it.
   handle: string;
   csrfToken: string;

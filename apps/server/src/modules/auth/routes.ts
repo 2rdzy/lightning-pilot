@@ -7,7 +7,8 @@ import {
   ErrorBody,
   LoginRequest,
   SessionResponse,
-  SetupRequest,
+  RecoveryEnrollment,
+  RecoveryConfirm,
   SetupStatusResponse,
   type Permission,
 } from '@lightning-pilot/core';
@@ -40,6 +41,14 @@ export function createGuard(auth: AuthService): Guard {
     const cookie = readSessionCookie(c);
     const session = cookie === undefined ? undefined : await auth.session(cookie);
     if (cookie === undefined || !session) throw new AppError('unauthenticated', 'Please log in.');
+    if (permission === 'recovery' && !session.recoveryRequired)
+      throw new AppError('step_up_required', 'A recovery login is required.');
+    if (
+      session.recoveryRequired &&
+      permission !== 'recovery' &&
+      !['/api/v1/auth/session', '/api/v1/auth/logout'].includes(c.req.path)
+    )
+      throw new AppError('permission_denied', 'Enrol a new authenticator before using the application.');
     const csrfToken = csrfTokenFor(cookie);
     // CSRF token on unsafe methods (SameSite=Strict is the first layer). Checked only once the cookie maps to a
     // live session: a stale cookie must never block login, or the owner would be stuck after an idle timeout.
@@ -47,7 +56,13 @@ export function createGuard(auth: AuthService): Guard {
       throw new AppError('csrf_failed', 'Missing or wrong CSRF token.');
     }
     // The owner holds every permission except `setup`; finer access levels come with API clients.
-    c.set('session', { idHash: session.idHash, handle: session.handle, csrfToken, expiresAt: session.expiresAt });
+    c.set('session', {
+      idHash: session.idHash,
+      handle: session.handle,
+      csrfToken,
+      expiresAt: session.expiresAt,
+      recoveryRequired: session.recoveryRequired,
+    });
     return next();
   };
 }
@@ -77,24 +92,6 @@ export function authRoutes(app: Router, guard: Guard, auth: AuthService): void {
   declare(
     app,
     guard,
-    'setup',
-    createRoute({
-      method: 'post',
-      path: '/api/v1/setup',
-      summary: 'Create the owner with the setup token from the service log',
-      request: { body: { required: true, content: { 'application/json': { schema: SetupRequest } } } },
-      responses: { 204: { description: 'Owner created; log in next' }, ...errors },
-    }),
-    async (c) => {
-      const body = c.req.valid('json');
-      await auth.completeSetup(body.token, body.password, c.get('requestId'));
-      return c.body(null, 204);
-    },
-  );
-
-  declare(
-    app,
-    guard,
     'public',
     createRoute({
       method: 'post',
@@ -110,7 +107,12 @@ export function authRoutes(app: Router, guard: Guard, auth: AuthService): void {
       },
     }),
     async (c) => {
-      const session = await auth.login(c.req.valid('json').password, c.get('requestId'));
+      const session = await auth.login(
+        c.req.valid('json').password,
+        c.get('requestId'),
+        c.req.valid('json').totpCode,
+        c.req.valid('json').recoveryCode,
+      );
       setCookie(c, SESSION_COOKIE, session.cookieValue, {
         prefix: 'host',
         httpOnly: true,
@@ -120,7 +122,11 @@ export function authRoutes(app: Router, guard: Guard, auth: AuthService): void {
         expires: session.expiresAt,
       });
       return c.json(
-        SessionResponse.parse({ csrfToken: session.csrfToken, expiresAt: session.expiresAt.toISOString() }),
+        SessionResponse.parse({
+          csrfToken: session.csrfToken,
+          expiresAt: session.expiresAt.toISOString(),
+          ...(session.recoveryRequired ? { recoveryRequired: true } : {}),
+        }),
         200,
       );
     },
@@ -142,7 +148,11 @@ export function authRoutes(app: Router, guard: Guard, auth: AuthService): void {
     async (c) => {
       const session = sessionOf(c);
       return c.json(
-        SessionResponse.parse({ csrfToken: session.csrfToken, expiresAt: session.expiresAt.toISOString() }),
+        SessionResponse.parse({
+          csrfToken: session.csrfToken,
+          expiresAt: session.expiresAt.toISOString(),
+          ...(session.recoveryRequired ? { recoveryRequired: true } : {}),
+        }),
         200,
       );
     },
@@ -162,6 +172,40 @@ export function authRoutes(app: Router, guard: Guard, auth: AuthService): void {
       await auth.logout(sessionOf(c).idHash, c.get('requestId'));
       deleteCookie(c, SESSION_COOKIE, { prefix: 'host', path: '/', secure: true });
       c.header('Clear-Site-Data', '"cookies"');
+      return c.body(null, 204);
+    },
+  );
+  declare(
+    app,
+    guard,
+    'recovery',
+    createRoute({
+      method: 'post',
+      path: '/api/v1/auth/totp/enrol',
+      summary: 'Enrol after a recovery-code login',
+      responses: {
+        200: {
+          description: 'New authenticator secret',
+          content: { 'application/json': { schema: RecoveryEnrollment } },
+        },
+        ...errors,
+      },
+    }),
+    async (c) => c.json(RecoveryEnrollment.parse(await auth.beginRecovery(sessionOf(c).idHash)), 200),
+  );
+  declare(
+    app,
+    guard,
+    'recovery',
+    createRoute({
+      method: 'post',
+      path: '/api/v1/auth/totp/confirm',
+      summary: 'Verify a recovered authenticator',
+      request: { body: { required: true, content: { 'application/json': { schema: RecoveryConfirm } } } },
+      responses: { 204: { description: 'Authenticator verified' }, ...errors },
+    }),
+    async (c) => {
+      await auth.finishRecovery(sessionOf(c).idHash, c.req.valid('json').code, c.get('requestId'));
       return c.body(null, 204);
     },
   );

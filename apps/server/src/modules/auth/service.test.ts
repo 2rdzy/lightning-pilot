@@ -1,8 +1,10 @@
 import { randomBytes } from 'node:crypto';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createLogger } from '../../logging/logger.ts';
-import { tempDir, testDb } from '../../testing.ts';
+import { tempDir, testDb, setupForTest } from '../../testing.ts';
 import { Vault } from '../vault/index.ts';
+import { SetupService } from '../setup/index.ts';
+import { NodesService } from '../nodes/index.ts';
 import { AuthService, hashPassword, verifyPassword } from './service.ts';
 
 const cleanups: (() => void)[] = [];
@@ -29,7 +31,9 @@ async function service(clock: { now: Date }) {
     scryptCost: COST,
     now: () => clock.now,
   });
-  return { auth, db, vault, tokens };
+  const nodes = new NodesService({ db, vault, logger, dev: true, maxNodes: 10, now: () => clock.now });
+  const setup = new SetupService({ db, vault, auth, nodes, logger, scryptCost: COST, now: () => clock.now });
+  return { auth, db, vault, tokens, setup };
 }
 
 describe('passwords', () => {
@@ -45,30 +49,32 @@ describe('passwords', () => {
 describe('setup token', () => {
   it('is 28 base32 characters in groups of four, and is not issued once an owner exists', async () => {
     const clock = { now: new Date('2026-10-12T10:00:00Z') };
-    const { auth, tokens } = await service(clock);
+    const { auth, tokens, setup } = await service(clock);
     await auth.issueSetupToken();
     expect(tokens[0]).toMatch(/^([A-Z2-7]{4}-){6}[A-Z2-7]{4}$/);
-    await auth.completeSetup(tokens[0] ?? '', PASSWORD, 'r-1');
+    await setupForTest(setup, tokens[0] ?? '', PASSWORD, clock.now);
     await auth.issueSetupToken();
     expect(tokens).toHaveLength(1);
   });
 
   it('expires after 24 hours', async () => {
     const clock = { now: new Date('2026-10-12T10:00:00Z') };
-    const { auth, tokens } = await service(clock);
+    const { auth, tokens, setup } = await service(clock);
     await auth.issueSetupToken();
     clock.now = new Date('2026-10-13T10:00:01Z');
-    await expect(auth.completeSetup(tokens[0] ?? '', PASSWORD, 'r-1')).rejects.toMatchObject({
+    await expect(setupForTest(setup, tokens[0] ?? '', PASSWORD, clock.now)).rejects.toMatchObject({
       code: 'setup_token_invalid',
     });
   });
 
   it('refuses setup when an owner appeared meanwhile, leaving the vault uninitialised', async () => {
     const clock = { now: new Date('2026-10-12T10:00:00Z') };
-    const { auth, db, vault, tokens } = await service(clock);
+    const { auth, db, vault, tokens, setup } = await service(clock);
     await auth.issueSetupToken();
     await db.insertInto('owner').values({ id: 1, password_hash: 'x', created_at: clock.now.toISOString() }).execute();
-    await expect(auth.completeSetup(tokens[0] ?? '', PASSWORD, 'r-1')).rejects.toMatchObject({ code: 'not_found' });
+    await expect(setupForTest(setup, tokens[0] ?? '', PASSWORD, clock.now)).rejects.toMatchObject({
+      code: 'not_found',
+    });
     expect(vault.initialised).toBe(false);
   });
 });
@@ -78,9 +84,8 @@ describe('sessions', () => {
     const clock = { now: new Date('2026-10-12T10:00:00Z') };
     const s = await service(clock);
     await s.auth.issueSetupToken();
-    await s.auth.completeSetup(s.tokens[0] ?? '', PASSWORD, 'r-1');
-    const session = await s.auth.login(PASSWORD, 'r-2');
-    return { ...s, clock, cookie: session.cookieValue };
+    const enrolled = await setupForTest(s.setup, s.tokens[0] ?? '', PASSWORD, clock.now);
+    return { ...s, clock, cookie: enrolled.reply.sessionCookie ?? '' };
   }
   const at = (iso: string) => new Date(iso);
 
@@ -142,9 +147,12 @@ describe('password cost', () => {
       sink: () => undefined,
       stdout: (l) => tokens.push((JSON.parse(l) as { setupToken: string }).setupToken),
     });
-    const auth = await AuthService.create({ db, vault: await Vault.start(db, randomBytes(32)), logger, setupUrl: 'x' });
+    const vault = await Vault.start(db, randomBytes(32));
+    const auth = await AuthService.create({ db, vault, logger, setupUrl: 'x' });
+    const nodes = new NodesService({ db, vault, logger, dev: true, maxNodes: 10 });
+    const setup = new SetupService({ db, vault, auth, nodes, logger });
     await auth.issueSetupToken();
-    await auth.completeSetup(tokens[0] ?? '', PASSWORD, 'r');
+    await setupForTest(setup, tokens[0] ?? '', PASSWORD);
     const owner = await db.selectFrom('owner').select('password_hash').executeTakeFirstOrThrow();
     expect(owner.password_hash).toMatch(/^scrypt\$17\$/);
   });

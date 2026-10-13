@@ -1,6 +1,8 @@
 // Walking-skeleton end-to-end test over the API, against the tools/regtest nodes of one chain (LP_REGTEST_CHAIN):
 // from a fresh database, setup → login → add cln-a → node info and balances → pay an invoice made on cln-c →
 // receive a payment from cln-c. Every log line of the run is kept and checked for secrets at the end.
+import type { SetupAction, SetupProgress } from '../../packages/core/src/setup.ts';
+import { totp } from '../../apps/server/src/modules/auth/totp/totp.ts';
 import { randomBytes } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { loadConfig } from '../../apps/server/src/config/config.ts';
@@ -65,8 +67,32 @@ describe(`end to end on ${chain} (profile ${profile})`, () => {
     const line = lines.find((l) => l.includes('"setupToken"'));
     const token = (JSON.parse(line ?? '{}') as { setupToken: string }).setupToken;
     expect(token).toMatch(/^[A-Z2-7]{4}(-[A-Z2-7]{1,4})+$/);
-    await ok(await request('POST', '/api/v1/setup', { token, password: PASSWORD }), 204);
-    const res = await request('POST', '/api/v1/auth/login', { password: PASSWORD });
+    const start = await request('POST', '/api/v1/setup', { action: 'start', token });
+    const progress = await ok<SetupProgress>(start);
+    const setupCookie = (start.headers.get('set-cookie') ?? '').split(';')[0] ?? '';
+    const act = async (action: SetupAction) =>
+      ok<SetupProgress>(
+        await request('POST', '/api/v1/setup', action, {
+          cookie: setupCookie,
+          'x-csrf-token': progress.csrfToken,
+        }),
+      );
+    const enrolment = await act({ action: 'password', password: PASSWORD });
+    const secret = enrolment.secret;
+    if (!secret) throw new Error('No TOTP enrolment secret');
+    secrets.push(secret);
+    const recovery = await act({ action: 'totp', code: totp(secret, new Date(Date.now() - 30_000)) });
+    const code = recovery.recoveryCodes?.[0];
+    if (!code) throw new Error('No recovery code');
+    secrets.push(...(recovery.recoveryCodes ?? []));
+    await act({ action: 'recovery', code });
+    await act({ action: 'backup', confirmed: true });
+    await act({ action: 'node', node: null });
+    await act({ action: 'alerts', alerts: { kind: 'none' } });
+    const complete = await act({ action: 'complete' });
+    expect(complete.step).toBe('done');
+    expect(complete.session).toBeDefined();
+    const res = await request('POST', '/api/v1/auth/login', { password: PASSWORD, totpCode: totp(secret, new Date()) });
     const session = await ok<{ csrfToken: string }>(res);
     const cookie = (res.headers.get('set-cookie') ?? '').split(';')[0] ?? '';
     auth = { cookie, csrf: session.csrfToken };

@@ -38,6 +38,7 @@ export default defineConfig({
         'apps/server/src/modules/nodes/identity/**': GATED,
         'apps/server/src/modules/vault/**': GATED,
         'apps/server/src/modules/auth/**': GATED,
+        'apps/server/src/modules/setup/**': GATED,
         'apps/server/src/modules/spend/**': GATED,
       },
     },

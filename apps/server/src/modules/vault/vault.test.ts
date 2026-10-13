@@ -194,6 +194,68 @@ describe('vault encryption', () => {
 });
 
 describe('vault edge cases', () => {
+  it('refuses a missing canary when an encrypted alert destination is the only remaining secret', async () => {
+    const { db } = await testDb(dir());
+    const key = randomBytes(32);
+    const vault = await Vault.start(db, key);
+    await vault.initialise(db);
+    const sealed = vault.sealSecret('synthetic-telegram-token', 'telegram_token');
+    await db.deleteFrom('settings').execute();
+    await db
+      .insertInto('settings')
+      .values({
+        key: 'setup_alerts',
+        value: JSON.stringify({
+          kind: 'telegram',
+          key_id: sealed.key_id,
+          nonce: sealed.nonce.toString('base64'),
+          ciphertext: sealed.ciphertext.toString('base64'),
+        }),
+      })
+      .execute();
+    expect(await db.selectFrom('credentials').selectAll().execute()).toEqual([]);
+    expect(await db.selectFrom('auth_totp').selectAll().execute()).toEqual([]);
+    await expect(Vault.start(db, key)).rejects.toThrow('vault canary missing');
+    expect(await db.selectFrom('settings').select('key').execute()).toEqual([{ key: 'setup_alerts' }]);
+  });
+
+  it('refuses a missing canary when only an authenticator secret remains', async () => {
+    const { db } = await testDb(dir());
+    const key = randomBytes(32);
+    const vault = await Vault.start(db, key);
+    await vault.initialise(db);
+    await db
+      .insertInto('auth_totp')
+      .values({ id: 1, ...vault.sealSecret('synthetic-authenticator', 'totp'), last_counter: '-1' })
+      .execute();
+    await db.deleteFrom('settings').execute();
+    expect(await db.selectFrom('credentials').selectAll().execute()).toEqual([]);
+    await expect(Vault.start(db, key)).rejects.toThrow('vault canary missing');
+    expect(await db.selectFrom('settings').selectAll().execute()).toEqual([]);
+  });
+
+  it('binds service secrets to their purpose and key, rejecting damaged ciphertext', async () => {
+    const { db } = await testDb(dir());
+    const vault = await Vault.start(db, randomBytes(32));
+    expect(() => vault.sealSecret('synthetic-authenticator', 'totp')).toThrow('vault not initialised');
+    await vault.initialise(db);
+    const auth = vault.sealSecret('synthetic-authenticator', 'totp');
+    const telegram = vault.sealSecret('synthetic-token', 'telegram_token');
+    expect(vault.openSecret(auth, 'totp')).toBe('synthetic-authenticator');
+    expect(vault.openSecret(telegram, 'telegram_token')).toBe('synthetic-token');
+    expect(() => vault.openSecret(auth, 'telegram_token')).toThrow('value cannot be decrypted');
+    expect(() => vault.openSecret(telegram, 'totp')).toThrow('value cannot be decrypted');
+    expect(() => vault.openSecret({ ...auth, key_id: 'different-key' }, 'totp')).toThrow(
+      'secret encrypted under another key',
+    );
+    const damaged = Buffer.from(auth.ciphertext);
+    damaged.writeUInt8(damaged.readUInt8(0) ^ 1, 0);
+    expect(() => vault.openSecret({ ...auth, ciphertext: damaged }, 'totp')).toThrow('value cannot be decrypted');
+    vault.close();
+    expect(() => vault.sealSecret('synthetic-authenticator', 'totp')).toThrow('vault closed');
+    expect(() => vault.openSecret(auth, 'totp')).toThrow('vault closed');
+  });
+
   it('refuses a key id without a canary, and initialising twice', async () => {
     const { db } = await testDb(dir());
     const key = randomBytes(32);

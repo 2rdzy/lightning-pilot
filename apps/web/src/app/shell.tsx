@@ -93,6 +93,9 @@ export function Shell() {
           <ErrorNote error={logout.error} onRetry={() => logout.mutate()} />
         </div>
       ) : null}
+      <p role="status" className="border-warning border p-3 text-sm">
+        {tr.t('setup.noAlertsWarning')}
+      </p>
       <div className="flex flex-1">
         <nav
           aria-label={tr.t('nav.main')}

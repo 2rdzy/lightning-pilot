@@ -26,3 +26,29 @@ export function writeVaultKey(dir: string, key: Buffer = randomBytes(32)): strin
   writeFileSync(path, key.toString('hex') + '\n', { mode: 0o600 });
   return path;
 }
+
+// Completes the actual wizard for tests of other modules. Uses the previous TOTP window, leaving the current code
+// available for a subsequent login. Setup-route tests exercise cookies/CSRF separately over HTTP.
+export async function setupForTest(
+  setup: import('./modules/setup/service.ts').SetupService,
+  token: string,
+  password: string,
+  now = new Date(),
+) {
+  let result = await setup.act({ action: 'start', token }, undefined, undefined, 'r-test');
+  const cookie = result.cookie;
+  const csrf = result.progress.csrfToken;
+  const act = (action: import('@lightning-pilot/core').SetupAction) => setup.act(action, cookie, csrf, 'r-test');
+  result = await act({ action: 'password', password });
+  const secret = result.progress.secret;
+  if (!secret) throw new Error('No enrolment secret');
+  const { totp } = await import('./modules/auth/totp/totp.ts');
+  result = await act({ action: 'totp', code: totp(secret, new Date(now.getTime() - 30_000)) });
+  const code = result.progress.recoveryCodes?.[0];
+  if (!code) throw new Error('No recovery code');
+  await act({ action: 'recovery', code });
+  await act({ action: 'backup', confirmed: true });
+  await act({ action: 'node', node: null });
+  await act({ action: 'alerts', alerts: { kind: 'none' } });
+  return { secret, reply: await act({ action: 'complete' }) };
+}

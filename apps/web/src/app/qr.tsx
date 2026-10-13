@@ -3,11 +3,19 @@
 import qrcode from 'qrcode-generator';
 import { useMemo } from 'react';
 
-export function QrCode({ value, label }: { value: string; label: string }) {
+export function QrCode({
+  value,
+  label,
+  preserveCase = false,
+}: {
+  value: string;
+  label: string;
+  preserveCase?: boolean;
+}) {
   const { size, path } = useMemo(() => {
     const qr = qrcode(0, 'M');
     // Upper case lets QR use its denser alphanumeric mode for bech32 invoices (style guide §6).
-    const upper = value.toUpperCase();
+    const upper = preserveCase ? value : value.toUpperCase();
     qr.addData(upper, /^[0-9A-Z $%*+\-./:]*$/.test(upper) ? 'Alphanumeric' : 'Byte');
     qr.make();
     const count = qr.getModuleCount();
@@ -16,7 +24,7 @@ export function QrCode({ value, label }: { value: string; label: string }) {
       for (let col = 0; col < count; col++) if (qr.isDark(row, col)) d += `M${col + 4} ${row + 4}h1v1h-1z`;
     }
     return { size: count + 8, path: d };
-  }, [value]);
+  }, [value, preserveCase]);
   return (
     <svg
       role="img"

@@ -78,7 +78,12 @@ export class Vault {
     const canary = await setting(db, 'vault_canary');
     const hasSecrets = (await db.selectFrom('credentials').select('node_id').limit(1).executeTakeFirst()) !== undefined;
     if (storedId === undefined && canary === undefined) {
-      if (hasSecrets) throw new VaultError('vault canary missing');
+      if (
+        hasSecrets ||
+        (await db.selectFrom('auth_totp').select('id').executeTakeFirst()) !== undefined ||
+        (await setting(db, 'setup_alerts')) !== undefined
+      )
+        throw new VaultError('vault canary missing');
       return new Vault(key, false);
     }
     if (storedId !== undefined && storedId !== keyId) {
@@ -138,6 +143,23 @@ export class Vault {
     if (!row) return undefined;
     if (row.key_id !== this.keyId) throw new VaultError('credential encrypted under another key');
     return open(this.#key, row.nonce, row.ciphertext, `${this.keyId}|${nodeId}|${kind}`).toString('utf8');
+  }
+
+  // Owner/service secrets have their own tables; the AAD names their purpose, never a node credential row.
+  sealSecret(secret: string, purpose: 'totp' | 'telegram_token') {
+    this.#open();
+    if (!this.#initialised) throw new VaultError('vault not initialised');
+    const sealed = seal(this.#key, Buffer.from(secret), `${this.keyId}|${purpose}`);
+    return { key_id: this.keyId, ...sealed };
+  }
+
+  openSecret(
+    value: { key_id: string; nonce: Uint8Array; ciphertext: Uint8Array },
+    purpose: 'totp' | 'telegram_token',
+  ): string {
+    this.#open();
+    if (value.key_id !== this.keyId) throw new VaultError('secret encrypted under another key');
+    return open(this.#key, value.nonce, value.ciphertext, `${this.keyId}|${purpose}`).toString('utf8');
   }
 
   // Wipes the key; the vault refuses every use afterwards.

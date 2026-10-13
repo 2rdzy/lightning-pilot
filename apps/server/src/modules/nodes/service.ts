@@ -57,6 +57,13 @@ export interface NodeSummaryData {
   createdAt: string;
 }
 
+export interface PreparedNode {
+  input: AddNodeRequest & { serverName: string };
+  row: NodeRow;
+  adapter: NodeAdapter;
+  facts: Awaited<ReturnType<NodeAdapter['node']['getInfo']>>;
+}
+
 export class NodesService {
   readonly #db: Db;
   readonly #vault: Vault;
@@ -92,7 +99,7 @@ export class NodesService {
     return runIdentityCheck(adapter, chain, network, this.#now());
   }
 
-  async add(input: AddNodeRequest & { serverName: string }, requestId: string): Promise<NodeSummaryData> {
+  async prepare(input: AddNodeRequest & { serverName: string }, requestId: string): Promise<PreparedNode> {
     if (!PROFILES[input.chain].networks.includes(input.network)) {
       throw new AppError('validation_failed', `${PROFILES[input.chain].displayName} has no ${input.network} network.`);
     }
@@ -128,50 +135,62 @@ export class NodesService {
     }
 
     const id = randomUUID();
-    const now = this.#now().toISOString();
-    try {
-      await writeTx(this.#db, async (trx) => {
-        await this.#refuseAtLimit(trx);
-        await trx
-          .insertInto('nodes')
-          .values({
-            id,
-            name: input.name,
-            chain: input.chain,
-            network: input.network,
-            implementation: 'cln',
-            url: input.url,
-            ca_certificate: input.caCertificate,
-            server_name: input.serverName,
-            pubkey: facts.pubkey,
-            identity_state: identity.state,
-            identity_failed_check: identity.failedCheck ?? null,
-            identity_detail: identity.detail ?? null,
-            identity_checked_at: identity.checkedAt,
-            created_at: now,
-          })
-          .execute();
-        await this.#vault.put(trx, id, 'read', input.viewRune);
-        if (input.spendRune !== undefined) await this.#vault.put(trx, id, 'spend', input.spendRune);
-      });
-    } catch (err) {
-      if (err instanceof Error && /UNIQUE/i.test(err.message)) {
-        throw new AppError('validation_failed', 'This node has already been added.');
-      }
-      throw err;
-    }
-    this.#adapters.set(id, adapter);
-    this.monitor.recordBaseline(id, facts);
-    this.#log.info('node added', {
-      requestId,
-      nodeId: id,
+    const row: NodeRow = {
+      id,
+      name: input.name,
       chain: input.chain,
       network: input.network,
+      implementation: 'cln',
+      url: input.url,
+      ca_certificate: input.caCertificate,
+      server_name: input.serverName,
       pubkey: facts.pubkey,
-      identity: identity.state,
+      identity_state: identity.state,
+      identity_failed_check: identity.failedCheck ?? null,
+      identity_detail: identity.detail ?? null,
+      identity_checked_at: identity.checkedAt,
+      created_at: this.#now().toISOString(),
+    };
+    return { input, row, adapter, facts };
+  }
+
+  // Setup may call this inside its final transaction. No node call or cache mutation takes place under the lock.
+  async storePrepared(trx: Db, prepared: PreparedNode): Promise<void> {
+    await this.#refuseAtLimit(trx);
+    const { row, input } = prepared;
+    const duplicate = await trx
+      .selectFrom('nodes')
+      .select('id')
+      .where('chain', '=', row.chain)
+      .where('network', '=', row.network)
+      .where('pubkey', '=', row.pubkey)
+      .executeTakeFirst();
+    if (duplicate) throw new AppError('validation_failed', 'This node has already been added.');
+    await trx.insertInto('nodes').values(row).execute();
+    await this.#vault.put(trx, row.id, 'read', input.viewRune);
+    if (input.spendRune !== undefined) await this.#vault.put(trx, row.id, 'spend', input.spendRune);
+  }
+
+  rememberPrepared(prepared: PreparedNode, requestId: string): void {
+    const { row, adapter, facts, input } = prepared;
+    this.#adapters.set(row.id, adapter);
+    this.monitor.recordBaseline(row.id, facts);
+    this.#log.info('node added', {
+      requestId,
+      nodeId: row.id,
+      chain: row.chain,
+      network: row.network,
+      pubkey: facts.pubkey,
+      identity: row.identity_state,
       canSpend: input.spendRune !== undefined,
     });
-    return this.summary(id);
+  }
+
+  async add(input: AddNodeRequest & { serverName: string }, requestId: string): Promise<NodeSummaryData> {
+    const prepared = await this.prepare(input, requestId);
+    await writeTx(this.#db, (trx) => this.storePrepared(trx, prepared));
+    this.rememberPrepared(prepared, requestId);
+    return this.summary(prepared.row.id);
   }
 
   async #refuseAtLimit(db: Db): Promise<void> {

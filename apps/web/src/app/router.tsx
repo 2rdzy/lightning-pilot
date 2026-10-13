@@ -12,6 +12,7 @@ import {
 import { z } from 'zod';
 import type { ApiClient } from '../api/client.ts';
 import { DashboardScreen } from '../features/dashboard/DashboardScreen.tsx';
+import { RecoveryScreen } from '../features/login/RecoveryScreen.tsx';
 import { LoginScreen } from '../features/login/LoginScreen.tsx';
 import { PayScreen } from '../features/pay/PayScreen.tsx';
 import { ReceiveScreen } from '../features/receive/ReceiveScreen.tsx';
@@ -43,6 +44,7 @@ const setupRoute = createRoute({
   path: '/setup',
   beforeLoad: async ({ context }) => {
     const state = await sessionState(context.api);
+    if (state === 'recovery') throw redirect({ to: '/recover' });
     if (state === 'session') throw redirect({ to: '/' });
     if (state === 'anonymous') throw redirect({ to: '/login', search: {} });
   },
@@ -59,9 +61,22 @@ export const loginRoute = createRoute({
   beforeLoad: async ({ context }) => {
     const state = await sessionState(context.api);
     if (state === 'setup') throw redirect({ to: '/setup' });
+    if (state === 'recovery') throw redirect({ to: '/recover' });
     if (state === 'session') throw redirect({ to: '/' });
   },
   component: LoginScreen,
+});
+
+const recoveryRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: '/recover',
+  beforeLoad: async ({ context }) => {
+    const state = await sessionState(context.api);
+    if (state === 'setup') throw redirect({ to: '/setup' });
+    if (state === 'anonymous') throw redirect({ to: '/login', search: {} });
+    if (state === 'session') throw redirect({ to: '/' });
+  },
+  component: RecoveryScreen,
 });
 
 // Every route below needs a session; without one the app goes to the login screen and comes back afterwards.
@@ -71,6 +86,7 @@ const authRoute = createRoute({
   beforeLoad: async ({ context, location }) => {
     const state = await sessionState(context.api);
     if (state === 'setup') throw redirect({ to: '/setup' });
+    if (state === 'recovery') throw redirect({ to: '/recover' });
     if (state === 'anonymous') {
       const next = safeNext(location.href);
       throw redirect({ to: '/login', search: next === undefined || next === '/' ? {} : { next } });
@@ -133,6 +149,7 @@ export const payRoute = createRoute({
 const routeTree = rootRoute.addChildren([
   setupRoute,
   loginRoute,
+  recoveryRoute,
   authRoute.addChildren([indexRoute, nodeRoute.addChildren([dashboardRoute, receiveRoute, payRoute])]),
 ]);
 

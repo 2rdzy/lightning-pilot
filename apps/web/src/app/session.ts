@@ -2,16 +2,16 @@
 // client's memory; after a reload GET /auth/session gives it again (sessions spec).
 import { ApiError, type ApiClient } from '../api/client.ts';
 
-export type SessionState = 'setup' | 'anonymous' | 'session';
+export type SessionState = 'setup' | 'anonymous' | 'session' | 'recovery';
 
 export async function sessionState(api: ApiClient): Promise<SessionState> {
-  if (api.hasSession) return 'session';
+  if (api.hasSession) return api.requiresRecovery ? 'recovery' : 'session';
   const { setupRequired } = await api.call('setupStatus');
   if (setupRequired) return 'setup';
   try {
     const session = await api.call('session');
-    api.setCsrfToken(session.csrfToken);
-    return 'session';
+    api.setCsrfToken(session.csrfToken, session.recoveryRequired);
+    return session.recoveryRequired ? 'recovery' : 'session';
   } catch (err) {
     if (err instanceof ApiError && err.code === 'unauthenticated') return 'anonymous';
     throw err;

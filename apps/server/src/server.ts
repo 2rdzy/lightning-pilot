@@ -9,6 +9,7 @@ import type { Router } from './http/context.ts';
 import type { Logger } from './logging/logger.ts';
 import { AuthService, type ScryptCost } from './modules/auth/index.ts';
 import { NodesService, type AdapterFactory } from './modules/nodes/index.ts';
+import { SetupService } from './modules/setup/index.ts';
 import { SpendService } from './modules/spend/index.ts';
 import { loadVaultKey, Vault } from './modules/vault/index.ts';
 import type { Config } from './config/config.ts';
@@ -26,6 +27,7 @@ export interface ServerOptions {
   webRoot?: string;
   // Chain identity polling interval (ms); tests set it short.
   identityIntervalMs?: number;
+  issueSetupToken?: boolean;
 }
 
 export interface Server {
@@ -33,6 +35,7 @@ export interface Server {
   db: Db;
   auth: AuthService;
   nodes: NodesService;
+  setup: SetupService;
   close(): Promise<void>;
 }
 
@@ -70,7 +73,17 @@ export async function buildServer(options: ServerOptions): Promise<Server> {
     ...(options.identityIntervalMs === undefined ? {} : { identityIntervalMs: options.identityIntervalMs }),
   });
   const spend = new SpendService({ db, nodes, logger, ...(options.now ? { now: options.now } : {}) });
+  const setup = new SetupService({
+    db,
+    vault,
+    auth,
+    nodes,
+    logger,
+    ...(options.scryptCost ? { scryptCost: options.scryptCost } : {}),
+    ...(options.now ? { now: options.now } : {}),
+  });
   const app = createApp({
+    setup,
     auth,
     nodes,
     spend,
@@ -79,11 +92,13 @@ export async function buildServer(options: ServerOptions): Promise<Server> {
     ...(options.webRoot ? { webRoot: options.webRoot } : {}),
   });
   logger.info('vault opened', { keyId: vault.keyId, initialised: vault.initialised });
-  await auth.issueSetupToken();
+  if (options.issueSetupToken !== false) await auth.issueSetupToken();
   const close = async () => {
+    setup.close();
+    auth.close();
     await nodes.monitor.stop();
     await db.destroy();
     vault.close();
   };
-  return { app, db, auth, nodes, close };
+  return { app, db, auth, nodes, setup, close };
 }
