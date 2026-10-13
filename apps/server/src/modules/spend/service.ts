@@ -101,7 +101,9 @@ export class SpendService {
   async preview(sessionHandle: string, nodeId: string, request: string, requestId: string): Promise<PreviewResult> {
     const { row, adapter, canSpend } = await this.#nodes.adapter(nodeId);
     if (!canSpend) throw new AppError('capability_missing', 'This node has no spend credential.');
-    const identity = this.#nodes.identity(row);
+    // A cheap getinfo against the last full identity check; a full check runs first if the node changed (new
+    // block, new version, another public key, back from unreachable).
+    const identity = await this.#nodes.monitor.ensureFresh(nodeId);
     if (identity.state === 'waiting') throw new AppError('chain_waiting', 'The node is not ready on its chain yet.');
     if (identity.state !== 'confirmed')
       throw new AppError('chain_refused', 'The node failed the chain identity check.');
@@ -121,12 +123,6 @@ export class SpendService {
     }
     if (decoded.expiresAt.getTime() <= this.#now().getTime()) {
       throw new AppError('validation_failed', 'The invoice has expired.');
-    }
-
-    // The node must still be the one whose identity was checked: same public key, same network.
-    const facts = await adapter.node.getInfo();
-    if (facts.pubkey !== row.pubkey || facts.network !== row.network) {
-      throw new AppError('chain_refused', 'The node is not the one that was checked.');
     }
 
     await this.#guardInvoice(nodeId, adapter, decoded.paymentHash, requestId);
@@ -205,6 +201,15 @@ export class SpendService {
       .select('id')
       .where('idempotency_key', '=', idempotencyKey)
       .executeTakeFirst();
+    // No new spend on a node whose chain identity is not confirmed (chain-identity spec §5): the identity monitor may
+    // have refused it since the preview. A retry with a known key only returns the first result, so it goes on.
+    if (!retried) {
+      const identity = this.#nodes.identity(row);
+      if (identity.state === 'waiting') throw new AppError('chain_waiting', 'The node is not ready on its chain yet.');
+      if (identity.state !== 'confirmed') {
+        throw new AppError('chain_refused', 'The node failed the chain identity check.');
+      }
+    }
     if (pending && !retried) {
       const { paymentHash } = JSON.parse(pending.payload) as PreviewPayload;
       await this.#guardInvoice(nodeId, adapter, parsePaymentHash(paymentHash), requestId);

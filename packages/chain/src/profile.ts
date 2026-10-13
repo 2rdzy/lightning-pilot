@@ -1,8 +1,8 @@
 // The chain-profile file: every chain-specific constant in one place, each with its source. Bump
 // CHAIN_PROFILE_VERSION when a value changes, so logs and support requests show which rules were in force.
-import type { Chain, Network } from '@lightning-pilot/core';
+import type { Chain, Implementation, Network } from '@lightning-pilot/core';
 
-export const CHAIN_PROFILE_VERSION = 1;
+export const CHAIN_PROFILE_VERSION = 2;
 
 export interface ChainProfile {
   chain: Chain;
@@ -66,12 +66,29 @@ export const FEATURE_BITS = {
   option_unified_sigs: [514, 515],
 } as const;
 
-// Node software versions the contract tests pin (tools/regtest/versions.json). Other versions may work; these are
-// the ones tested.
-export const TESTED_VERSIONS: Record<Chain, { cln: string }> = {
-  blake2b: { cln: 'v26.06.9-blake2b.7' },
-  bitcoin: { cln: 'v26.06.9' },
+// The fork-version table: the node software versions tested for each chain profile and implementation. It is
+// information, not a rule: other versions may work, and the identity check never refuses a node for its version
+// (the five checks look at what the node does, not what it calls itself). Sources: CLN, the pins of
+// tools/regtest/versions.json (the contract tests; a test keeps the two in step); LND, the /blake2bInfra environment
+// (docs vault blake2bInfra/README.md, versions of 2026-10-12), until tools/regtest runs LND in release 0.2.
+export interface TestedVersions {
+  cln: string;
+  lnd: string;
+}
+
+export const FORK_VERSIONS: Record<Chain, TestedVersions> = {
+  // CLN fork (privkeyio, branch blake2b-unified) and Lightning Fork (paulscode/lightning-fork).
+  blake2b: { cln: 'v26.06.9-blake2b.7', lnd: '0.21.4-beta-blake2b.18' },
+  // Stock Core Lightning and LND.
+  bitcoin: { cln: 'v26.06.9', lnd: '0.21.4-beta' },
 };
+
+// Whether a node runs a version the contract tests cover. CLN reports `v26.06.9-blake2b.7`; LND reports
+// `0.21.4-beta commit=` or `0.21.4-beta-blake2b.18 commit=` (seen 2026-10-13), so only its first word is compared.
+export function versionTested(chain: Chain, implementation: Implementation, version: string): boolean {
+  const reported = implementation === 'lnd' ? version.replace(/ .*$/s, '') : version;
+  return FORK_VERSIONS[chain][implementation] === reported;
+}
 
 // Feature bits as hex, most significant byte first (as CLN reports them). Tested on the string, never with 32-bit
 // shifts, because the bits of interest are above 500.

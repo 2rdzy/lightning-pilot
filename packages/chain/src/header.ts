@@ -19,8 +19,14 @@ function readVarInt(bytes: Uint8Array, offset: number): bigint {
   const width = first < 0xfd ? 0 : first === 0xfd ? 2 : first === 0xfe ? 4 : 8;
   if (width === 0) return BigInt(first);
   if (offset + 1 + width > bytes.length) throw new HeaderError('truncated transaction count');
-  let value = 0n;
-  for (let i = width; i >= 1; i--) value = (value << 8n) | BigInt(bytes[offset + i] ?? 0);
+  // Little-endian, as everything in Bitcoin's serialisation.
+  const view = new DataView(bytes.buffer, bytes.byteOffset + offset + 1, width);
+  const value =
+    width === 2
+      ? BigInt(view.getUint16(0, true))
+      : width === 4
+        ? BigInt(view.getUint32(0, true))
+        : view.getBigUint64(0, true);
   // Non-canonical encodings (a wider form than needed) are invalid in Bitcoin's serialisation.
   const minimum = width === 2 ? 0xfdn : width === 4 ? 0x10000n : 0x100000000n;
   if (value < minimum) throw new HeaderError('non-canonical transaction count');
@@ -31,7 +37,7 @@ export function parseBlockHeader(hex: string): ParsedHeader {
   if (!/^([0-9a-f]{2})+$/i.test(hex)) throw new HeaderError('block is not hex');
   const bytes = Uint8Array.from(Buffer.from(hex, 'hex'));
   if (bytes.length < 4) throw new HeaderError('block too short');
-  const version = ((bytes[0] ?? 0) | ((bytes[1] ?? 0) << 8) | ((bytes[2] ?? 0) << 16) | ((bytes[3] ?? 0) << 24)) >>> 0;
+  const version = new DataView(bytes.buffer, bytes.byteOffset, 4).getUint32(0, true);
   const versionTopBit = (version & VERSION_TOP_BIT) !== 0;
   const headerBytes = versionTopBit ? 164 : 80;
   if (bytes.length <= headerBytes) throw new HeaderError(`block shorter than its ${headerBytes}-byte header`);

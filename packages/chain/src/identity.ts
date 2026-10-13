@@ -7,9 +7,18 @@
 //                  have Bitcoin headers)
 //   5 sync         the node's backend is synced (otherwise `waiting`)
 // Anything that cannot be told is `refused`, never "probably fine".
-import type { Chain, ChainIdentityState, FailedCheck, Network, NodeFacts } from '@lightning-pilot/core';
+import {
+  untrustedText,
+  type Chain,
+  type ChainIdentityState,
+  type FailedCheck,
+  type Network,
+  type NodeFacts,
+} from '@lightning-pilot/core';
 import { HeaderError, parseBlockHeader } from './header.ts';
 import { BLAKE2B_ACTIVATION_HEIGHT, FEATURE_BITS, hasAnyFeature, PROFILES } from './profile.ts';
+
+const NETWORK_NAME_MAX = 32;
 
 export interface IdentityInput {
   profile: Chain;
@@ -34,7 +43,9 @@ export function checkChainIdentity(input: IdentityInput): ChainIdentityState {
     return result('refused', 'network', `${profile.displayName} has no ${input.network} network`);
   }
   if (input.facts.network !== input.network) {
-    return result('refused', 'network', `node is on ${input.facts.networkRaw}, profile expects ${input.network}`);
+    // The network name comes from the node: the detail is stored, logged and shown, so it is cleaned and cut.
+    const raw = untrustedText(input.facts.networkRaw, NETWORK_NAME_MAX);
+    return result('refused', 'network', `node is on ${raw}, profile expects ${input.network}`);
   }
 
   let blake2bAware: boolean;
@@ -59,8 +70,8 @@ export function checkChainIdentity(input: IdentityInput): ChainIdentityState {
   try {
     header = parseBlockHeader(input.tip.raw);
   } catch (err) {
-    const why = err instanceof HeaderError ? err.message : 'unreadable block';
-    return result('refused', 'header', `tip block ${input.tip.height}: ${why}`);
+    // parseBlockHeader throws only HeaderError, whose messages are fixed text.
+    return result('refused', 'header', `tip block ${input.tip.height}: ${(err as HeaderError).message}`);
   }
   if (header.versionTopBit !== profile.versionTopBit || header.headerBytes !== profile.headerBytes) {
     return result(
