@@ -11,7 +11,7 @@ import {
   type Page,
   type PageRequest,
 } from '@lightning-pilot/core';
-import { offsetPage, parse, type Call } from './context.ts';
+import { checkOffsetPage, offsetPage, parse, type Call } from './context.ts';
 import { AccountEvents, GetInfo, ListTransactions } from './schemas.ts';
 
 // "Unknown command": the bookkeeper plugin is not running.
@@ -31,6 +31,7 @@ interface TxFacts {
 }
 
 export async function listTransactions(call: Call, page: PageRequest | undefined): Promise<Page<OnchainTx>> {
+  checkOffsetPage(page);
   const tip = parse(GetInfo, await call('getinfo', {})).blockheight;
   const { transactions } = parse(ListTransactions, await call('listtransactions', {}));
   let events: (typeof AccountEvents)['_output']['events'] | undefined;
