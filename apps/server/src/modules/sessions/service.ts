@@ -26,6 +26,12 @@ export interface Session {
   expiresAt: Date;
   recoveryRequired: boolean;
 }
+// The account-wide second-factor counter of the login throttle. A wrong TOTP code at security step-up is a factor
+// guess like one at login, so it is counted there too; a complete password + TOTP success clears it.
+export interface FactorCounter {
+  failed(db: Db): Promise<void>;
+  succeeded(db: Db): Promise<void>;
+}
 export interface SessionsOptions {
   db: Db;
   logger: Logger;
@@ -396,8 +402,9 @@ export class SessionsService {
     requestId: string,
     checkPassword: () => Promise<{ matches: boolean; snapshot: string }>,
     checkFactor: (db: Db, snapshot: string) => Promise<boolean>,
+    factorCounter?: FactorCounter,
   ): Promise<NewSession & { strength: StepUpStrength; stepUpExpiresAt: Date }> {
-    const promise = this.#stepUp(idHash, strength, requestId, checkPassword, checkFactor);
+    const promise = this.#stepUp(idHash, strength, requestId, checkPassword, checkFactor, factorCounter);
     this.#running.add(promise);
     void promise.finally(() => this.#running.delete(promise)).catch(() => {});
     return promise;
@@ -409,6 +416,7 @@ export class SessionsService {
     requestId: string,
     checkPassword: () => Promise<{ matches: boolean; snapshot: string }>,
     checkFactor: (db: Db, snapshot: string) => Promise<boolean>,
+    factorCounter?: FactorCounter,
   ) {
     if (this.#closed) throw new AppError('busy', 'Server is stopping.', { retryAfter: 1 });
     if (this.#claims.has(idHash))
@@ -430,27 +438,44 @@ export class SessionsService {
           throw new AppError('permission_denied', 'Recover the authenticator first.');
         if (!password.matches || !(await checkFactor(db, password.snapshot))) {
           const failures = current.step_up_failures + 1;
+          // The password matched, so the second factor was wrong (or the password changed meanwhile, which is
+          // counted the same way: the conservative side).
+          const factorFailed = strength === 'security' && password.matches;
           await db
             .updateTable('sessions')
             .set({
               step_up_failures: failures,
               step_up_retry_at: this.#now().getTime() + Math.min(2 ** (failures - 1), 900) * 1000,
+              ...(factorFailed ? { step_up_factor_failed: 1 } : {}),
             })
             .where('id_hash', '=', idHash)
             .execute();
+          if (factorFailed) await factorCounter?.failed(db);
           if (failures >= 5) await this.markEnded(db, [current.handle], 'step_up_failures');
-          return { ok: false as const, revoked: failures >= 5, handle: current.handle };
+          return { ok: false as const, revoked: failures >= 5, handle: current.handle, factorFailed };
         }
         const cookieValue = randomBytes(32).toString('base64url');
+        // Only a password + TOTP success clears TOTP failures. Otherwise someone who knows the password could
+        // reset the count with a password-only step-up after every few TOTP guesses and never reach revocation.
+        const keepFailures = strength === 'password' && current.step_up_factor_failed === 1;
         await db
           .updateTable('sessions')
-          .set({ id_hash: sessionDigest(cookieValue), step_up_failures: 0, step_up_retry_at: 0 })
+          .set({
+            id_hash: sessionDigest(cookieValue),
+            ...(keepFailures ? {} : { step_up_failures: 0, step_up_retry_at: 0, step_up_factor_failed: 0 }),
+          })
           .where('id_hash', '=', idHash)
           .execute();
+        if (strength === 'security') await factorCounter?.succeeded(db);
         return { ok: true as const, cookieValue, row: current };
       });
       if (!result.ok) {
-        this.#log.warn('step-up failed', { requestId, security: true, revoked: result.revoked });
+        this.#log.warn('step-up failed', {
+          requestId,
+          security: true,
+          revoked: result.revoked,
+          ...(result.factorFailed ? { factor: 'totp' } : {}),
+        });
         if (result.revoked) {
           this.notifyEnded([result.handle], 'step_up_failures');
           for (const alert of this.#alerts) this.#call(() => alert(result.handle));

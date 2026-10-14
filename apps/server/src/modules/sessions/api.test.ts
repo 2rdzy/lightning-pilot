@@ -120,6 +120,32 @@ describe('session HTTP and security-settings boundaries', () => {
       expect(await error(await h.request(method, path, body)), path).toBe('step_up_required');
     }
   });
+  it('counts a wrong TOTP code at security step-up on the account-wide factor counter; a full success clears it', async () => {
+    const h = await harness();
+    const factor = () =>
+      h.server.db.selectFrom('login_throttles').selectAll().where('counter', '=', 'factor').executeTakeFirst();
+    h.clock.now = new Date(h.clock.now.getTime() + 60_000);
+    const wrong = await h.request('POST', '/api/v1/auth/step-up', {
+      password: PASSWORD,
+      strength: 'security',
+      totpCode: '000000' === totp(h.enrolled.secret, h.clock.now) ? '111111' : '000000',
+    });
+    expect(await error(wrong)).toBe('login_failed');
+    expect((await factor())?.failures).toBe(1);
+    // A wrong password is not a factor guess.
+    h.clock.now = new Date(h.clock.now.getTime() + 2_000);
+    const badPassword = await h.request('POST', '/api/v1/auth/step-up', {
+      password: 'wrong-password',
+      strength: 'password',
+    });
+    expect(await error(badPassword)).toBe('login_failed');
+    expect((await factor())?.failures).toBe(1);
+    // Step-up does not wait on the account counter (the session has its own delay), so the owner can still prove both factors.
+    h.clock.now = new Date(h.clock.now.getTime() + 60_000);
+    await h.step('security');
+    expect(await factor()).toBeUndefined();
+    expect(h.logs.some((l) => l.includes('"step-up failed"') && l.includes('"factor":"totp"'))).toBe(true);
+  });
   it('rotates the secure host cookie and CSRF, preserves handle and absolute expiry, and rejects the old cookie', async () => {
     const h = await harness();
     const before = { ...h.auth };

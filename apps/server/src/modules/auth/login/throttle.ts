@@ -193,6 +193,20 @@ export class LoginThrottle {
     await db.deleteFrom('login_throttles').where('counter', 'in', [source.counter, 'factor']).execute();
   }
 
+  // A wrong TOTP code at security step-up (the password matched) is a factor guess too. Step-up counts it here but
+  // does not wait on this counter: someone who knows the password could otherwise keep the owner from the security
+  // step-up needed to change that password. Step-up has its own per-session delay and revocation instead.
+  async factorFailed(db: Db): Promise<void> {
+    const now = this.#now().getTime();
+    await this.#prune(db, now);
+    await this.#record(db, 'factor', 'factor', now);
+  }
+
+  // A complete password + TOTP step-up clears the account's factor counter, like a complete login.
+  async factorSucceeded(db: Db): Promise<void> {
+    await db.deleteFrom('login_throttles').where('counter', '=', 'factor').execute();
+  }
+
   // Setup-token checks use the login source identity (IPv6 /64, trusted proxies, Tor listener) with their own
   // persisted counters. The check is cheap, so it needs a claim but no hash lane.
   // verify returns the matched value, or undefined for a wrong token.

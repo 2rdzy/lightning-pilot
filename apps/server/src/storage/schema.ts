@@ -37,6 +37,7 @@ export interface DB {
     end_reason: Generated<string | null>;
     step_up_failures: Generated<number>;
     step_up_retry_at: Generated<number>;
+    step_up_factor_failed: Generated<number>;
     recovery_required: Generated<number>;
     id_hash: string;
     handle: string;

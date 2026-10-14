@@ -269,7 +269,7 @@ describe('step-up strength, rotation and throttling', () => {
       'step_up_failures',
     );
   });
-  it('persists a failed-factor penalty across restart and resets failures on successful step-up', async () => {
+  it('persists a failed-factor penalty across restart; only a password + TOTP success clears it', async () => {
     const h = await fixture();
     await expect(h.step('security', true, false)).rejects.toMatchObject({ code: 'login_failed' });
     const restarted = new SessionsService({
@@ -288,10 +288,71 @@ describe('step-up strength, rotation and throttling', () => {
     ).rejects.toMatchObject({ code: 'too_early' });
     await restarted.close();
     h.clock.now = new Date(h.clock.now.getTime() + 1000);
-    const result = await h.step();
-    const row = await h.sessions.live(h.db, sessionDigest(result.cookieValue));
+    const password = await h.step();
+    let row = await h.sessions.live(h.db, sessionDigest(password.cookieValue));
+    expect(row.step_up_failures).toBe(1);
+    expect(row.step_up_factor_failed).toBe(1);
+    const security = await h.step('security', true, true, row.id_hash);
+    row = await h.sessions.live(h.db, sessionDigest(security.cookieValue));
     expect(row.step_up_failures).toBe(0);
     expect(row.step_up_retry_at).toBe(0);
+    expect(row.step_up_factor_failed).toBe(0);
+  });
+  it('a password-only success never clears TOTP failures, so guessing still ends in revocation', async () => {
+    // Review F1: four wrong TOTP codes, a password-only success, repeat. Before the fix this never revoked.
+    const h = await fixture();
+    const counter = { failed: vi.fn(async () => {}), succeeded: vi.fn(async () => {}) };
+    let idHash = h.idHash;
+    const step = (strength: 'password' | 'security', factor: boolean) =>
+      h.sessions.stepUp(
+        idHash,
+        strength,
+        'r',
+        async () => ({ matches: true, snapshot: 's' }),
+        async () => factor,
+        counter,
+      );
+    for (let i = 0; i < 4; i++) {
+      await expect(step('security', false)).rejects.toMatchObject({ code: 'login_failed' });
+      h.clock.now = new Date(h.clock.now.getTime() + 16_000);
+    }
+    idHash = sessionDigest((await step('password', true)).cookieValue);
+    h.clock.now = new Date(h.clock.now.getTime() + 16_000);
+    await expect(step('security', false)).rejects.toMatchObject({ code: 'login_failed' });
+    expect((await h.db.selectFrom('sessions').selectAll().executeTakeFirstOrThrow()).end_reason).toBe(
+      'step_up_failures',
+    );
+    expect(counter.failed).toHaveBeenCalledTimes(5);
+    expect(counter.succeeded).not.toHaveBeenCalled();
+    const failed = h.logs
+      .map((l) => JSON.parse(l) as { msg: string; factor?: string })
+      .filter((e) => e.msg === 'step-up failed');
+    expect(failed.every((e) => e.factor === 'totp')).toBe(true);
+  });
+  it('a password-only success still clears password typos, and only factor failures reach the factor counter', async () => {
+    const h = await fixture();
+    const counter = { failed: vi.fn(async () => {}), succeeded: vi.fn(async () => {}) };
+    let idHash = h.idHash;
+    const step = (strength: 'password' | 'security', matches: boolean, factor = true) =>
+      h.sessions.stepUp(
+        idHash,
+        strength,
+        'r',
+        async () => ({ matches, snapshot: 's' }),
+        async () => factor,
+        counter,
+      );
+    for (let i = 0; i < 4; i++) {
+      await expect(step('security', false)).rejects.toMatchObject({ code: 'login_failed' });
+      h.clock.now = new Date(h.clock.now.getTime() + 16_000);
+    }
+    expect(counter.failed).not.toHaveBeenCalled();
+    idHash = sessionDigest((await step('password', true)).cookieValue);
+    const row = await h.sessions.live(h.db, idHash);
+    expect([row.step_up_failures, row.step_up_factor_failed]).toEqual([0, 0]);
+    expect(counter.succeeded).not.toHaveBeenCalled();
+    idHash = sessionDigest((await step('security', true)).cookieValue);
+    expect(counter.succeeded).toHaveBeenCalledOnce();
   });
   it('claims before checking and only hashes one parallel attempt on the same session', async () => {
     const h = await fixture();
