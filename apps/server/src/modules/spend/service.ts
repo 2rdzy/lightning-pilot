@@ -42,6 +42,11 @@ const RETRY_FOR_SECONDS = 60;
 const SETTLE_FAILED_AFTER_MS = (RETRY_FOR_SECONDS + 60) * 1000;
 const BLOCKING = ['reserved', 'sent', 'unknown', 'succeeded'];
 const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
+// A preimage is stored only when it proves the payment: 32 bytes whose SHA-256 is the payment hash.
+function provenPreimage(preimage: string | undefined, paymentHash: string): string | undefined {
+  if (preimage === undefined || !/^[0-9a-f]{64}$/.test(preimage)) return undefined;
+  return createHash('sha256').update(Buffer.from(preimage, 'hex')).digest('hex') === paymentHash ? preimage : undefined;
+}
 function blockedBy(state: string): AppError {
   return state === 'succeeded'
     ? new AppError('validation_failed', 'This invoice has already been paid from this node.')
@@ -155,7 +160,7 @@ export class SpendService {
         .onConflict((oc) => oc.columns(['chain', 'pubkey']).doUpdateSet(values))
         .execute();
     });
-    this.#log.info('spend limits changed', { requestId, nodeId });
+    this.#log.warn('spend limits changed', { requestId, nodeId, sessionHandle: handle, security: true });
   }
   async #duplicates(db: Db, identity: NodeIdentity, destination: string, amount: string): Promise<string[]> {
     const rows = await db
@@ -287,6 +292,7 @@ export class SpendService {
       intent.payment_hash,
       intent.amount_msat,
       intent.fee_msat,
+      intent.preimage ?? undefined,
     );
   }
   async execute(
@@ -347,6 +353,9 @@ export class SpendService {
         );
       const fee = lightningFee(parseMsat(payload.amount), policy, payload.maxFee);
       if (stepUp || fee.override) this.#auth.sessions.requireGrant(live, 'password');
+      // Consumed inside the admission transaction, after the last check that can refuse: a refusal (step-up,
+      // duplicate) keeps the token for a retry, an admitted intent can never be admitted twice from it.
+      this.#confirmations.delete(tokenHash);
       const intentId = randomUUID();
       await trx
         .insertInto('spend_intents')
@@ -396,7 +405,6 @@ export class SpendService {
       ),
     );
     if ('replay' in claimed) return claimed.replay;
-    this.#confirmations.delete(tokenHash);
     const { intentId } = claimed;
     const paymentHash = parsePaymentHash(payload.paymentHash);
     let state: ExecuteResult['state'];
@@ -409,6 +417,8 @@ export class SpendService {
       this.#log.info('spend intent', {
         requestId,
         intentId,
+        sessionHandle,
+        security: true,
         nodeId,
         chain: row.chain,
         type: 'bolt11',
@@ -458,6 +468,8 @@ export class SpendService {
         this.#log.warn('payment not completed', {
           requestId,
           intentId,
+          sessionHandle,
+          security: true,
           state,
           code: errorCode,
           nodeCode: err instanceof AdapterError ? err.nodeCode : undefined,
@@ -474,6 +486,7 @@ export class SpendService {
         state,
         ...(paidAmount === undefined ? {} : { amount_msat: toMsatString(paidAmount) }),
         fee_msat: fee === undefined ? null : toMsatString(fee),
+        preimage: provenPreimage(preimage, paymentHash) ?? null,
         error_code: errorCode,
         updated_at: this.#now().toISOString(),
       })
@@ -483,6 +496,8 @@ export class SpendService {
       this.#log.info('spend result', {
         requestId,
         intentId,
+        sessionHandle,
+        security: true,
         nodeId,
         paymentHash,
         state,
@@ -553,10 +568,12 @@ export class SpendService {
     const now = this.#now();
     let state: 'succeeded' | 'failed' | undefined;
     let fee: Msat | undefined;
+    let preimage: string | undefined;
     if (record?.status === 'succeeded') {
       state = 'succeeded';
       const amount = parseMsat(intent.amount_msat);
       if (record.amountSent !== undefined && record.amountSent >= amount) fee = msat(record.amountSent - amount);
+      preimage = provenPreimage(record.preimage, paymentHash);
     } else if (record?.status === 'failed' && now.getTime() - Date.parse(intent.updated_at) >= SETTLE_FAILED_AFTER_MS) {
       state = 'failed';
     }
@@ -566,6 +583,7 @@ export class SpendService {
       .set({
         state,
         ...(fee === undefined ? {} : { fee_msat: toMsatString(fee) }),
+        ...(preimage === undefined ? {} : { preimage }),
         updated_at: now.toISOString(),
       })
       .where('id', '=', intent.id)
@@ -574,6 +592,7 @@ export class SpendService {
     this.#log.info('spend settled', {
       requestId,
       intentId: intent.id,
+      security: true,
       paymentHash,
       state,
       ...(fee === undefined ? {} : { feeMsat: toMsatString(fee) }),

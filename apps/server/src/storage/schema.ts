@@ -75,6 +75,7 @@ export interface DB {
     destination: Generated<string | null>;
     session_handle: Generated<string | null>;
     confirmation_hash: Generated<string | null>;
+    preimage: Generated<string | null>;
     id: string;
     node_id: string;
     chain: string;
