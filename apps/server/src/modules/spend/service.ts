@@ -1,5 +1,5 @@
 // Every payment is decoded independently and admitted atomically before any fund-moving RPC.
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
 import { PROFILES } from '@lightning-pilot/chain';
 import {
   AdapterError,
@@ -11,7 +11,6 @@ import {
   parsePaymentHash,
   toMsatString,
   type Chain,
-  type ChainIdentityState,
   type PaymentHash,
   type Msat,
   type Network,
@@ -36,18 +35,20 @@ import {
   type NodeIdentity,
 } from './policy.ts';
 import { provenPreimage, RETRY_FOR_SECONDS, settleBolt11 } from './recovery/index.ts';
+import {
+  BLOCKING,
+  CONFIRMATION_TTL_MS,
+  duplicatesOf,
+  liveSession,
+  MAX_LIVE_CONFIRMATIONS,
+  refuseUnlessConfirmed,
+  sha256,
+} from './common.ts';
 
-const CONFIRMATION_TTL_MS = 120000;
-const BLOCKING = ['reserved', 'sent', 'unknown', 'succeeded'];
-const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
 function blockedBy(state: string): AppError {
   return state === 'succeeded'
     ? new AppError('validation_failed', 'This invoice has already been paid from this node.')
     : new AppError('spend_unknown', 'An earlier payment of this invoice has no known outcome yet.');
-}
-function refuseUnlessConfirmed(identity: ChainIdentityState): void {
-  if (identity.state === 'waiting') throw new AppError('chain_waiting', 'The node is not ready on its chain yet.');
-  if (identity.state !== 'confirmed') throw new AppError('chain_refused', 'The node failed the chain identity check.');
 }
 interface PreviewPayload {
   bolt11: string;
@@ -113,12 +114,8 @@ export class SpendService {
     this.#unlisten();
     this.#confirmations.clear();
   }
-  async #live(db: Db, handle: string) {
-    const row = await db.selectFrom('sessions').selectAll().where('handle', '=', handle).executeTakeFirst();
-    if (!row) throw new AppError('unauthenticated', 'Please log in.');
-    const live = await this.#auth.sessions.live(db, row.id_hash);
-    if (live.recovery_required === 1) throw new AppError('permission_denied', 'Complete authenticator recovery first.');
-    return live;
+  #live(db: Db, handle: string) {
+    return liveSession(db, this.#auth, handle);
   }
   async policy(nodeId: string) {
     const row = await this.#db.selectFrom('nodes').selectAll().where('id', '=', nodeId).executeTakeFirst();
@@ -155,20 +152,8 @@ export class SpendService {
     });
     this.#log.warn('spend limits changed', { requestId, nodeId, sessionHandle: handle, security: true });
   }
-  async #duplicates(db: Db, identity: NodeIdentity, destination: string, amount: string): Promise<string[]> {
-    const rows = await db
-      .selectFrom('spend_intents')
-      .select('id')
-      .where('chain', '=', identity.chain)
-      .where('pubkey', '=', identity.pubkey)
-      .where('destination', '=', destination)
-      .where('amount_msat', '=', amount)
-      .where('state', 'in', BLOCKING)
-      .where('created_at', '>', new Date(this.#now().getTime() - 600000).toISOString())
-      .where('created_at', '<=', this.#now().toISOString())
-      .orderBy('id')
-      .execute();
-    return rows.map((row) => row.id);
+  #duplicates(db: Db, identity: NodeIdentity, destination: string, amount: string): Promise<string[]> {
+    return duplicatesOf(db, identity, destination, amount, this.#now());
   }
   #prune(): void {
     for (const [hash, confirmation] of this.#confirmations)
@@ -239,7 +224,8 @@ export class SpendService {
     const digest = sha256(JSON.stringify({ nodeId, ...payload }));
     await this.#live(this.#db, sessionHandle);
     this.#prune();
-    if (this.#confirmations.size >= 1024) throw new AppError('busy', 'Too many pending payment previews.');
+    if (this.#confirmations.size >= MAX_LIVE_CONFIRMATIONS)
+      throw new AppError('busy', 'Too many pending payment previews.');
     const token = randomBytes(32).toString('base64url');
     const expiresAt = Math.min(this.#now().getTime() + CONFIRMATION_TTL_MS, invoice.expiresAt.getTime());
     this.#confirmations.set(sha256(token), { sessionHandle, nodeId, digest, payload, expiresAt });
@@ -275,7 +261,12 @@ export class SpendService {
     nodeId: string,
     hash: string,
   ): ExecuteResult {
-    if (intent.session_handle !== handle || intent.confirmation_hash !== hash || intent.node_id !== nodeId)
+    if (
+      intent.session_handle !== handle ||
+      intent.confirmation_hash !== hash ||
+      intent.node_id !== nodeId ||
+      intent.payment_hash === null
+    )
       throw new AppError('idempotency_conflict', 'This idempotency key was used for another request.');
     if (intent.state === 'reserved' || intent.state === 'sent')
       throw new AppError('idempotency_conflict', 'This payment is still running.');

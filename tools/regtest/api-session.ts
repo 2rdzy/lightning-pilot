@@ -20,6 +20,8 @@ export interface ApiSession {
   password: string;
   secret: string;
   request: (method: string, path: string, body?: unknown, headers?: Record<string, string>) => Promise<Response>;
+  // A fresh step-up of the given strength; the session cookie rotates.
+  stepUp: (strength: 'password' | 'security') => Promise<void>;
   // Closes the server, so another process can use the data directory.
   suspend: () => Promise<void>;
   // Closes the current server (if open) and opens a new one on the same data directory.
@@ -145,6 +147,15 @@ export async function apiSession(chain: RegtestChain): Promise<ApiSession> {
     password,
     secret,
     request,
+    stepUp: async (strength) => {
+      const res = await request('POST', '/api/v1/auth/step-up', {
+        password,
+        strength,
+        ...(strength === 'security' ? { totpCode: totp(secret, new Date(Date.now() + 60_000)) } : {}),
+      });
+      const body = await ok<{ csrfToken: string }>(res);
+      auth = { cookie: (res.headers.get('set-cookie') ?? '').split(';')[0] ?? '', csrf: body.csrfToken };
+    },
     suspend: close,
     reopen: async (options = {}) => {
       await close();

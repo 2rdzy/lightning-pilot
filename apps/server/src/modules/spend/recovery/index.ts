@@ -116,7 +116,15 @@ export class SpendRecovery {
       }
       for (const intent of intents) {
         let state: string = 'unknown';
-        if (intent.type === 'bolt11') state = await settleBolt11(this.#db, adapter, intent, this.#now(), this.#log);
+        if (intent.type === 'bolt11' && intent.payment_hash !== null)
+          state = await settleBolt11(
+            this.#db,
+            adapter,
+            { ...intent, payment_hash: intent.payment_hash },
+            this.#now(),
+            this.#log,
+          );
+        // On-chain and channel intents are not resolved yet (WP10 follow-up): they stay unknown and counted.
         else
           this.#log.warn('spend recovery: no resolver for this spend type', { intentId: intent.id, type: intent.type });
         if (state === 'unknown') {

@@ -11,6 +11,7 @@ import {
   AdapterError,
   msat,
   parsePaymentHash,
+  parseTxid,
   type Chain,
   type Network,
   type PaymentHash,
@@ -1331,7 +1332,7 @@ describe(`WP09 spending policy (${testDriver()})`, () => {
     vi.spyOn(s.payer.pay, 'pay').mockImplementationOnce(async () => {
       const intent = await s.h.server.db.selectFrom('spend_intents').selectAll().executeTakeFirstOrThrow();
       return {
-        paymentHash: parsePaymentHash(intent.payment_hash),
+        paymentHash: parsePaymentHash(intent.payment_hash ?? ''),
         preimage: '00'.repeat(32),
         amount: msat(BigInt(intent.amount_msat)),
         amountSent: msat(BigInt(intent.amount_msat)),
@@ -1734,6 +1735,66 @@ describe(`WP10 crash recovery of BOLT11 spends (${testDriver()})`, () => {
     expect((await s.intent(again, intentId)).state).toBe('unknown');
   });
 
+  it('reports the stored state when another path resolved the intent first, and reads odd records safely', async () => {
+    const s = await crashed();
+    const { intentId } = await paid(s, 'wp10-resolved-meanwhile');
+    const { settleBolt11 } = await import('./modules/spend/recovery/index.ts');
+    const row = await s.h.server.db
+      .selectFrom('spend_intents')
+      .selectAll()
+      .where('id', '=', intentId)
+      .executeTakeFirstOrThrow();
+    const logger = createLogger({ sink: () => undefined });
+    const args = { ...row, payment_hash: row.payment_hash ?? '' };
+    // The row is succeeded already: the update matches nothing, and the stored state is reported.
+    expect(await settleBolt11(s.h.server.db, s.payer, args, s.h.clock.now, logger)).toBe('succeeded');
+    await s.h.server.db.updateTable('spend_intents').set({ state: 'unknown' }).where('id', '=', intentId).execute();
+    // A record without amounts: succeeded, with no fee stored. A reader that throws something unexpected: unknown.
+    const odd = {
+      ...s.payer,
+      pay: {
+        ...s.payer.pay,
+        getPayment: async () => ({ paymentHash: row.payment_hash as PaymentHash, status: 'succeeded' as const }),
+      },
+    };
+    expect(await settleBolt11(s.h.server.db, odd, args, s.h.clock.now, logger)).toBe('succeeded');
+    const broken = {
+      ...s.payer,
+      pay: {
+        ...s.payer.pay,
+        getPayment: async () => {
+          throw new Error('boom');
+        },
+      },
+    };
+    expect(await settleBolt11(s.h.server.db, broken, args, s.h.clock.now, logger)).toBe('unknown');
+  });
+
+  it('never settles against a node that fails its chain identity check', async () => {
+    const s = await crashed();
+    const { intentId } = await paid(s, 'wp10-identity-refused');
+    const bolt11 = await s.invoice();
+    const { decodeBolt11 } = await import('@lightning-pilot/core');
+    const reserved = s.h.clock.now.toISOString();
+    await s.interrupt(intentId, {
+      payment_hash: decodeBolt11(bolt11).paymentHash,
+      created_at: reserved,
+      updated_at: reserved,
+    });
+    s.payer.pay.listByLabel = async () => [];
+    const server = await s.restart();
+    s.h.clock.now = new Date(s.h.clock.now.getTime() + 121_000);
+    // The node now runs the other chain's software: no record there proves nothing.
+    s.payer.featuresOverride = '';
+    const getPayment = vi.spyOn(s.payer.pay, 'getPayment');
+    expect(await server.recovery.resolvePass()).toBe(1);
+    expect(getPayment).not.toHaveBeenCalled();
+    expect((await s.intent(server, intentId)).state).toBe('unknown');
+    expect(s.h.lines.some((l) => l.includes('spend recovery: node not available') && l.includes('chain_refused'))).toBe(
+      true,
+    );
+  });
+
   it('runs in the background once started, and stops with the server', async () => {
     const s = await crashed();
     const { intentId } = await paid(s, 'wp10-background-loop');
@@ -1746,5 +1807,397 @@ describe(`WP10 crash recovery of BOLT11 spends (${testDriver()})`, () => {
     });
     await server.recovery.stop();
     server.recovery.start(); // ignored after stop
+  });
+});
+
+describe(`WP09b on-chain and channel spends (${testDriver()})`, () => {
+  async function chainSpending() {
+    const h = await harness();
+    const auth = await loggedIn(h);
+    const { id } = (await (await addNode(h, auth, 'https://a.blake2b.test', 'blake2b')).json()) as { id: string };
+    const path = `/api/v1/nodes/${id}`;
+    const payer = h.fakes.get('https://a.blake2b.test');
+    const other = h.fakes.get('https://b.blake2b.test');
+    if (!payer || !other) throw new Error('Missing fake');
+    const address = async () => (await other.receive.newAddress('p2wpkh')).address;
+    const preview = (kind: string, body: unknown, credentials: { cookie: string; csrf: string } = auth) =>
+      h.request('POST', `${path}/${kind}/preview`, { ...credentials, body });
+    const execute = (
+      kind: string,
+      token: string,
+      key = randomBytes(16).toString('hex'),
+      ack = false,
+      credentials: { cookie: string; csrf: string } = auth,
+    ) =>
+      h.request('POST', `${path}/${kind}/execute`, {
+        ...credentials,
+        headers: { 'idempotency-key': key },
+        body: { confirmationToken: token, acknowledgeDuplicate: ack },
+      });
+    const token = async (kind: string, body: unknown) => {
+      const res = await preview(kind, body);
+      expect(res.status, await res.clone().text()).toBe(200);
+      return (await res.json()) as {
+        confirmationToken: string;
+        cost: { amount: string; maxFee: string; total: string };
+        stepUpRequired: boolean;
+        feeOverride: boolean;
+        duplicateWarning: boolean;
+      };
+    };
+    const policy = (change = {}) =>
+      h.request('POST', `${path}/spend-policy`, {
+        ...auth,
+        body: {
+          maxPerPayment: null,
+          max24h: null,
+          stepUpAbove: null,
+          maxFeeRate: '10',
+          maxFeeSharePercent: 5,
+          maxRoutingFeeSharePercent: 1,
+          routingFeeAllowance: '10',
+          ...change,
+        },
+      });
+    const intent = (intentId: string) =>
+      h.server.db.selectFrom('spend_intents').selectAll().where('id', '=', intentId).executeTakeFirstOrThrow();
+    const session = await h.server.auth.session(auth.cookie.split('=')[1] ?? '');
+    if (!session) throw new Error('Missing test session');
+    const passwordStepUp = async () => {
+      const step = await h.request('POST', '/api/v1/auth/step-up', {
+        ...auth,
+        body: { password: PASSWORD, strength: 'password' },
+      });
+      expect(step.status).toBe(200);
+      return {
+        cookie: (step.headers.get('set-cookie') ?? '').split(';')[0] ?? '',
+        csrf: ((await step.json()) as { csrfToken: string }).csrfToken,
+      };
+    };
+    return {
+      h,
+      auth,
+      id,
+      path,
+      payer,
+      other,
+      address,
+      preview,
+      execute,
+      token,
+      policy,
+      intent,
+      handle: session.handle,
+      passwordStepUp,
+    };
+  }
+  const reservedUtxos = async (adapter: FakeAdapter) =>
+    (await adapter.onchain.listUtxos()).filter((u) => u.reserved).length;
+
+  it('sends on-chain: checks the address, caps the fee, checks the PSBT, then broadcasts', async () => {
+    const s = await chainSpending();
+    const to = await s.address();
+    // The node's half-hour estimate (12 sat/vB) is above the policy's 10.
+    expect(await errorCode(await s.preview('onchain', { address: to, amount: '100000000' }))).toBe('fee_cap_exceeded');
+    expect((await s.preview('onchain', { address: to, amount: '100000001' })).status).toBe(400);
+    expect(
+      await errorCode(
+        await s.preview('onchain', { address: 'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4', amount: '1000' }),
+      ),
+    ).toBe('validation_failed');
+    const p = await s.token('onchain', { address: to, amount: '100000000', feeRate: '2' });
+    // 5 % of 100,000 sat is the most fee this send may pay.
+    expect(p.cost).toEqual({ amount: '100000000', maxFee: '5000000', total: '105000000' });
+    const prepare = vi.spyOn(s.payer.onchain, 'prepare');
+    const res = await s.execute('onchain', p.confirmationToken, 'wp09b-onchain-send');
+    expect(res.status, await res.clone().text()).toBe(200);
+    const outcome = (await res.json()) as { intentId: string; state: string; txid: string };
+    expect(outcome.state).toBe('succeeded');
+    expect(prepare.mock.calls[0]?.[0]).toEqual({ outputs: [{ address: to, amount: 100_000_000n }], feeRate: '2' });
+    const row = await s.intent(outcome.intentId);
+    expect(row).toMatchObject({
+      type: 'onchain',
+      state: 'succeeded',
+      txid: outcome.txid,
+      destination: to,
+      payment_hash: null,
+    });
+    expect(row.psbt_ciphertext).toBeNull();
+    expect(BigInt(row.fee_msat ?? '0')).toBeGreaterThan(0n);
+    expect((await s.payer.onchain.listTransactions()).items.map((t) => t.txid)).toContain(outcome.txid);
+    // Same key: the recorded outcome, no second call; the token cannot be used again.
+    const again = await s.execute('onchain', p.confirmationToken, 'wp09b-onchain-send');
+    expect(await again.json()).toMatchObject({ intentId: outcome.intentId, state: 'succeeded', txid: outcome.txid });
+    expect(prepare).toHaveBeenCalledTimes(1);
+    expect(await errorCode(await s.execute('onchain', p.confirmationToken))).toBe('confirmation_invalid');
+    // Counted in the rolling window.
+    const used = (await (await s.h.request('GET', `${s.path}/spend-policy`, s.auth)).json()) as { usedMsat: string };
+    expect(used.usedMsat).toBe('105000000');
+    expect(
+      s.h.lines.some(
+        (l) => l.includes('"spend intent"') && l.includes('"type":"onchain"') && l.includes('"security":true'),
+      ),
+    ).toBe(true);
+  });
+
+  it('refuses a node transaction that pays too much fee or another output, and releases its inputs', async () => {
+    const s = await chainSpending();
+    const to = await s.address();
+    // At 9 sat/vB the fake's fee (about 1,500 sat) is above 5 % of 20,000 sat.
+    const dear = await s.token('onchain', { address: to, amount: '20000000', feeRate: '9' });
+    const res = await s.execute('onchain', dear.confirmationToken);
+    expect(res.status).toBe(422);
+    expect(await res.json()).toMatchObject({
+      error: { code: 'payment_failed', details: { reason: 'fee_cap_exceeded' } },
+    });
+    expect(await reservedUtxos(s.payer)).toBe(0);
+
+    const real = s.payer.onchain.prepare;
+    const elsewhere = await s.address();
+    s.payer.onchain.prepare = async (request) =>
+      real({ ...request, outputs: request.outputs.map((o) => ({ ...o, address: elsewhere })) });
+    const swapped = await s.token('onchain', { address: to, amount: '30000000', feeRate: '2' });
+    const refused = await s.execute('onchain', swapped.confirmationToken);
+    expect(await refused.json()).toMatchObject({
+      error: { code: 'payment_failed', details: { reason: 'node_bad_response' } },
+    });
+    expect(await reservedUtxos(s.payer)).toBe(0);
+    s.payer.onchain.prepare = async () => ({ txid: parseTxid('ab'.repeat(32)), psbt: 'bm90IGEgcHNidA==' });
+    const garbage = await s.token('onchain', { address: to, amount: '31000000', feeRate: '2' });
+    expect(await (await s.execute('onchain', garbage.confirmationToken)).json()).toMatchObject({
+      error: { details: { reason: 'node_bad_response' } },
+    });
+    s.payer.onchain.prepare = real;
+    // Failed spends are not counted.
+    const used = (await (await s.h.request('GET', `${s.path}/spend-policy`, s.auth)).json()) as { usedMsat: string };
+    expect(used.usedMsat).toBe('0');
+  });
+
+  it('classifies node errors: before the call or definitive is failed, anything else unknown with its PSBT kept', async () => {
+    const s = await chainSpending();
+    const to = await s.address();
+    const poor = await s.token('onchain', { address: to, amount: '10000000', feeRate: '2' });
+    s.payer.failNext(new AdapterError({ code: 'node_error', sent: true, definitive: true, nodeCode: 301 }));
+    expect(await errorCode(await s.execute('onchain', poor.confirmationToken, 'wp09b-prepare-fails'))).toBe(
+      'payment_failed',
+    );
+    // The key is not stuck: its retry answers with the failure.
+    expect(await errorCode(await s.execute('onchain', poor.confirmationToken, 'wp09b-prepare-fails'))).toBe(
+      'payment_failed',
+    );
+
+    const realSend = s.payer.onchain.send;
+    s.payer.onchain.send = async () => {
+      throw new AdapterError({ code: 'node_unreachable', sent: true, definitive: false });
+    };
+    const lost = await s.token('onchain', { address: to, amount: '11000000', feeRate: '2' });
+    const res = await s.execute('onchain', lost.confirmationToken);
+    const outcome = (await res.json()) as { intentId: string; state: string; txid: string };
+    expect(outcome.state).toBe('unknown');
+    const row = await s.intent(outcome.intentId);
+    expect(row.txid).toBe(outcome.txid);
+    expect(row.psbt_ciphertext).not.toBeNull();
+    expect(await s.h.server.recovery.resolvePass()).toBe(1);
+    expect(s.h.lines.some((l) => l.includes('no resolver for this spend type'))).toBe(true);
+
+    s.payer.onchain.send = async () => {
+      throw new AdapterError({ code: 'node_error', sent: true, definitive: true, nodeCode: -1 });
+    };
+    const refused = await s.token('onchain', { address: to, amount: '12000000', feeRate: '2' });
+    expect(await errorCode(await s.execute('onchain', refused.confirmationToken))).toBe('payment_failed');
+    s.payer.onchain.send = realSend;
+  });
+
+  it('applies limits, step-up and duplicate rules to on-chain spends, and keeps types and keys apart', async () => {
+    const s = await chainSpending();
+    const to = await s.address();
+    expect((await s.policy({ maxPerPayment: '50000' })).status).toBe(204);
+    expect(await errorCode(await s.preview('onchain', { address: to, amount: '50000000', feeRate: '2' }))).toBe(
+      'limit_exceeded',
+    );
+    expect((await s.policy({ stepUpAbove: '0' })).status).toBe(204);
+    s.h.server.auth.sessions.clearGrants(s.handle);
+    const p = await s.token('onchain', { address: to, amount: '10000000', feeRate: '2' });
+    expect(p.stepUpRequired).toBe(true);
+    expect(await errorCode(await s.execute('onchain', p.confirmationToken))).toBe('step_up_required');
+    const rotated = await s.passwordStepUp();
+    expect((await s.execute('onchain', p.confirmationToken, 'wp09b-first-send', false, rotated)).status).toBe(200);
+    // Same address and amount within ten minutes: warned, and must be acknowledged.
+    const twin = await s.preview('onchain', { address: to, amount: '10000000', feeRate: '2' }, rotated);
+    const twinBody = (await twin.json()) as { confirmationToken: string; duplicateWarning: boolean };
+    expect(twinBody.duplicateWarning).toBe(true);
+    expect(await errorCode(await s.execute('onchain', twinBody.confirmationToken, undefined, false, rotated))).toBe(
+      'confirmation_invalid',
+    );
+    // A token of one type cannot execute another; a key of one type cannot be replayed as another.
+    expect(
+      await errorCode(await s.execute('channels/open', twinBody.confirmationToken, undefined, true, rotated)),
+    ).toBe('confirmation_invalid');
+    expect(
+      await errorCode(await s.execute('channels/open', twinBody.confirmationToken, 'wp09b-first-send', true, rotated)),
+    ).toBe('idempotency_conflict');
+    const paid = await s.h.request('POST', `${s.path}/payments/execute`, {
+      ...rotated,
+      headers: { 'idempotency-key': 'wp09b-first-send' },
+      body: { confirmationToken: twinBody.confirmationToken },
+    });
+    expect(await errorCode(paid)).toBe('idempotency_conflict');
+    expect((await s.execute('onchain', twinBody.confirmationToken, undefined, true, rotated)).status).toBe(200);
+  });
+
+  it('admits one on-chain send for concurrent executes with one key', async () => {
+    const s = await chainSpending();
+    const p = await s.token('onchain', { address: await s.address(), amount: '10000000', feeRate: '2' });
+    const prepare = vi.spyOn(s.payer.onchain, 'prepare');
+    const results = await Promise.all(
+      Array.from({ length: 5 }, () => s.execute('onchain', p.confirmationToken, 'wp09b-same-key-race')),
+    );
+    expect(prepare).toHaveBeenCalledTimes(1);
+    expect(results.filter((r) => r.status === 200).length).toBeGreaterThanOrEqual(1);
+    for (const r of results) expect([200, 409]).toContain(r.status);
+  });
+
+  it('refuses bad channel requests and odd node replies, and forgets tokens of an ended session', async () => {
+    const s = await chainSpending();
+    const peer = (await s.other.node.getInfo()).pubkey;
+    const own = (await s.payer.node.getInfo()).pubkey;
+    expect(await errorCode(await s.preview('channels/open', { peer: own, amount: '100000000' }))).toBe(
+      'validation_failed',
+    );
+    expect(await errorCode(await s.preview('channels/open', { peer, amount: '100000000', push: '100000001' }))).toBe(
+      'validation_failed',
+    );
+    // The node's opening estimate (8 sat/vB) is used when no rate is given.
+    await s.payer.peer.connect(`${peer}@127.0.0.1:9735`);
+    const open = await s.preview('channels/open', { peer, amount: '100000000', announce: false });
+    expect(((await open.json()) as { feeRate: string }).feeRate).toBe('8');
+    const openToken = (
+      await s.preview('channels/open', { peer, amount: '110000000', feeRate: '2', announce: false })
+    ).json() as Promise<{ confirmationToken: string }>;
+    const openSpy = vi.spyOn(s.payer.channel, 'openChannel').mockImplementationOnce(async () => {
+      throw new Error('unexpected reply');
+    });
+    const odd = await s.execute('channels/open', (await openToken).confirmationToken);
+    expect(((await odd.json()) as { state: string }).state).toBe('unknown');
+    expect(openSpy.mock.calls[0]?.[0]).toMatchObject({ announce: false });
+
+    // By short channel id; a close the node has not finished answers `pending`, without a txid.
+    const first = (await s.payer.channel.listChannels()).items.find((c) => c.shortChannelId !== undefined);
+    if (!first?.shortChannelId) throw new Error('no channel with a short id');
+    vi.spyOn(s.payer.channel, 'closeChannel').mockImplementationOnce(async () => ({ type: 'pending' }));
+    const close = await s.token('channels/close', { channel: first.shortChannelId, destination: await s.address() });
+    const pending = await s.execute('channels/close', close.confirmationToken);
+    const body = (await pending.json()) as { state: string; closeType: string; txid?: string };
+    expect(body).toMatchObject({ state: 'succeeded', closeType: 'pending' });
+    expect(body.txid).toBeUndefined();
+
+    // A node that answers with another txid than it prepared, or sends another one.
+    const to = await s.address();
+    const real = s.payer.onchain.prepare;
+    s.payer.onchain.prepare = async (request) => ({ ...(await real(request)), txid: parseTxid('cd'.repeat(32)) });
+    const other = await s.token('onchain', { address: to, amount: '10000000', feeRate: '2' });
+    expect(await (await s.execute('onchain', other.confirmationToken)).json()).toMatchObject({
+      error: { details: { reason: 'node_bad_response' } },
+    });
+    s.payer.onchain.prepare = real;
+    // A matching spend admitted after this preview needs a fresh preview, even when acknowledged.
+    const a = await s.token('onchain', { address: to, amount: '9000000', feeRate: '2' });
+    const b = await s.token('onchain', { address: to, amount: '9000000', feeRate: '2' });
+    expect((await s.execute('onchain', a.confirmationToken)).status).toBe(200);
+    expect(await errorCode(await s.execute('onchain', b.confirmationToken, undefined, true))).toBe(
+      'confirmation_invalid',
+    );
+
+    // Expired and ended-session confirmations are gone.
+    const late = await s.token('onchain', { address: to, amount: '8000000', feeRate: '2' });
+    s.h.clock.now = new Date(s.h.clock.now.getTime() + 121_000);
+    expect(await errorCode(await s.execute('onchain', late.confirmationToken))).toBe('confirmation_invalid');
+    // Sent under another txid than prepared: unknown (its inputs stay reserved until resolved).
+    vi.spyOn(s.payer.onchain, 'send').mockImplementationOnce(async () => ({ txid: parseTxid('ef'.repeat(32)) }));
+    const swapped = await s.token('onchain', { address: to, amount: '10000000', feeRate: '2' });
+    expect(
+      ((await (await s.execute('onchain', swapped.confirmationToken, undefined, true)).json()) as { state: string })
+        .state,
+    ).toBe('unknown');
+
+    const kept = await s.token('onchain', { address: to, amount: '7000000', feeRate: '2' });
+    expect((await s.h.request('POST', '/api/v1/auth/logout', s.auth)).status).toBe(204);
+    expect(await errorCode(await s.execute('onchain', kept.confirmationToken))).toBe('unauthenticated');
+  });
+
+  it('refuses spends from a node without a spend credential', async () => {
+    const h = await harness();
+    const auth = await loggedIn(h);
+    const res = await addNode(h, auth, 'https://b.blake2b.test', 'blake2b', { spendRune: undefined });
+    const { id } = (await res.json()) as { id: string };
+    const preview = await h.request('POST', `/api/v1/nodes/${id}/onchain/preview`, {
+      ...auth,
+      body: { address: 'bcrt1qw508d6qejxtdg4y5r3zarvary0c5xw7kygt080', amount: '1000' },
+    });
+    expect(await errorCode(preview)).toBe('capability_missing');
+  });
+
+  it('connects a peer, opens a channel and closes channels to the wallet, an address, or by force', async () => {
+    const s = await chainSpending();
+    const peer = (await s.other.node.getInfo()).pubkey;
+    const connected = await s.h.request('POST', `${s.path}/peers`, {
+      ...s.auth,
+      body: { uri: `${peer}@127.0.0.1:9735` },
+    });
+    expect(connected.status, await connected.clone().text()).toBe(200);
+    expect(await connected.json()).toEqual({ pubkey: peer });
+    expect(s.h.lines.some((l) => l.includes('"peer changed"') && l.includes('"security":true'))).toBe(true);
+
+    const open = await s.token('channels/open', { peer, amount: '200000000', push: '1000', feeRate: '2' });
+    expect(open.cost).toEqual({ amount: '200000000', maxFee: '10000000', total: '210001000' });
+    const opened = (await (await s.execute('channels/open', open.confirmationToken)).json()) as {
+      intentId: string;
+      state: string;
+      channelId: string;
+      txid: string;
+    };
+    expect(opened.state).toBe('succeeded');
+    expect(await s.intent(opened.intentId)).toMatchObject({ type: 'channel-open', peer, channel_id: opened.channelId });
+
+    // To the node's own wallet: not counted.
+    const own = await s.token('channels/close', { channel: opened.channelId });
+    expect(own.cost.total).toBe('0');
+    const closed = (await (await s.execute('channels/close', own.confirmationToken)).json()) as { state: string };
+    expect(closed.state).toBe('succeeded');
+    expect(await errorCode(await s.preview('channels/close', { channel: opened.channelId }))).toBe('not_found');
+
+    // To an external address: the local balance is counted.
+    const channels = await s.payer.channel.listChannels();
+    const first = channels.items[0];
+    if (!first) throw new Error('no channel');
+    const external = await s.token('channels/close', { channel: first.id, destination: await s.address() });
+    expect(external.cost.total).toBe(first.local.toString());
+    const close = vi.spyOn(s.payer.channel, 'closeChannel');
+    expect(
+      ((await (await s.execute('channels/close', external.confirmationToken)).json()) as { state: string }).state,
+    ).toBe('succeeded');
+    expect(close.mock.calls[0]?.[0]).toMatchObject({ channel: first.id, force: false });
+    expect(close.mock.calls[0]?.[0].destination).toMatch(/^bcrt1/);
+    // By force: a fresh password step-up is required, whatever the amount.
+    const another = await s.payer.channel.openChannel({ peer, amount: msat(100_000_000n) });
+    s.h.server.auth.sessions.clearGrants(s.handle);
+    const force = await s.token('channels/close', { channel: another.channelId, force: true });
+    expect(force.stepUpRequired).toBe(true);
+    expect(await errorCode(await s.execute('channels/close', force.confirmationToken))).toBe('step_up_required');
+    const rotated = await s.passwordStepUp();
+    const forced = await s.execute('channels/close', force.confirmationToken, undefined, false, rotated);
+    expect(forced.status, await forced.clone().text()).toBe(200);
+
+    const dropped = await s.h.request('POST', `${s.path}/peers/${peer}/disconnect`, {
+      ...rotated,
+      body: { force: true },
+    });
+    expect(dropped.status).toBe(204);
+    // A node error on open that may have funded a channel is unknown, not failed.
+    const lost = await s.preview('channels/open', { peer, amount: '100000000', feeRate: '2' }, rotated);
+    const lostToken = ((await lost.json()) as { confirmationToken: string }).confirmationToken;
+    s.payer.failNext(new AdapterError({ code: 'node_unreachable', sent: true, definitive: false }));
+    const unknown = await s.execute('channels/open', lostToken, undefined, false, rotated);
+    expect(((await unknown.json()) as { state: string }).state).toBe('unknown');
   });
 });

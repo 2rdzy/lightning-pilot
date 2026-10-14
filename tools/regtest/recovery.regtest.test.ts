@@ -61,7 +61,7 @@ describe(`crash recovery on ${chain}`, () => {
     const server = await session.reopen();
     const marked = await intentOf(session, key);
     expect(marked.state).toBe('unknown');
-    expect(isPaidOn(chain, 'cln-c', marked.payment_hash)).toBe(true);
+    expect(isPaidOn(chain, 'cln-c', marked.payment_hash ?? '')).toBe(true);
     expect(await server.recovery.resolvePass()).toBe(0);
     const resolved = await intentOf(session, key);
     expect(resolved.state).toBe('succeeded');
@@ -81,6 +81,6 @@ describe(`crash recovery on ${chain}`, () => {
     server = await session.reopen({ now: () => new Date(Date.now() + 121_000) });
     expect(await server.recovery.resolvePass()).toBe(0);
     expect(await intentOf(session, key)).toMatchObject({ state: 'failed', error_code: 'not_on_node' });
-    expect(isPaidOn(chain, 'cln-c', marked.payment_hash)).toBe(false);
+    expect(isPaidOn(chain, 'cln-c', marked.payment_hash ?? '')).toBe(false);
   });
 });

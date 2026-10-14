@@ -58,6 +58,56 @@ describe(`storage (${testDriver()})`, () => {
     expect(tables).toEqual([]);
   });
 
+  it('rebuilds the intent table for new spend types without losing a row or an index', async () => {
+    const dir = copyMigrations();
+    const held = join(dir, '..', 'held-intents');
+    mkdirSync(held);
+    const name = '20261014T2100_spend_intent_types.sql';
+    copyFileSync(join(dir, name), join(held, name));
+    unlinkSync(join(dir, name));
+    const raw = await freshRaw();
+    migrate(raw, dir);
+    raw.exec(`INSERT INTO nodes VALUES ('n1', 'node', 'blake2b', 'regtest', 'cln', 'https://n', 'ca', 'n', '02aa',
+      'confirmed', NULL, NULL, 't', 't')`);
+    const columns = `id, node_id, chain, pubkey, type, payment_hash, amount_msat, max_fee_msat, fee_msat, state,
+      idempotency_key, digest, error_code, created_at, updated_at, cost_msat, destination, session_handle,
+      confirmation_hash, preimage`;
+    raw.exec(`INSERT INTO spend_intents (${columns}) VALUES ('i1', 'n1', 'blake2b', '02aa', 'bolt11', '${'ab'.repeat(32)}',
+      '1000', '10', '2', 'succeeded', 'key-1', 'd', NULL, 't1', 't2', '1010', '03bb', 'h', 'c', '${'cd'.repeat(32)}'),
+      ('i2', 'n1', 'blake2b', '02aa', 'bolt11', '${'ef'.repeat(32)}', '5', '0', NULL, 'unknown', 'key-2', 'd', 'x',
+      't3', 't4', NULL, NULL, NULL, NULL, NULL)`);
+    const before = raw.prepare(`SELECT ${columns} FROM spend_intents ORDER BY id`).all([]);
+    copyFileSync(join(held, name), join(dir, name));
+    expect(migrate(raw, dir)).toEqual([name]);
+    expect(raw.prepare(`SELECT ${columns} FROM spend_intents ORDER BY id`).all([])).toEqual(before);
+    expect(
+      raw
+        .prepare(
+          `SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'spend_intents' AND name NOT LIKE 'sqlite_%' ORDER BY name`,
+        )
+        .all([]),
+    ).toEqual(
+      ['spend_intents_hash_identity', 'spend_intents_identity', 'spend_intents_node', 'spend_intents_txid'].map(
+        (n) => ({ name: n }),
+      ),
+    );
+    const insert = (id: string, type: string, hash: string | null, extra = '') =>
+      raw.exec(`INSERT INTO spend_intents (id, node_id, chain, pubkey, type, payment_hash, amount_msat, max_fee_msat,
+        state, idempotency_key, digest, created_at, updated_at${extra ? ', txid' : ''}) VALUES ('${id}', 'n1',
+        'blake2b', '02aa', '${type}', ${hash === null ? 'NULL' : `'${hash}'`}, '1000', '0', 'reserved', 'k-${id}', 'd',
+        't', 't'${extra ? `, '${extra}'` : ''})`);
+    insert('o1', 'onchain', null, '12'.repeat(32));
+    insert('c1', 'channel-open', null);
+    insert('c2', 'channel-close', null);
+    expect(() => insert('o2', 'onchain', 'ab'.repeat(32))).toThrow();
+    expect(() => insert('b1', 'bolt11', null)).toThrow();
+    expect(() => insert('k1', 'keysend', null)).toThrow();
+    expect(() => insert('o3', 'onchain', null, 'not-a-txid')).toThrow();
+    expect(() => insert('i1', 'onchain', null)).toThrow();
+    // The idempotency key stays unique.
+    expect(() => raw.exec(`UPDATE spend_intents SET idempotency_key = 'key-1' WHERE id = 'o1'`)).toThrow();
+  });
+
   it('rebuilds the throttle and limit tables without losing rows, then enforces the limit checks', async () => {
     const dir = copyMigrations();
     const later = readdirSync(dir).filter((f) => f >= '20261014T1200');
@@ -67,6 +117,7 @@ describe(`storage (${testDriver()})`, () => {
       '20261014T1500_spend_admission.sql',
       '20261014T1900_spend_intent_preimage.sql',
       '20261014T2000_sessions_step_up_factor.sql',
+      '20261014T2100_spend_intent_types.sql',
     ]);
     const held = join(dir, '..', 'held');
     mkdirSync(held);
