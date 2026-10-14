@@ -111,6 +111,7 @@ test('setup, login, receive, pay and log out in the browser', async ({ page }, t
     if (response.status() === 429) {
       const seconds = Number(response.headers()['retry-after']);
       expect(seconds).toBe(1);
+      await expect(page.getByText('Too many attempts. Wait 1 second before trying again.')).toBeVisible();
       const ready = Date.now() + seconds * 1000;
       await expect.poll(() => Date.now() >= ready, { intervals: [100], timeout: 3000 }).toBe(true);
       responsePromise = reply();

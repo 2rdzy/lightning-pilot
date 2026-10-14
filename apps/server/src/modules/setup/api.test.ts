@@ -137,9 +137,13 @@ describe('setup HTTP boundary', () => {
     expect((await login()).status).toBe(401);
     h.clock.now = new Date(h.clock.now.getTime() + 1000);
     expect((await login('000000')).status).toBe(401);
+    // Two wrong factors after the right password: the account's factor counter now asks for 2 seconds.
+    expect((await login('000000', '198.51.100.9')).status).toBe(429);
+    h.clock.now = new Date(h.clock.now.getTime() + 2000);
     const code = totp(secret, h.clock.now);
     const attempts = await Promise.all([login(code, '192.0.2.2'), login(code, '192.0.2.3')]);
     expect(attempts.map((r) => r.status).sort()).toEqual([200, 401]);
+    h.clock.now = new Date(h.clock.now.getTime() + 1000);
     expect((await login(code, '192.0.2.4')).status).toBe(401);
     const second = await h.server.db.selectFrom('auth_totp').selectAll().executeTakeFirstOrThrow();
     expect(second.last_counter).toBe(String(Math.floor(h.clock.now.getTime() / 30_000)));
@@ -211,7 +215,8 @@ describe('recovery login HTTP boundary', () => {
     if (!successful) throw new Error('No successful recovery login');
     const session = (await successful.json()) as { csrfToken: string; expiresAt: string; recoveryRequired?: boolean };
     expect(session.recoveryRequired).toBe(true);
-    const cookie = sessionCookie(successful);
+    let cookie = sessionCookie(successful);
+    h.clock.now = new Date(h.clock.now.getTime() + 1000);
     expect(
       (
         await authRequest(h.server, '/api/v1/auth/login', {
@@ -239,15 +244,19 @@ describe('recovery login HTTP boundary', () => {
       ).status,
     ).toBe(400);
     expect((await authRequest(h.server, '/api/v1/nodes', { method: 'GET', cookie })).status).toBe(403);
-    expect(
-      (
-        await authRequest(h.server, '/api/v1/auth/totp/confirm', {
-          cookie,
-          csrf: session.csrfToken,
-          body: { code: correct },
-        })
-      ).status,
-    ).toBe(204);
+    const confirmed = await authRequest(h.server, '/api/v1/auth/totp/confirm', {
+      cookie,
+      csrf: session.csrfToken,
+      body: { code: correct },
+    });
+    expect(confirmed.status).toBe(204);
+    // The unrestricted session has a new id; the recovery-only cookie no longer works.
+    const restricted = cookie;
+    cookie = sessionCookie(confirmed);
+    expect(cookie).not.toBe(restricted);
+    expect((await authRequest(h.server, '/api/v1/auth/session', { method: 'GET', cookie: restricted })).status).toBe(
+      401,
+    );
     expect((await authRequest(h.server, '/api/v1/nodes', { method: 'GET', cookie })).status).toBe(200);
     expect(
       (await authRequest(h.server, '/api/v1/auth/session', { method: 'GET', cookie: ordinaryCookie })).status,
@@ -275,6 +284,7 @@ describe('recovery login HTTP boundary', () => {
     ]) {
       const res = await authRequest(h.server, '/api/v1/auth/login', { body, peerAddress: `192.0.2.${source++}` });
       expect([400, 401]).toContain(res.status);
+      h.clock.now = new Date(h.clock.now.getTime() + 2000);
     }
     expect(
       await h.server.db.selectFrom('recovery_codes').selectAll().where('used_at', 'is not', null).execute(),
@@ -293,12 +303,13 @@ describe('recovery login HTTP boundary', () => {
     const idHash = createHash('sha256').update(value).digest('hex');
     const first = await h.server.auth.beginRecovery(idHash);
     expect(await h.server.auth.beginRecovery(idHash)).toEqual(first);
-    const [repeated] = await Promise.all([
+    const [repeated, rotated] = await Promise.all([
       h.server.auth.beginRecovery(idHash),
       h.server.auth.finishRecovery(idHash, totp(first.secret, h.clock.now), 'concurrent-test'),
     ]);
     expect(repeated).toEqual(first);
-    expect((await h.server.auth.session(value))?.recoveryRequired).toBe(false);
+    expect(await h.server.auth.session(value)).toBeUndefined();
+    expect((await h.server.auth.session(rotated.cookieValue))?.recoveryRequired).toBe(false);
     // A fresh synthetic recovery session proves close invalidates pending secrets without closing the database.
     const restricted = await h.server.auth.newSession(h.server.db, h.clock.now, true);
     const secondHash = createHash('sha256').update(restricted.cookieValue).digest('hex');
@@ -341,5 +352,56 @@ describe('recovery login HTTP boundary', () => {
     ).toBe(400);
     expect((await authRequest(h.server, '/api/v1/nodes', { method: 'GET', cookie })).status).toBe(403);
     expect((await authRequest(h.server, '/api/v1/auth/logout', { cookie, csrf: session.csrfToken })).status).toBe(204);
+  });
+});
+
+const HEADERS = { host: 'localhost', origin: 'https://localhost', 'content-type': 'application/json' };
+async function plainServer(dir = tempDir()) {
+  const key = writeVaultKey(dir.dir);
+  const lines: string[] = [];
+  const { config } = loadConfig({
+    env: {},
+    readFile: () => JSON.stringify({ tls: { mode: 'off' }, paths: { dataDir: dir.dir, vaultKey: key } }),
+  });
+  const logger = createLogger({ sink: (line) => lines.push(line), stdout: (line) => lines.push(line) });
+  const s = await buildServer({
+    config,
+    vaultKeyPath: key,
+    dev: true,
+    logger,
+    driver: testDriver(),
+    scryptCost: { log2N: 10, r: 8, p: 1 },
+  });
+  const post = (path: string, body: unknown, peer: string) =>
+    s.app.request(
+      path,
+      { method: 'POST', headers: HEADERS, body: JSON.stringify(body) },
+      { incoming: { socket: { remoteAddress: peer } } },
+    );
+  const token = () =>
+    (JSON.parse(lines.filter((line) => line.includes('"setupToken"')).at(-1) ?? '{}') as { setupToken: string })
+      .setupToken;
+  return { s, post, token, dir };
+}
+
+describe('setup-token source counters over HTTP', () => {
+  it('setup-token failures from one IPv6 /64 share a counter', async () => {
+    const { s, post } = await plainServer();
+    cleanups.push(() => s.close());
+    expect((await post('/api/v1/setup', { action: 'start', token: 'WRONG' }, '2001:db8::1')).status).toBe(401);
+    expect((await post('/api/v1/setup', { action: 'start', token: 'WRONG' }, '2001:db8::2')).status).toBe(429);
+  });
+
+  it('setup-token failures survive a restart', async () => {
+    const dir = tempDir();
+    const first = await plainServer(dir);
+    expect((await first.post('/api/v1/setup', { action: 'start', token: 'WRONG' }, '192.0.2.7')).status).toBe(401);
+    await first.s.close();
+    const second = await plainServer(dir);
+    cleanups.push(async () => {
+      await second.s.close();
+      dir.cleanup();
+    });
+    expect((await second.post('/api/v1/setup', { action: 'start', token: 'WRONG' }, '192.0.2.7')).status).toBe(429);
   });
 });

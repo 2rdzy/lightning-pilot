@@ -62,6 +62,26 @@ async function harness(options: { trustedProxies?: string[]; transport?: 'direct
 }
 
 describe('login HTTP admission boundary', () => {
+  it('delays other sources after the right password with a wrong factor, answering like any failed login', async () => {
+    const h = await harness();
+    const wrong = { password: PASSWORD, totpCode: h.body().totpCode === '000000' ? '111111' : '000000' };
+    const badPassword = await h.request({ password: 'incorrect-Password-1' }, {}, '192.0.2.11');
+    expect(badPassword.status).toBe(401);
+    const first = await h.request(wrong, {}, '192.0.2.10');
+    expect(first.status).toBe(401);
+    // The answer does not say which factor was wrong.
+    const error = async (res: Response) => {
+      const body = (await res.json()) as { error: { code: string; message: string } };
+      return [body.error.code, body.error.message];
+    };
+    expect(await error(first)).toEqual(await error(badPassword));
+    const other = await h.request(h.body(), {}, '198.51.100.20');
+    expect(other.status).toBe(429);
+    expect(other.headers.get('retry-after')).toBe('1');
+    h.clock.now = new Date(h.clock.now.getTime() + 1000);
+    expect((await h.request(h.body(), {}, '198.51.100.20')).status).toBe(200);
+  });
+
   it('reports 429 and Retry-After without hashing twice and declares both admission errors in OpenAPI', async () => {
     const h = await harness();
     expect((await h.request({ password: 'incorrect' })).status).toBe(401);

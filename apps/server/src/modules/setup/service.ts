@@ -11,7 +11,7 @@ import {
 } from '@lightning-pilot/core';
 import { writeTx, type Db } from '../../storage/db.ts';
 import type { Logger } from '../../logging/logger.ts';
-import { hashPassword, type AuthService, type ScryptCost } from '../auth/index.ts';
+import { hashPassword, type AuthService, type LoginOrigin, type ScryptCost } from '../auth/index.ts';
 import { generateTotpSecret, matchTotp, otpauthUri } from '../auth/totp/totp.ts';
 import { generateRecoveryCodes, hashRecoveryCode, verifyRecoveryCode } from '../auth/totp/recovery.ts';
 import type { NodesService, PreparedNode } from '../nodes/service.ts';
@@ -26,6 +26,22 @@ const equal = (a: string, b: string) => {
 };
 const IDLE_MS = 15 * 60_000;
 const DEVICE_MS = 365 * 24 * 60 * 60_000;
+
+// A per-payment cap above the 24-hour cap, or a step-up threshold above the cap it would apply under, can never
+// take effect: refuse it rather than store something the owner did not mean.
+export function limitsInOrder(limits: SetupLimits): void {
+  const { maxPerPayment, max24h, stepUpAbove } = limits;
+  const cap = maxPerPayment ?? max24h;
+  if (
+    (maxPerPayment !== null && max24h !== null && BigInt(maxPerPayment) > BigInt(max24h)) ||
+    (stepUpAbove !== null && cap !== null && BigInt(stepUpAbove) > BigInt(cap))
+  )
+    throw new AppError(
+      'validation_failed',
+      'The step-up threshold must not exceed the per-payment limit, which must not exceed the 24-hour limit.',
+    );
+}
+
 interface Draft {
   cookie: string;
   tokenHash: string;
@@ -63,8 +79,6 @@ export class SetupService {
   readonly #now: () => Date;
   #draft: Draft | undefined;
   #busy = false;
-  // Bootstrap token throttle; WP07 owns the shared login throttle and its persistent source counters.
-  readonly #attempts = new Map<string, { failures: number; retryAt: number }>();
   constructor(options: SetupOptions) {
     this.#options = options;
     this.#now = options.now ?? (() => new Date());
@@ -99,13 +113,13 @@ export class SetupService {
     cookie: string | undefined,
     csrf: string | undefined,
     requestId: string,
-    source = 'local',
+    origin: LoginOrigin = {},
   ): Promise<SetupReply> {
     if (!this.#options.auth.setupMode) throw new AppError('not_found', 'Not found.');
     if (this.#busy) throw new AppError('busy', 'A setup step is already running. Try again.');
     this.#busy = true;
     try {
-      if (action.action === 'start') return await this.#start(action.token, cookie, source, requestId);
+      if (action.action === 'start') return await this.#start(action.token, cookie, origin, requestId);
       const d = this.#current(cookie, csrf);
       if (action.action === 'cancel') {
         this.#draft = undefined;
@@ -202,6 +216,7 @@ export class SetupService {
           };
         }
         case 'limits':
+          limitsInOrder(action.limits);
           d.limits = action.limits;
           d.step = 'alerts';
           break;
@@ -303,7 +318,7 @@ export class SetupService {
           this.#options.logger.child('setup').info('setup completed', {
             requestId,
             security: true,
-            source,
+            source: origin.peerAddress ?? 'unknown',
             deviceId: sha(deviceCookie),
             keyId: vault.keyId,
             alerts: d.alerts.kind,
@@ -323,22 +338,14 @@ export class SetupService {
       this.#busy = false;
     }
   }
-  async #start(token: string, cookie: string | undefined, source: string, requestId: string): Promise<SetupReply> {
+  async #start(token: string, cookie: string | undefined, origin: LoginOrigin, requestId: string): Promise<SetupReply> {
     const now = this.#now().getTime();
-    const counter = this.#attempts.get(source);
-    if (counter && counter.retryAt > now) this.#delay(counter.retryAt);
-    const row = await this.#options.db.selectFrom('setup_token').selectAll().executeTakeFirst();
-    if (!row || Date.parse(row.expires_at) <= now || !equal(sha(normalise(token)), row.token_hash)) {
-      const failures = (counter?.failures ?? 0) + 1;
-      if (this.#attempts.size >= 1024 && !this.#attempts.has(source)) {
-        const oldest = this.#attempts.keys().next().value;
-        if (oldest !== undefined) this.#attempts.delete(oldest);
-      }
-      this.#attempts.set(source, { failures, retryAt: now + Math.min(2 ** (failures - 1), 900) * 1000 });
-      this.#options.logger.child('setup').warn('setup token refused', { requestId, security: true });
-      throw new AppError('setup_token_invalid', 'The setup token is not valid.');
-    }
-    this.#attempts.delete(source);
+    const row = await this.#options.auth.setupAttempt(origin, requestId, async () => {
+      const stored = await this.#options.db.selectFrom('setup_token').selectAll().executeTakeFirst();
+      return stored && Date.parse(stored.expires_at) > now && equal(sha(normalise(token)), stored.token_hash)
+        ? stored
+        : undefined;
+    });
     const existing = this.#draft;
     if (existing && now < existing.expiresAt && now < existing.touched + IDLE_MS) {
       if (!cookie || !equal(sha(cookie), sha(existing.cookie)))
@@ -374,6 +381,5 @@ export class SetupService {
 
   close(): void {
     this.#draft = undefined;
-    this.#attempts.clear();
   }
 }

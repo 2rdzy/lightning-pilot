@@ -5,7 +5,7 @@ import { createLogger } from '../../../logging/logger.ts';
 import { writeTx } from '../../../storage/db.ts';
 import { tempDir, testDb } from '../../../testing.ts';
 import { DEVICE_LIFETIME_MS, digest, directSource, type LoginOrigin } from './source.ts';
-import { COUNTER_DECAY_MS, LoginThrottle, UNKNOWN_COUNTER_LIMIT } from './throttle.ts';
+import { COUNTER_DECAY_MS, LoginThrottle, UNKNOWN_COUNTER_LIMIT, type LoginAttempt } from './throttle.ts';
 
 const cleanups: (() => Promise<void>)[] = [];
 afterEach(async () => {
@@ -336,5 +336,74 @@ describe('login throttling cases', () => {
     await first;
     await closing;
     expect(closed).toBe(true);
+  });
+
+  describe('account-wide second-factor counter', () => {
+    const wrongFactor = (factor: 'totp' | 'recovery') => (attempt: LoginAttempt) => {
+      attempt.failedFactor = factor;
+      return Promise.reject(new AppError('login_failed', 'Login failed.'));
+    };
+
+    it('delays every unknown source after a wrong factor, and only a full login resets it', async () => {
+      const h = await harness();
+      await expect(
+        h.throttle.run({ peerAddress: '192.0.2.1' }, undefined, 'f1', wrongFactor('totp')),
+      ).rejects.toMatchObject({ code: 'login_failed' });
+      expect(await h.row('factor')).toMatchObject({ kind: 'factor', failures: 1 });
+      expect(h.lines.some((line) => line.includes('"login failed"') && line.includes('"factor":"totp"'))).toBe(true);
+      const verifier = vi.fn(badLogin);
+      for (const origin of [{ peerAddress: '198.51.100.7' }, { transport: 'tor' as const }])
+        await expect(h.throttle.run(origin, undefined, 'early', verifier)).rejects.toMatchObject({
+          code: 'too_early',
+          details: { retryAfter: 1 },
+        });
+      expect(verifier).not.toHaveBeenCalled();
+      h.clock.ms += 1000;
+      // A wrong password alone does not raise it.
+      await expect(h.fail({ peerAddress: '198.51.100.8' })).rejects.toMatchObject({ code: 'login_failed' });
+      expect(await h.row('factor')).toMatchObject({ failures: 1 });
+      await expect(
+        h.throttle.run({ peerAddress: '198.51.100.9' }, undefined, 'f2', wrongFactor('recovery')),
+      ).rejects.toMatchObject({ code: 'login_failed' });
+      expect(await h.row('factor')).toMatchObject({ failures: 2 });
+      h.clock.ms += 2000;
+      await h.pass({ peerAddress: '198.51.100.10' });
+      expect(await h.row('factor')).toBeUndefined();
+    });
+
+    it('neither counts nor blocks known devices', async () => {
+      const h = await harness();
+      const cookie = await h.known();
+      await expect(h.throttle.run({}, cookie, 'device', wrongFactor('totp'))).rejects.toMatchObject({
+        code: 'login_failed',
+      });
+      expect(await h.row('factor')).toBeUndefined();
+      await expect(
+        h.throttle.run({ peerAddress: '192.0.2.1' }, undefined, 'f', wrongFactor('totp')),
+      ).rejects.toMatchObject({ code: 'login_failed' });
+      const other = await h.known();
+      await expect(h.pass({}, other)).resolves.toMatchObject({ kind: 'device' });
+      expect(await h.row('factor')).toBeUndefined();
+    });
+  });
+
+  it('counts setup-token rows under the unknown-source cap', async () => {
+    const h = await harness();
+    h.raw.exec('BEGIN IMMEDIATE');
+    const insert = h.raw.prepare('INSERT INTO login_throttles VALUES (?, ?, ?, ?, ?)');
+    for (let i = 0; i < UNKNOWN_COUNTER_LIMIT; i++)
+      insert.run([`setup:${digest(String(i))}`, 'setup', 1, h.clock.ms - 1000, h.clock.ms - 100 + i]);
+    h.raw.exec('COMMIT');
+    await expect(h.throttle.setup({ peerAddress: '192.0.2.99' }, 'cap', async () => undefined)).rejects.toMatchObject({
+      code: 'setup_token_invalid',
+    });
+    const count = await h.db
+      .selectFrom('login_throttles')
+      .select(h.db.fn.countAll<number>().as('n'))
+      .where('kind', '=', 'setup')
+      .executeTakeFirstOrThrow();
+    expect(count.n).toBe(UNKNOWN_COUNTER_LIMIT);
+    expect(await h.row(`setup:${digest('0')}`)).toBeUndefined();
+    expect(await h.row(`setup:${digest(directSource({ peerAddress: '192.0.2.99' }, []).descriptor)}`)).toBeDefined();
   });
 });

@@ -15,6 +15,8 @@ afterEach(async () => {
 });
 const PASSWORD = 'Correct-horse-9-battery';
 const COST = { log2N: 10, r: 8, p: 1 };
+const factorRow = (h: { db: Awaited<ReturnType<typeof harness>>['db'] }) =>
+  h.db.selectFrom('login_throttles').selectAll().where('counter', '=', 'factor').executeTakeFirst();
 async function harness(verifier = verifyPassword) {
   const t = tempDir();
   const { db, raw } = await testDb(t.dir);
@@ -155,13 +157,22 @@ describe('factor login and device registration', () => {
           .where('counter', '=', directSource({ peerAddress }, []).counter)
           .executeTakeFirst(),
       ).toEqual({ failures: 1 });
+      // The right password with a wrong factor also counts on the account, whatever the source.
+      expect(await factorRow(h)).toMatchObject({ failures: i + 1 });
+      await expect(
+        h.auth.login(PASSWORD, 'early', factor, undefined, { peerAddress: '198.51.100.1' }),
+      ).rejects.toMatchObject({ code: 'too_early', details: { retryAfter: 2 ** i } });
+      h.clock.now = new Date(h.clock.now.getTime() + 2 ** i * 1000);
     }
     expect(await h.db.selectFrom('auth_totp').selectAll().executeTakeFirstOrThrow()).toEqual(snapshot);
     await expect(
       h.auth.login(PASSWORD, 'code', undefined, 'invalid', { peerAddress: '192.0.2.3' }),
     ).rejects.toMatchObject({ code: 'login_failed' });
+    expect(await factorRow(h)).toMatchObject({ failures: 3 });
+    h.clock.now = new Date(h.clock.now.getTime() + 4000);
     const code = totp(h.initial.secret, h.clock.now);
     await h.auth.login(PASSWORD, 'accepted', code, undefined, { peerAddress: '192.0.2.4' });
+    expect(await factorRow(h)).toBeUndefined();
     await expect(h.auth.login(PASSWORD, 'replay', code, undefined, { peerAddress: '192.0.2.5' })).rejects.toMatchObject(
       { code: 'login_failed' },
     );

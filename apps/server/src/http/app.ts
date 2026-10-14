@@ -209,7 +209,7 @@ export function createApp(deps: AppDeps): Router {
     (c) => c.json(HealthResponse.parse({ status: 'ok' }), 200),
   );
   authRoutes(app, guard, deps.auth, deps.loginTransport ?? 'direct');
-  setupRoutes(app, guard, deps.setup);
+  setupRoutes(app, guard, deps.setup, deps.loginTransport ?? 'direct');
   nodesRoutes(app, guard, deps.nodes);
   spendRoutes(app, guard, deps.spend);
   return app;
