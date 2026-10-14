@@ -39,7 +39,7 @@ export function createGuard(auth: AuthService): Guard {
     }
     if (auth.setupMode) throw new AppError('setup_required', 'Setup has not been completed.');
     const cookie = readSessionCookie(c);
-    const session = cookie === undefined ? undefined : await auth.session(cookie);
+    let session = cookie === undefined ? undefined : await auth.session(cookie);
     if (cookie === undefined || !session) throw new AppError('unauthenticated', 'Please log in.');
     if (permission === 'recovery' && !session.recoveryRequired)
       throw new AppError('step_up_required', 'A recovery login is required.');
@@ -54,6 +54,10 @@ export function createGuard(auth: AuthService): Guard {
     // live session: a stale cookie must never block login, or the owner would be stuck after an idle timeout.
     if (UNSAFE.has(c.req.method) && !sameText(c.req.header('x-csrf-token') ?? '', csrfToken)) {
       throw new AppError('csrf_failed', 'Missing or wrong CSRF token.');
+    }
+    if (c.req.header('x-user-activity') === '1') {
+      session = await auth.session(cookie, true);
+      if (!session) throw new AppError('unauthenticated', 'Please log in.');
     }
     // The owner holds every permission except `setup`; finer access levels come with API clients.
     c.set('session', {

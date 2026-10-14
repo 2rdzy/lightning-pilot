@@ -44,7 +44,7 @@ export function Shell() {
   // The session ends when the server confirms it, or answers that it had already ended. After any other failure the
   // session cookie is still valid: the app stays as it is and says so, with a retry, rather than appear logged out.
   const logout = useMutation({
-    mutationFn: () => api.call('logout'),
+    mutationFn: () => api.call('logout', { userActivity: true }),
     onSuccess: leave,
     onError: async (err) => {
       if (err instanceof ApiError && err.code === 'unauthenticated') await leave();
@@ -62,6 +62,7 @@ export function Shell() {
             value={node.id}
             data-testid="node-select"
             onChange={(e) => {
+              void api.call('session', { userActivity: true }).catch(() => {});
               void navigate({ to: '/n/$node', params: { node: e.target.value } });
             }}
           >
@@ -106,6 +107,9 @@ export function Shell() {
             const active = item.exact ? pathname === href || pathname === `${href}/` : pathname.startsWith(href);
             return (
               <Link
+                onClick={() => {
+                  void api.call('session', { userActivity: true }).catch(() => {});
+                }}
                 key={item.key}
                 to={item.to}
                 params={{ node: node.id }}

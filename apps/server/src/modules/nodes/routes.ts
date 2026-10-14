@@ -16,6 +16,8 @@ import {
   toMsatString,
   type Balances,
 } from '@lightning-pilot/core';
+import type { AuthService } from '../auth/index.ts';
+import { sessionOf } from '../../http/context.ts';
 import type { Router } from '../../http/context.ts';
 import { declare, type Guard } from '../../http/declare.ts';
 import type { NodesService } from './service.ts';
@@ -44,7 +46,7 @@ const balancesJson = (b: Balances) => ({
   pendingClose: toMsatString(b.pendingClose),
 });
 
-export function nodesRoutes(app: Router, guard: Guard, nodes: NodesService): void {
+export function nodesRoutes(app: Router, guard: Guard, nodes: NodesService, auth: AuthService): void {
   declare(
     app,
     guard,
@@ -57,7 +59,10 @@ export function nodesRoutes(app: Router, guard: Guard, nodes: NodesService): voi
       responses: { 201: { description: 'Node added', ...json(NodeSummary) }, ...errors },
     }),
     async (c) => {
-      const summary = await nodes.add(c.req.valid('json'), c.get('requestId'));
+      await auth.requireStepUp(sessionOf(c).idHash, 'security');
+      const summary = await nodes.add(c.req.valid('json'), c.get('requestId'), (db) =>
+        auth.requireStepUp(sessionOf(c).idHash, 'security', db),
+      );
       return c.json(NodeSummary.parse(summary), 201);
     },
   );

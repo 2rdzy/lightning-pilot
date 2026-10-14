@@ -29,6 +29,8 @@ export interface CallOptions<N extends EndpointName> {
   params?: Record<string, string>;
   body?: BodyOf<(typeof ENDPOINTS)[N]>;
   idempotencyKey?: string;
+  // Set only by a click/tap handler, never by background queries or session probes.
+  userActivity?: boolean;
   signal?: AbortSignal;
   // Browser-bound setup has its own CSRF token; it does not create an authenticated app session.
   setupCsrfToken?: string;
@@ -91,6 +93,7 @@ export class ApiClient {
   ): Promise<ResponseOf<(typeof ENDPOINTS)[N]>> {
     const endpoint: Endpoint<z.ZodType | undefined, z.ZodType | undefined> = ENDPOINTS[name];
     const headers: Record<string, string> = { accept: 'application/json' };
+    if (options.userActivity) headers['x-user-activity'] = '1';
     let body: string | undefined;
     if (endpoint.body) {
       body = JSON.stringify(endpoint.body.parse(options.body));
@@ -123,6 +126,15 @@ export class ApiClient {
     const parsed = endpoint.response.safeParse(await res.json().catch(() => undefined));
     if (!parsed.success)
       throw new ApiError('bad_response', 'The server sent a reply that could not be used.', res.status);
+    if (
+      name === 'stepUp' &&
+      generation === this.#generation &&
+      typeof parsed.data === 'object' &&
+      parsed.data !== null &&
+      'csrfToken' in parsed.data &&
+      typeof parsed.data.csrfToken === 'string'
+    )
+      this.setCsrfToken(parsed.data.csrfToken);
     return parsed.data as ResponseOf<(typeof ENDPOINTS)[N]>;
   }
 

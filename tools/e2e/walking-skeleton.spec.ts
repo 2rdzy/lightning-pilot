@@ -29,6 +29,11 @@ async function spendable(page: Page): Promise<string> {
 test('setup, login, receive, pay and log out in the browser', async ({ page }, testInfo) => {
   test.setTimeout(150_000);
   const problems: string[] = [];
+  const activity: { path: string; marker: string | undefined }[] = [];
+  page.on('request', (request) => {
+    const path = new URL(request.url()).pathname;
+    if (path.startsWith('/api/v1/')) activity.push({ path, marker: request.headers()['x-user-activity'] });
+  });
   page.on('console', (msg) => {
     // The browser logs every 401 it receives; those are expected here (the session probe while logged out, the
     // wrong password), as is the 500 the test makes logout answer once. Anything else, a CSP violation included, is a
@@ -230,6 +235,16 @@ test('setup, login, receive, pay and log out in the browser', async ({ page }, t
   await page.getByRole('button', { name: 'Verify authenticator' }).click();
   await expect(page.getByTestId('balance-spendable')).toBeVisible();
 
+  for (const suffix of ['/invoices', '/payments/preview', '/payments/execute', '/auth/logout'])
+    expect(
+      activity.filter((call) => call.path.endsWith(suffix)).every((call) => call.marker === '1'),
+      suffix,
+    ).toBe(true);
+  expect(activity.some((call) => call.path.endsWith('/auth/session') && call.marker === '1')).toBe(true);
+  expect(activity.some((call) => call.path.endsWith('/auth/session') && call.marker === undefined)).toBe(true);
+  expect(activity.filter((call) => call.path.endsWith('/balances')).every((call) => call.marker === undefined)).toBe(
+    true,
+  );
   expect(problems, problems.join('\n')).toEqual([]);
   const log = readFileSync(join(LOG_DIR, `${testInfo.project.name}.log`), 'utf8');
   expect(log).not.toContain(PASSWORD);

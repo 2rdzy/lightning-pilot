@@ -27,6 +27,7 @@ afterEach(async () => {
 });
 
 interface Harness {
+  clock: { now: Date };
   server: Server;
   lines: string[];
   fakes: Map<string, FakeAdapter>;
@@ -66,8 +67,10 @@ async function harness(options: { dev?: boolean; webRoot?: string; maxNodes?: nu
   fake('https://a.blake2b.test', 'blake2b');
   fake('https://b.blake2b.test', 'blake2b');
   fake('https://a.bitcoin.test', 'bitcoin');
+  const clock = { now: new Date() };
   const server = await buildServer({
     config,
+    now: () => clock.now,
     vaultKeyPath: vaultKey,
     dev: options.dev ?? true,
     logger,
@@ -103,20 +106,34 @@ async function harness(options: { dev?: boolean; webRoot?: string; maxNodes?: nu
     const line = [...lines].reverse().find((l) => l.includes('"setupToken"'));
     return (JSON.parse(line ?? '{}') as { setupToken: string }).setupToken;
   };
-  return { server, lines, fakes, world, setupToken, request };
+  return { server, lines, fakes, world, setupToken, request, clock };
 }
 
 async function loggedIn(h: Harness) {
-  const setup = await setupForTest(h.server.setup, h.setupToken(), PASSWORD);
+  const setup = await setupForTest(h.server.setup, h.setupToken(), PASSWORD, h.clock.now);
   h.secret = setup.secret;
   const res = await h.request('POST', '/api/v1/auth/login', {
-    body: { password: PASSWORD, totpCode: totp(setup.secret, new Date()) },
+    body: { password: PASSWORD, totpCode: totp(setup.secret, h.clock.now) },
   });
   expect(res.status).toBe(200);
   const setCookie = res.headers.get('set-cookie') ?? '';
   const cookie = setCookie.split(';')[0] ?? '';
   const { csrfToken } = (await res.json()) as { csrfToken: string };
-  return { cookie, csrf: csrfToken, setCookie };
+  const stepUp = await h.request('POST', '/api/v1/auth/step-up', {
+    cookie,
+    csrf: csrfToken,
+    body: {
+      password: PASSWORD,
+      strength: 'security',
+      totpCode: totp(setup.secret, new Date(h.clock.now.getTime() + 30_000)),
+    },
+  });
+  expect(stepUp.status, await stepUp.clone().text()).toBe(200);
+  return {
+    cookie: (stepUp.headers.get('set-cookie') ?? '').split(';')[0] ?? '',
+    csrf: ((await stepUp.json()) as { csrfToken: string }).csrfToken,
+    setCookie,
+  };
 }
 
 async function addNode(h: Harness, auth: { cookie: string; csrf: string }, url: string, chain: Chain, extra = {}) {
@@ -234,14 +251,14 @@ describe(`API (${testDriver()})`, () => {
 
   it('logs in with a __Host- session cookie and requires the CSRF token', async () => {
     const h = await harness();
-    const enrolled = await setupForTest(h.server.setup, h.setupToken(), PASSWORD);
+    const enrolled = await setupForTest(h.server.setup, h.setupToken(), PASSWORD, h.clock.now);
     h.secret = enrolled.secret;
     expect(
       await errorCode(await h.request('POST', '/api/v1/auth/login', { body: { password: 'Wrong-password-1' } })),
     ).toBe('login_failed');
     const res = await h.request('POST', '/api/v1/auth/login', {
       cookie: `__Host-lp_device=${enrolled.reply.deviceCookie ?? ''}`,
-      body: { password: PASSWORD, totpCode: totp(h.secret ?? '', new Date(Date.now() + 30_000)) },
+      body: { password: PASSWORD, totpCode: totp(h.secret ?? '', new Date(h.clock.now.getTime() + 30_000)) },
     });
     const setCookie = res.headers.get('set-cookie') ?? '';
     expect(setCookie).toMatch(/^__Host-lp_session=/);
@@ -265,9 +282,10 @@ describe(`API (${testDriver()})`, () => {
     // The session ended on the server (idle timeout) while the browser kept the cookie.
     await h.server.db.deleteFrom('sessions').execute();
     expect(await errorCode(await h.request('GET', '/api/v1/nodes', { cookie: auth.cookie }))).toBe('unauthenticated');
+    h.clock.now = new Date(h.clock.now.getTime() + 30_000);
     const res = await h.request('POST', '/api/v1/auth/login', {
       cookie: auth.cookie,
-      body: { password: PASSWORD, totpCode: totp(h.secret ?? '', new Date(Date.now() + 30_000)) },
+      body: { password: PASSWORD, totpCode: totp(h.secret ?? '', new Date(h.clock.now.getTime() + 30_000)) },
     });
     expect(res.status).toBe(200);
   });
@@ -430,8 +448,9 @@ describe(`API (${testDriver()})`, () => {
     ).json()) as {
       confirmationToken: string;
     };
+    h.clock.now = new Date(h.clock.now.getTime() + 30_000);
     const res2 = await h.request('POST', '/api/v1/auth/login', {
-      body: { password: PASSWORD, totpCode: totp(h.secret ?? '', new Date(Date.now() + 30_000)) },
+      body: { password: PASSWORD, totpCode: totp(h.secret ?? '', new Date(h.clock.now.getTime() + 30_000)) },
     });
     const other = {
       cookie: (res2.headers.get('set-cookie') ?? '').split(';')[0] ?? '',

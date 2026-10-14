@@ -8,3 +8,5 @@ export {
   type LoginOrigin,
   type LoginSource,
 } from './source.ts';
+
+export { HashLane } from './lane.ts';

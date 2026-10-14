@@ -22,6 +22,7 @@ export function LoginScreen() {
   const login = useMutation({
     mutationFn: (body: { password: string; totpCode: string; recoveryCode: string }) =>
       api.call('login', {
+        userActivity: true,
         body: {
           password: body.password,
           ...(recovery ? { recoveryCode: body.recoveryCode } : { totpCode: body.totpCode }),

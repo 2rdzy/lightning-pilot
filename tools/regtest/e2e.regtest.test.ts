@@ -97,6 +97,14 @@ describe(`end to end on ${chain} (profile ${profile})`, () => {
     const cookie = (res.headers.get('set-cookie') ?? '').split(';')[0] ?? '';
     auth = { cookie, csrf: session.csrfToken };
     secrets.push(cookie.split('=')[1] ?? '', session.csrfToken);
+    const stepUp = await request('POST', '/api/v1/auth/step-up', {
+      password: PASSWORD,
+      strength: 'security',
+      totpCode: totp(secret, new Date(Date.now() + 30_000)),
+    });
+    const stepped = await ok<{ csrfToken: string }>(stepUp);
+    auth = { cookie: (stepUp.headers.get('set-cookie') ?? '').split(';')[0] ?? '', csrf: stepped.csrfToken };
+    secrets.push(auth.cookie.split('=')[1] ?? '', auth.csrf);
   });
 
   it('refuses the node under the other chain profile', async () => {

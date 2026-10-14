@@ -12,9 +12,9 @@ export function RecoveryScreen() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [code, setCode] = useState('');
-  const enrol = useMutation({ mutationFn: () => api.call('recoveryEnrol') });
+  const enrol = useMutation({ mutationFn: () => api.call('recoveryEnrol', { userActivity: true }) });
   const confirm = useMutation({
-    mutationFn: () => api.call('recoveryConfirm', { body: { code } }),
+    mutationFn: () => api.call('recoveryConfirm', { userActivity: true, body: { code } }),
     onSuccess: async () => {
       const session = await api.call('session');
       api.setCsrfToken(session.csrfToken, session.recoveryRequired);
