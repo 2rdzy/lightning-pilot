@@ -245,6 +245,10 @@ describe('vault edge cases', () => {
     expect(vault.openSecret(telegram, 'telegram_token')).toBe('synthetic-token');
     expect(() => vault.openSecret(auth, 'telegram_token')).toThrow('value cannot be decrypted');
     expect(() => vault.openSecret(telegram, 'totp')).toThrow('value cannot be decrypted');
+    // A PSBT is bound to its intent: it cannot be opened as another intent's.
+    const psbt = vault.sealSecret('cHNidP8B', 'intent_psbt:intent-1');
+    expect(vault.openSecret(psbt, 'intent_psbt:intent-1')).toBe('cHNidP8B');
+    expect(() => vault.openSecret(psbt, 'intent_psbt:intent-2')).toThrow('value cannot be decrypted');
     expect(() => vault.openSecret({ ...auth, key_id: 'different-key' }, 'totp')).toThrow(
       'secret encrypted under another key',
     );

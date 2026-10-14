@@ -9,6 +9,7 @@ import type { Db } from '../../storage/db.ts';
 export class VaultError extends Error {}
 
 export type CredentialKind = 'read' | 'spend';
+export type SecretPurpose = 'totp' | 'telegram_token' | `intent_psbt:${string}`;
 
 // File content: 64 hexadecimal characters (32 bytes) and an optional newline; anything else is refused.
 export function loadVaultKey(path: string): Buffer {
@@ -145,18 +146,16 @@ export class Vault {
     return open(this.#key, row.nonce, row.ciphertext, `${this.keyId}|${nodeId}|${kind}`).toString('utf8');
   }
 
-  // Owner/service secrets have their own tables; the AAD names their purpose, never a node credential row.
-  sealSecret(secret: string, purpose: 'totp' | 'telegram_token') {
+  // Owner/service secrets have their own tables; the AAD names their purpose, never a node credential row. A spend
+  // intent's PSBT is bound to its intent id (`intent_psbt:<id>`), so it cannot be moved to another intent.
+  sealSecret(secret: string, purpose: SecretPurpose) {
     this.#open();
     if (!this.#initialised) throw new VaultError('vault not initialised');
     const sealed = seal(this.#key, Buffer.from(secret), `${this.keyId}|${purpose}`);
     return { key_id: this.keyId, ...sealed };
   }
 
-  openSecret(
-    value: { key_id: string; nonce: Uint8Array; ciphertext: Uint8Array },
-    purpose: 'totp' | 'telegram_token',
-  ): string {
+  openSecret(value: { key_id: string; nonce: Uint8Array; ciphertext: Uint8Array }, purpose: SecretPurpose): string {
     this.#open();
     if (value.key_id !== this.keyId) throw new VaultError('secret encrypted under another key');
     return open(this.#key, value.nonce, value.ciphertext, `${this.keyId}|${purpose}`).toString('utf8');
