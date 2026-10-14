@@ -395,6 +395,7 @@ export class AuthService {
         await db.updateTable('auth_totp').set({ last_counter: counter.toString() }).where('id', '=', 1).execute();
         return true;
       },
+      { failed: (db) => this.#login.factorFailed(db), succeeded: (db) => this.#login.factorSucceeded(db) },
     );
   }
 
