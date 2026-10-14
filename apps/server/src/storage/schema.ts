@@ -15,6 +15,9 @@ export interface DB {
     expires_at: string;
   };
   spend_limits: {
+    max_fee_rate_mode: Generated<string>;
+    max_fee_share_mode: Generated<string>;
+    max_routing_fee_mode: Generated<string>;
     chain: string;
     pubkey: string;
     max_per_payment_sat: string | null;
@@ -68,6 +71,10 @@ export interface DB {
     used_at: string | null;
   };
   spend_intents: {
+    cost_msat: Generated<string | null>;
+    destination: Generated<string | null>;
+    session_handle: Generated<string | null>;
+    confirmation_hash: Generated<string | null>;
     id: string;
     node_id: string;
     chain: string;

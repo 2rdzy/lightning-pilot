@@ -1,6 +1,7 @@
 // Drafts live only in memory; the verified owner, factors, optional node and choices commit together.
 import { createHash, randomBytes, timingSafeEqual } from 'node:crypto';
 import {
+  limitsAreOrdered,
   AppError,
   AdapterError,
   SetupLimits as LimitsSchema,
@@ -30,12 +31,7 @@ const DEVICE_MS = 365 * 24 * 60 * 60_000;
 // A per-payment cap above the 24-hour cap, or a step-up threshold above the cap it would apply under, can never
 // take effect: refuse it rather than store something the owner did not mean.
 export function limitsInOrder(limits: SetupLimits): void {
-  const { maxPerPayment, max24h, stepUpAbove } = limits;
-  const cap = maxPerPayment ?? max24h;
-  if (
-    (maxPerPayment !== null && max24h !== null && BigInt(maxPerPayment) > BigInt(max24h)) ||
-    (stepUpAbove !== null && cap !== null && BigInt(stepUpAbove) > BigInt(cap))
-  )
+  if (!limitsAreOrdered(limits))
     throw new AppError(
       'validation_failed',
       'The step-up threshold must not exceed the per-payment limit, which must not exceed the 24-hour limit.',
@@ -271,6 +267,9 @@ export class SetupService {
                     max_per_payment_sat: l.maxPerPayment,
                     max_24h_sat: l.max24h,
                     step_up_above_sat: l.stepUpAbove,
+                    max_fee_rate_mode: l.maxFeeRateMode ?? 'refuse',
+                    max_fee_share_mode: l.maxFeeShareMode ?? 'refuse',
+                    max_routing_fee_mode: l.maxRoutingFeeMode ?? 'refuse',
                     max_fee_rate: l.maxFeeRate,
                     max_fee_share_percent: l.maxFeeSharePercent,
                     max_routing_fee_share_percent: l.maxRoutingFeeSharePercent,

@@ -23,7 +23,7 @@
   "setup.node": "Node connection",
   "setup.nodeInvalid": "Check the node connection fields, or skip this step.",
   "setup.skipNode": "Skip, add a node later",
-  "setup.limitsScope": "These choices apply to Lightning Pilot only. Payments made by other apps are not limited. Enforcement and step-up are still under development.",
+  "setup.limitsScope": "Lightning Pilot spending limits \u2014 payments made by other apps are not limited.",
   "setup.noLimit": "Leave empty to explicitly choose no limit.",
   "setup.limitsOrder": "The step-up threshold must not exceed the per-payment limit, and the per-payment limit must not exceed the 24-hour limit.",
   "setup.maxPerPayment": "Maximum cost per payment (sat)",
@@ -62,5 +62,10 @@
   "setup.nodeViewRune": "Restricted view rune",
   "setup.nodeSpendRune": "Restricted spend rune (optional)",
   "setup.nodeServerName": "Certificate server name (usually localhost)",
-  "setup.noAlertsWarning": "Security alerts are not being sent anywhere. Delivery is still under development."
+  "setup.noAlertsWarning": "Security alerts are not being sent anywhere. Delivery is still under development.",
+  "setup.maxFeeRateMode": "Above the fee-rate cap",
+  "setup.maxFeeShareMode": "Above the on-chain fee-share cap",
+  "setup.maxRoutingFeeMode": "Above the routing-fee cap",
+  "setup.feeRefuse": "Refuse",
+  "setup.feeStepUp": "Allow the confirmed fee with password step-up"
 }

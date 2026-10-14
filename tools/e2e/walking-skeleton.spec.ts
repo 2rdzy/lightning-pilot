@@ -7,6 +7,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { expect, test, type Page } from '@playwright/test';
 import { hotp } from '../../apps/server/src/modules/auth/totp/totp.ts';
+import { creds, profileOf, regtestChain } from '../regtest/nodes.ts';
 import { LOG_DIR } from './global-setup.ts';
 
 const PASSWORD = `E2e-${Math.random().toString(36).slice(2, 10)}-Pw9!`;
@@ -74,7 +75,33 @@ test('setup, login, receive, pay and log out in the browser', async ({ page }, t
   await page.getByRole('button', { name: 'Continue', exact: true }).click();
   await page.getByLabel('I have backed up the vault key file').check();
   await page.getByRole('button', { name: 'Continue', exact: true }).click();
-  await page.getByRole('button', { name: 'Skip, add a node later' }).click();
+  const chain = regtestChain();
+  const view = process.env.E2E_NODES === 'regtest' && chain ? creds(chain, 'cln-a', 'view') : undefined;
+  const spend = process.env.E2E_NODES === 'regtest' && chain ? creds(chain, 'cln-a', 'spend') : undefined;
+  await page.getByLabel('Node name').fill('alice');
+  await page
+    .getByRole('combobox', { name: 'Chain', exact: true })
+    .selectOption(chain && view ? profileOf(chain) : 'blake2b');
+  await page.getByRole('combobox', { name: 'Network', exact: true }).selectOption('regtest');
+  await page
+    .getByLabel('Core Lightning REST URL (https)', { exact: true })
+    .fill(view?.url ?? 'https://alice.fake.invalid');
+  await page
+    .getByLabel('Node CA certificate (PEM)', { exact: true })
+    .fill(view?.caCertificate ?? '-----BEGIN CERTIFICATE-----\nZmFrZQ==\n-----END CERTIFICATE-----\n');
+  await page.getByLabel('Restricted view rune', { exact: true }).fill(view?.rune ?? 'fake-view-alice');
+  await page.getByLabel('Restricted spend rune (optional)', { exact: true }).fill(spend?.rune ?? 'fake-spend-alice');
+  await page.getByLabel('Certificate server name (usually localhost)', { exact: true }).fill('localhost');
+  await page.getByRole('button', { name: 'Continue', exact: true }).click();
+  await page.getByLabel('Maximum cost per payment (sat)').fill('1000000');
+  await page.getByLabel('Maximum cost in 24 hours (sat)').fill('10000000');
+  await page.getByLabel('Ask for password above (sat)').fill('0');
+  await page.getByLabel('Maximum on-chain fee rate (sat/vB)').fill('10');
+  for (const label of ['Above the fee-rate cap', 'Above the on-chain fee-share cap', 'Above the routing-fee cap']) {
+    await page.getByRole('combobox', { name: label, exact: true }).selectOption('step-up');
+    await expect(page.getByLabel('Maximum cost per payment (sat)')).toHaveValue('1000000');
+  }
+  await page.getByRole('button', { name: 'Continue', exact: true }).click();
   await page.getByRole('combobox', { name: 'Security alerts', exact: true }).selectOption('none');
   await page.getByRole('button', { name: 'Continue', exact: true }).click();
   await page.getByRole('button', { name: 'Create owner' }).click();
@@ -138,6 +165,24 @@ test('setup, login, receive, pay and log out in the browser', async ({ page }, t
   await expect(page.getByTestId('chain-badge')).toHaveText(/BLAKE2b ✓|SHA256d ✓/);
   await expect(page.getByTestId('balance-spendable')).toHaveText(/^[0-9.,'\s\u00a0\u202f]+ sat$/);
   const before = await spendable(page);
+  const chosenPolicy = await page.evaluate(
+    async (path) => {
+      const response = await fetch(path);
+      return { status: response.status, body: (await response.json()) as unknown };
+    },
+    `/api/v1/nodes/${aliceUrl.split('/')[2] ?? ''}/spend-policy`,
+  );
+  expect(chosenPolicy.status).toBe(200);
+  expect(chosenPolicy.body).toMatchObject({
+    policy: {
+      maxPerPayment: '1000000',
+      max24h: '10000000',
+      stepUpAbove: '0',
+      maxFeeRateMode: 'step-up',
+      maxFeeShareMode: 'step-up',
+      maxRoutingFeeMode: 'step-up',
+    },
+  });
 
   // Bob makes an invoice; it is shown as QR code and text.
   await page.getByTestId('node-select').selectOption({ label: 'bob' });
@@ -162,9 +207,31 @@ test('setup, login, receive, pay and log out in the browser', async ({ page }, t
   await page.getByRole('button', { name: 'Preview' }).click();
   await expect(page.getByTestId('preview-amount')).toHaveText('1,000 sat');
   await expect(page.getByTestId('preview').getByTestId('chain-badge')).toBeVisible();
+  await page.getByLabel('Confirm your password to authorize this spend').fill(PASSWORD);
   await page.getByRole('button', { name: 'Pay 1,000 sat' }).click();
   await expect(page.getByTestId('payment-outcome')).toHaveAttribute('data-state', 'succeeded');
   await expect(page.getByText('Paid 1,000 sat')).toBeVisible();
+
+  // A distinct invoice to the same payee/amount needs explicit duplicate acknowledgment.
+  await page.getByTestId('node-select').selectOption({ label: 'bob' });
+  await nav(page).getByRole('link', { name: 'Receive' }).click();
+  await page.getByLabel('Amount (sat)').fill(String(AMOUNT_SAT));
+  await page.getByLabel('Description (shown to the payer)').fill('duplicate preview test');
+  await page.getByRole('button', { name: 'Create invoice' }).click();
+  await expect(page.getByText('Invoice created')).toBeVisible();
+  const secondInvoice = (await page.getByTestId('bolt11').textContent()) ?? '';
+  expect(secondInvoice).not.toBe(bolt11);
+  await page.goto(`${aliceUrl}/pay?request=${secondInvoice}`);
+  await page.getByRole('button', { name: 'Preview' }).click();
+  await expect(
+    page.getByText('Lightning Pilot spending limits — payments made by other apps are not limited.'),
+  ).toBeVisible();
+  const confirm = page.getByRole('button', { name: 'Pay 1,000 sat' });
+  await expect(confirm).toBeDisabled();
+  await page.getByLabel('I understand that a payment to this destination').check();
+  await page.getByLabel('Confirm your password to authorize this spend').fill(PASSWORD);
+  await confirm.click();
+  await expect(page.getByTestId('payment-outcome')).toHaveAttribute('data-state', 'succeeded');
 
   // The balance on the dashboard has changed.
   await nav(page).getByRole('link', { name: 'Dashboard' }).click();

@@ -3,7 +3,8 @@
 import { totp } from './modules/auth/totp/totp.ts';
 import { randomBytes } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { sql } from 'kysely';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { FakeAdapter, FakeNetwork } from '@lightning-pilot/adapter-kit';
 import { AdapterError, msat, type Chain, type Network } from '@lightning-pilot/core';
@@ -137,7 +138,7 @@ async function loggedIn(h: Harness) {
 }
 
 async function addNode(h: Harness, auth: { cookie: string; csrf: string }, url: string, chain: Chain, extra = {}) {
-  return h.request('POST', '/api/v1/nodes', {
+  const response = await h.request('POST', '/api/v1/nodes', {
     ...auth,
     body: {
       name: 'test node',
@@ -151,6 +152,23 @@ async function addNode(h: Harness, auth: { cookie: string; csrf: string }, url: 
       ...extra,
     },
   });
+  if (response.status === 201) {
+    const { id } = (await response.clone().json()) as { id: string };
+    const configured = await h.request('POST', `/api/v1/nodes/${id}/spend-policy`, {
+      ...auth,
+      body: {
+        maxPerPayment: null,
+        max24h: null,
+        stepUpAbove: null,
+        maxFeeRate: '10',
+        maxFeeSharePercent: 5,
+        maxRoutingFeeSharePercent: 1,
+        routingFeeAllowance: '10',
+      },
+    });
+    expect(configured.status, await configured.clone().text()).toBe(204);
+  }
+  return response;
 }
 
 const errorCode = async (res: Response) => ((await res.json()) as { error: { code: string } }).error.code;
@@ -394,17 +412,17 @@ describe(`API (${testDriver()})`, () => {
     });
     expect(preview.status).toBe(200);
     const p = (await preview.json()) as { confirmationToken: string; cost: Record<string, string> };
-    expect(p.cost).toEqual({ amount: '21000', maxFee: '5000', total: '26000' });
+    expect(p.cost).toEqual({ amount: '21000', maxFee: '10210', total: '31210' });
 
     const execute = (token: string, key: string, a = auth) =>
       h.request('POST', `/api/v1/nodes/${id}/payments/execute`, {
         ...a,
-        body: { confirmationToken: token },
+        body: { acknowledgeDuplicate: true, confirmationToken: token },
         headers: { 'idempotency-key': key },
       });
     const missingKey = await h.request('POST', `/api/v1/nodes/${id}/payments/execute`, {
       ...auth,
-      body: { confirmationToken: p.confirmationToken },
+      body: { acknowledgeDuplicate: true, confirmationToken: p.confirmationToken },
     });
     expect(await errorCode(missingKey)).toBe('validation_failed');
 
@@ -458,7 +476,7 @@ describe(`API (${testDriver()})`, () => {
     };
     const res = await h.request('POST', `/api/v1/nodes/${id}/payments/execute`, {
       ...other,
-      body: { confirmationToken: p.confirmationToken },
+      body: { acknowledgeDuplicate: true, confirmationToken: p.confirmationToken },
       headers: { 'idempotency-key': 'key-' + randomBytes(12).toString('hex') },
     });
     expect(await errorCode(res)).toBe('confirmation_invalid');
@@ -493,7 +511,7 @@ describe(`API (${testDriver()})`, () => {
       };
       return h.request('POST', `/api/v1/nodes/${id}/payments/execute`, {
         ...auth,
-        body: { confirmationToken: p.confirmationToken },
+        body: { acknowledgeDuplicate: true, confirmationToken: p.confirmationToken },
         headers: { 'idempotency-key': 'key-' + randomBytes(12).toString('hex') },
       });
     };
@@ -525,7 +543,7 @@ describe(`API (${testDriver()})`, () => {
     const execute = (t: string) =>
       h.request('POST', `/api/v1/nodes/${id}/payments/execute`, {
         ...auth,
-        body: { confirmationToken: t },
+        body: { acknowledgeDuplicate: true, confirmationToken: t },
         headers: { 'idempotency-key': 'key-' + randomBytes(12).toString('hex') },
       });
     const first = await invoice();
@@ -592,7 +610,7 @@ describe(`API (${testDriver()})`, () => {
     const paid = (await (
       await h.request('POST', `/api/v1/nodes/${id}/payments/execute`, {
         ...auth,
-        body: { confirmationToken: p.confirmationToken },
+        body: { acknowledgeDuplicate: true, confirmationToken: p.confirmationToken },
         headers: { 'idempotency-key': 'key-' + randomBytes(12).toString('hex') },
       })
     ).json()) as { preimage: string };
@@ -638,7 +656,7 @@ describe(`spend edge cases (${testDriver()})`, () => {
     const execute = (token: string, key = 'key-' + randomBytes(12).toString('hex')) =>
       h.request('POST', `/api/v1/nodes/${id}/payments/execute`, {
         ...auth,
-        body: { confirmationToken: token },
+        body: { acknowledgeDuplicate: true, confirmationToken: token },
         headers: { 'idempotency-key': key },
       });
     const token = async (bolt11: string | undefined) =>
@@ -1005,5 +1023,423 @@ describe('start-up', () => {
     cleanups.push(() => second.close());
     await second.nodes.adapter(node.id);
     expect(connections).toEqual([expect.objectContaining({ viewRune: VIEW_RUNE, spendRune: SPEND_RUNE })]);
+  });
+});
+
+describe(`WP09 spending policy (${testDriver()})`, () => {
+  const basePolicy = {
+    maxPerPayment: null,
+    max24h: null,
+    stepUpAbove: null,
+    maxFeeRate: '10',
+    maxFeeSharePercent: 5,
+    maxRoutingFeeSharePercent: 1,
+    routingFeeAllowance: '10',
+  };
+  async function spending() {
+    const h = await harness();
+    const auth = await loggedIn(h);
+    const { id } = (await (await addNode(h, auth, 'https://a.blake2b.test', 'blake2b')).json()) as { id: string };
+    const path = `/api/v1/nodes/${id}`;
+    const payer = h.fakes.get('https://a.blake2b.test');
+    const recipient = h.fakes.get('https://b.blake2b.test');
+    if (!payer || !recipient) throw new Error('Missing fake');
+    const invoice = async (amount = 1000n) =>
+      (
+        await recipient.receive.createInvoice({
+          amount: msat(amount),
+          description: '<script>untrusted</script>',
+          label: randomBytes(8).toString('hex'),
+        })
+      ).bolt11;
+    const preview = (request: string, extra = {}) =>
+      h.request('POST', `${path}/payments/preview`, { ...auth, body: { request, ...extra } });
+    const prepare = async (request?: string, extra = {}) => {
+      const response = await preview(request ?? (await invoice()), extra);
+      expect(response.status, await response.clone().text()).toBe(200);
+      return (await response.json()) as {
+        confirmationToken: string;
+        duplicateWarning: boolean;
+        stepUpRequired: boolean;
+        feeOverride: boolean;
+      };
+    };
+    const execute = (
+      token: string,
+      key = randomBytes(16).toString('hex'),
+      ack = false,
+      credentials: { cookie: string; csrf: string } = auth,
+    ) =>
+      h.request('POST', `${path}/payments/execute`, {
+        ...credentials,
+        headers: { 'idempotency-key': key },
+        body: { confirmationToken: token, acknowledgeDuplicate: ack },
+      });
+    const policy = (change = {}) =>
+      h.request('POST', `${path}/spend-policy`, { ...auth, body: { ...basePolicy, ...change } });
+    const session = await h.server.auth.session(auth.cookie.split('=')[1] ?? '');
+    if (!session) throw new Error('Missing test session');
+    const handle = session.handle;
+    const { SpendService } = await import('./modules/spend/service.ts');
+    const service = new SpendService({
+      db: h.server.db,
+      nodes: h.server.nodes,
+      auth: h.server.auth,
+      logger: createLogger({ sink: () => undefined }),
+    });
+    cleanups.push(() => service.close());
+    return { h, auth, id, path, payer, recipient, invoice, preview, prepare, execute, policy, handle, service };
+  }
+  it('requires an explicitly chosen policy, exposes scope and remaining budget, and validates policy edits', async () => {
+    const s = await spending();
+    await s.h.server.db.deleteFrom('spend_limits').execute();
+    expect(await errorCode(await s.preview(await s.invoice()))).toBe('setup_required');
+    const read = await s.h.request('GET', `${s.path}/spend-policy`, s.auth);
+    expect(await read.json()).toMatchObject({
+      policy: null,
+      usedMsat: '0',
+      remainingMsat: null,
+      scope: expect.stringContaining('other apps'),
+    });
+    expect((await s.policy({ maxPerPayment: '2', max24h: '1' })).status).toBe(400);
+    expect(
+      (
+        await s.policy({
+          maxFeeRateMode: 'step-up',
+          maxFeeShareMode: 'step-up',
+          maxRoutingFeeMode: 'step-up',
+          max24h: '50',
+        })
+      ).status,
+    ).toBe(204);
+    expect(await (await s.h.request('GET', `${s.path}/spend-policy`, s.auth)).json()).toMatchObject({
+      remainingMsat: '50000',
+      policy: { maxRoutingFeeMode: 'step-up' },
+    });
+    expect((await s.h.request('GET', '/api/v1/nodes/missing/spend-policy', s.auth)).status).toBe(400);
+    s.h.server.auth.sessions.clearGrants(s.handle);
+    expect(await errorCode(await s.policy())).toBe('step_up_required');
+  });
+  it.each(['blake2b', 'bitcoin'] as const)(
+    'refuses wrong-chain invoices on %s using the full signed decoder',
+    async (chain) => {
+      const h = await harness();
+      const auth = await loggedIn(h);
+      const url = chain === 'blake2b' ? 'https://a.blake2b.test' : 'https://a.bitcoin.test';
+      const { id } = (await (await addNode(h, auth, url, chain)).json()) as { id: string };
+      const other = h.fakes.get(chain === 'blake2b' ? 'https://a.bitcoin.test' : 'https://b.blake2b.test');
+      const invoice = await other?.receive.createInvoice({
+        amount: msat(1000n),
+        description: 'wrong chain',
+        label: 'wrong chain',
+      });
+      const response = await h.request('POST', `/api/v1/nodes/${id}/payments/preview`, {
+        ...auth,
+        body: { request: invoice?.bolt11 },
+      });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toMatchObject({
+        error: { code: 'validation_failed', details: { reason: 'wrong_chain' } },
+      });
+    },
+  );
+  it('refuses unsupported inputs, zero and mismatched amounts, but pays a positive amountless invoice', async () => {
+    const s = await spending();
+    expect(await errorCode(await s.preview('lno1qqqqqqqqqqqqqq'))).toBe('validation_failed');
+    expect(await errorCode(await s.preview(await s.invoice(), { amount: '2000' }))).toBe('validation_failed');
+    const any = await s.recipient.receive.createInvoice({ description: 'any amount', label: 'any' });
+    expect(await errorCode(await s.preview(any.bolt11, { amount: '0' }))).toBe('validation_failed');
+    const pay = vi.spyOn(s.payer.pay, 'pay');
+    const p = await s.prepare(any.bolt11, { amount: '12000' });
+    expect((await s.execute(p.confirmationToken)).status).toBe(200);
+    expect(pay.mock.calls[0]?.[0].amount).toBe(12000n);
+    const fixed = await s.prepare(await s.invoice(2000n));
+    expect((await s.execute(fixed.confirmationToken)).status).toBe(200);
+    expect(pay.mock.calls[1]?.[0]).not.toHaveProperty('amount');
+  });
+  it('enforces per-payment and rolling caps again at execution and preserves immutable admitted cost', async () => {
+    const s = await spending();
+    const p = await s.prepare();
+    expect((await s.policy({ maxPerPayment: '0' })).status).toBe(204);
+    expect(await errorCode(await s.execute(p.confirmationToken))).toBe('limit_exceeded');
+    expect(await errorCode(await s.preview(await s.invoice()))).toBe('limit_exceeded');
+    await s.policy({ maxPerPayment: '12', max24h: '12' });
+    expect((await s.execute(p.confirmationToken)).status).toBe(200);
+    expect(await errorCode(await s.preview(await s.invoice(2000n)))).toBe('limit_exceeded');
+    const intent = await s.h.server.db.selectFrom('spend_intents').selectAll().executeTakeFirstOrThrow();
+    expect(intent.cost_msat).toBe('11010');
+    expect(await (await s.h.request('GET', `${s.path}/spend-policy`, s.auth)).json()).toMatchObject({
+      usedMsat: '11010',
+      remainingMsat: '990',
+    });
+  });
+  it('requires fresh password authority strictly above the threshold and preserves the token across step-up rotation', async () => {
+    const s = await spending();
+    await s.policy({ stepUpAbove: '0' });
+    s.h.server.auth.sessions.clearGrants(s.handle);
+    const p = await s.prepare();
+    expect(p.stepUpRequired).toBe(true);
+    expect(await errorCode(await s.execute(p.confirmationToken))).toBe('step_up_required');
+    const step = await s.h.request('POST', '/api/v1/auth/step-up', {
+      ...s.auth,
+      body: { password: PASSWORD, strength: 'password' },
+    });
+    expect(step.status).toBe(200);
+    const rotated = {
+      cookie: (step.headers.get('set-cookie') ?? '').split(';')[0] ?? '',
+      csrf: ((await step.json()) as { csrfToken: string }).csrfToken,
+    };
+    expect((await s.execute(p.confirmationToken, undefined, false, rotated)).status).toBe(200);
+  });
+  it('refuses fee cap excess unless explicitly allowed and protected by password step-up', async () => {
+    const s = await spending();
+    expect(await errorCode(await s.preview(await s.invoice(), { maxFee: '20000' }))).toBe('fee_cap_exceeded');
+    await s.policy({ maxRoutingFeeMode: 'step-up' });
+    const p = await s.prepare(undefined, { maxFee: '20000' });
+    expect(p.feeOverride).toBe(true);
+    s.h.server.auth.sessions.clearGrants(s.handle);
+    expect(await errorCode(await s.execute(p.confirmationToken))).toBe('step_up_required');
+  });
+  it('refuses absurd route estimates and never widens the confirmed fee', async () => {
+    const s = await spending();
+    vi.spyOn(s.payer.pay, 'previewRoute').mockResolvedValue({ fee: msat(999999999n), hops: 1, probabilityPpm: 0 });
+    expect(await errorCode(await s.preview(await s.invoice()))).toBe('fee_cap_exceeded');
+    expect(await s.h.server.db.selectFrom('spend_intents').selectAll().execute()).toHaveLength(0);
+  });
+  it('requires duplicate acknowledgment across devices and detects matching spends admitted after preview', async () => {
+    const s = await spending();
+    const first = await s.prepare();
+    const stale = await s.prepare();
+    expect((await s.execute(first.confirmationToken)).status).toBe(200);
+    expect(await errorCode(await s.execute(stale.confirmationToken))).toBe('confirmation_invalid');
+    const fresh = await s.prepare();
+    expect(fresh.duplicateWarning).toBe(true);
+    expect(await errorCode(await s.execute(fresh.confirmationToken))).toBe('confirmation_invalid');
+    expect((await s.execute(fresh.confirmationToken, undefined, true)).status).toBe(200);
+  });
+  it('expires live confirmations at two minutes without reserving or contacting the spend method', async () => {
+    const s = await spending();
+    const p = await s.prepare();
+    const pay = vi.spyOn(s.payer.pay, 'pay');
+    s.h.clock.now = new Date(s.h.clock.now.getTime() + 120000);
+    expect(await errorCode(await s.execute(p.confirmationToken))).toBe('confirmation_invalid');
+    expect(pay).not.toHaveBeenCalled();
+  });
+  it('replays after expiry, confirmation cleanup and a spend-service restart without touching the node', async () => {
+    const s = await spending();
+    const p = await s.prepare();
+    const key = 'wp09-same-key-after-restart';
+    const first = await s.execute(p.confirmationToken, key);
+    expect(first.status).toBe(200);
+    const result = (await first.json()) as { intentId: string };
+    s.h.clock.now = new Date(s.h.clock.now.getTime() + 120001);
+    await s.h.server.db.deleteFrom('spend_confirmations').execute();
+    const { SpendService } = await import('./modules/spend/service.ts');
+    const restarted = new SpendService({
+      db: s.h.server.db,
+      nodes: s.h.server.nodes,
+      auth: s.h.server.auth,
+      logger: createLogger({ sink: () => undefined }),
+      now: () => s.h.clock.now,
+    });
+    cleanups.push(() => restarted.close());
+    vi.spyOn(s.h.server.nodes, 'adapter').mockRejectedValue(new Error('No RPC or credential access for replay'));
+    expect(await restarted.execute(s.handle, s.id, p.confirmationToken, key, 'replay')).toMatchObject({
+      intentId: result.intentId,
+      state: 'succeeded',
+    });
+    await expect(restarted.execute(s.handle, s.id, 'changed-token', key, 'replay')).rejects.toMatchObject({
+      code: 'idempotency_conflict',
+    });
+    await expect(restarted.execute(s.handle, 'changed-node', p.confirmationToken, key, 'replay')).rejects.toMatchObject(
+      { code: 'idempotency_conflict' },
+    );
+    await s.h.server.auth.sessions.end(s.handle, 'logout');
+    await expect(restarted.execute(s.handle, s.id, p.confirmationToken, key, 'replay')).rejects.toMatchObject({
+      code: 'unauthenticated',
+    });
+  });
+  it('same idempotency key concurrently calls the node once and never reserves twice', async () => {
+    const s = await spending();
+    const p = await s.prepare();
+    const pay = vi.spyOn(s.payer.pay, 'pay');
+    const replies = await Promise.all(
+      Array.from({ length: 10 }, () => s.execute(p.confirmationToken, 'wp09-concurrent-key')),
+    );
+    expect(replies.some((r) => r.status === 200)).toBe(true);
+    expect(replies.every((r) => r.status === 200 || r.status === 409)).toBe(true);
+    expect(pay).toHaveBeenCalledTimes(1);
+    expect(await s.h.server.db.selectFrom('spend_intents').selectAll().execute()).toHaveLength(1);
+  });
+  it('rejects a session revoked during preview or admission awaits', async () => {
+    const s = await spending();
+    const p = await s.prepare();
+    const original = s.h.server.nodes.adapter.bind(s.h.server.nodes);
+    vi.spyOn(s.h.server.nodes, 'adapter').mockImplementation(async (id) => {
+      const adapter = await original(id);
+      await s.h.server.auth.sessions.end(s.handle, 'logout');
+      return adapter;
+    });
+    expect(await errorCode(await s.execute(p.confirmationToken))).toBe('unauthenticated');
+    expect(await s.h.server.db.selectFrom('spend_intents').selectAll().execute()).toHaveLength(0);
+  });
+  it('fails closed at service entry for nonexistent nodes, missing sessions and recovery-only sessions', async () => {
+    const s = await spending();
+    await expect(s.service.policy('missing')).rejects.toMatchObject({ code: 'not_found' });
+    await expect(
+      s.service.updatePolicy(
+        s.handle,
+        'missing',
+        await import('@lightning-pilot/core').then((m) => m.SpendPolicy.parse(basePolicy)),
+        'test',
+      ),
+    ).rejects.toMatchObject({ code: 'not_found' });
+    await expect(s.service.execute('missing', s.id, 'token', 'key', 'test')).rejects.toMatchObject({
+      code: 'unauthenticated',
+    });
+    await s.policy({ max24h: '0' });
+    expect(await s.service.policy(s.id)).toMatchObject({ remainingMsat: '0' });
+    await s.h.server.db.updateTable('sessions').set({ recovery_required: 1 }).where('handle', '=', s.handle).execute();
+    await expect(s.service.execute(s.handle, s.id, 'token', 'key', 'test')).rejects.toMatchObject({
+      code: 'permission_denied',
+    });
+  });
+  it('refuses a spend credential removed after preview and invalidates a changed node identity', async () => {
+    const s = await spending();
+    const p = await s.prepare();
+    const original = s.h.server.nodes.adapter.bind(s.h.server.nodes);
+    const spy = vi
+      .spyOn(s.h.server.nodes, 'adapter')
+      .mockImplementation(async (id) => ({ ...(await original(id)), canSpend: false }));
+    expect(await errorCode(await s.execute(p.confirmationToken))).toBe('capability_missing');
+    spy.mockRestore();
+    await s.h.server.db.updateTable('nodes').set({ pubkey: s.recipient.pubkey }).where('id', '=', s.id).execute();
+    await s.policy();
+    expect(await errorCode(await s.execute(p.confirmationToken))).toBe('confirmation_invalid');
+  });
+  it('drops a live preview when its session ends while leaving another session preview independent', async () => {
+    const s = await spending();
+    await s.prepare();
+    const setupSession = await s.h.server.db
+      .selectFrom('sessions')
+      .select('handle')
+      .where('handle', '!=', s.handle)
+      .executeTakeFirstOrThrow();
+    await s.h.server.auth.sessions.end(setupSession.handle, 'logout');
+    await s.h.server.auth.sessions.end(s.handle, 'logout');
+  });
+  it('refuses invoices that expire before execute even if the confirmation would otherwise be valid', async () => {
+    const s = await spending();
+    const invoice = await s.recipient.receive.createInvoice({
+      amount: msat(1000n),
+      description: 'short expiry',
+      label: 'short',
+      expirySeconds: 1,
+    });
+    const p = await s.prepare(invoice.bolt11);
+    s.h.clock.now = new Date(s.h.clock.now.getTime() + 1001);
+    expect(await errorCode(await s.execute(p.confirmationToken))).toBe('confirmation_invalid');
+  });
+  it('releases the reservation if the action fails before the RPC and keeps its key terminal', async () => {
+    const s = await spending();
+    const { SpendService } = await import('./modules/spend/service.ts');
+    const service = new SpendService({
+      db: s.h.server.db,
+      nodes: s.h.server.nodes,
+      auth: s.h.server.auth,
+      now: () => s.h.clock.now,
+      logger: createLogger({
+        sink: (line) => {
+          if (
+            ['spend intent', 'payment not completed', 'spend result'].includes(
+              (JSON.parse(line) as { msg: string }).msg,
+            )
+          )
+            throw new Error('injected intent-log failure');
+        },
+      }),
+    });
+    cleanups.push(() => service.close());
+    const p = await service.preview(s.handle, s.id, await s.invoice(), 'test');
+    const pay = vi.spyOn(s.payer.pay, 'pay');
+    await expect(service.execute(s.handle, s.id, p.confirmationToken, 'before-rpc-key', 'test')).rejects.toMatchObject({
+      code: 'payment_failed',
+    });
+    expect(pay).not.toHaveBeenCalled();
+    expect(await service.policy(s.id)).toMatchObject({ usedMsat: '0' });
+    await expect(service.execute(s.handle, s.id, p.confirmationToken, 'before-rpc-key', 'test')).rejects.toMatchObject({
+      code: 'payment_failed',
+    });
+    expect((await s.h.server.db.selectFrom('spend_intents').selectAll().executeTakeFirstOrThrow()).state).toBe(
+      'failed',
+    );
+  });
+  it('shares the invoice guard and budget between two records of the same chain/pubkey', async () => {
+    const s = await spending();
+    const request = await s.invoice();
+    const p = await s.prepare(request);
+    expect((await s.execute(p.confirmationToken)).status).toBe(200);
+    const node = await s.h.server.db.selectFrom('nodes').selectAll().where('id', '=', s.id).executeTakeFirstOrThrow();
+    const alias = '00000000-0000-4000-8000-000000000001';
+    await s.h.server.db
+      .insertInto('nodes')
+      .values({ ...node, id: alias, name: 'alias', network: 'testnet4' })
+      .execute();
+    // The unique key includes network; historical intent identity must remain independent of its node reference.
+    await s.h.server.db.updateTable('spend_intents').set({ node_id: alias }).execute();
+    const response = await s.h.request('POST', `/api/v1/nodes/${s.id}/payments/preview`, {
+      ...s.auth,
+      body: { request },
+    });
+    expect(await errorCode(response)).toBe('validation_failed');
+    expect(await (await s.h.request('GET', `/api/v1/nodes/${alias}/spend-policy`, s.auth)).json()).toMatchObject({
+      usedMsat: '11010',
+    });
+  });
+  it('replays through HTTP after closing and reopening the real server and database', async () => {
+    const s = await spending();
+    const p = await s.prepare();
+    const key = 'wp09-real-server-restart';
+    const paid = await s.execute(p.confirmationToken, key);
+    expect(paid.status).toBe(200);
+    const original = (await paid.json()) as { intentId: string };
+    const databases = await sql<{ file: string }>`PRAGMA database_list`.execute(s.h.server.db);
+    const file = databases.rows[0]?.file;
+    if (!file) throw new Error('Missing database path');
+    const dir = dirname(file),
+      vaultKey = join(dir, 'vault-key');
+    const { config } = loadConfig({
+      readFile: () => JSON.stringify({ tls: { mode: 'off' }, paths: { dataDir: dir, vaultKey } }),
+    });
+    await s.h.server.close();
+    s.h.server.close = async () => undefined;
+    const reopened = await buildServer({
+      config,
+      vaultKeyPath: vaultKey,
+      dev: true,
+      logger: createLogger({ sink: () => undefined }),
+      now: () => s.h.clock.now,
+      scryptCost: { log2N: 10, r: 8, p: 1 },
+      adapterFactory: (connection) => {
+        const fake = s.h.fakes.get(connection.url);
+        if (!fake) throw new Error('Missing fake');
+        return fake;
+      },
+    });
+    cleanups.unshift(() => reopened.close());
+    const response = await reopened.app.request(`${s.path}/payments/execute`, {
+      method: 'POST',
+      headers: {
+        host: 'localhost',
+        origin: 'https://localhost',
+        'content-type': 'application/json',
+        cookie: s.auth.cookie,
+        'x-csrf-token': s.auth.csrf,
+        'idempotency-key': key,
+      },
+      body: JSON.stringify({ confirmationToken: p.confirmationToken }),
+    });
+    expect(response.status, await response.clone().text()).toBe(200);
+    expect(await response.json()).toMatchObject({ intentId: original.intentId, state: 'succeeded' });
   });
 });

@@ -1,80 +1,78 @@
-// Spending (minimal): BOLT11 payments through the two-step flow every spend follows.
-//   preview  decode the invoice ourselves, check network, amount, expiry and the node's chain identity, compute the
-//            cost, and return it with a single-use confirmation token (2 minutes, bound to this session);
-//   execute  in one write transaction: claim the idempotency key, use up the token, store the intent ("reserved");
-//            then call the node with the intent id as label; then store the outcome.
-// An outcome is `failed` only if nothing was sent or the node definitively said nothing was paid; everything else
-// is `unknown`. An invoice with an unresolved or successful payment on the node cannot be paid again from it; other
-// invoices are not affected. An `unknown` payment is checked with the node (read-only) the next time its invoice is
-// previewed or paid. Payments are never retried automatically.
-// Limits, step-up, fee caps and crash recovery at start-up come in later work packages.
+// Every payment is decoded independently and admitted atomically before any fund-moving RPC.
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { PROFILES } from '@lightning-pilot/chain';
 import {
   AdapterError,
-  add,
   AppError,
-  Bolt11Error,
-  max,
+  DecodeError,
+  decodeFailure,
+  decodeRequest,
   msat,
   parseMsat,
   parsePaymentHash,
-  ppm,
-  readBolt11,
   toMsatString,
+  type Chain,
   type ChainIdentityState,
   type PaymentHash,
   type Msat,
   type Network,
   type NodeAdapter,
+  type SpendPolicy,
 } from '@lightning-pilot/core';
 import { writeTx, type Db } from '../../storage/db.ts';
+import type { DB } from '../../storage/schema.ts';
 import type { Logger } from '../../logging/logger.ts';
 import { nodeDetail } from '../../logging/redact.ts';
 import type { NodesService } from '../nodes/index.ts';
+import type { AuthService } from '../auth/index.ts';
+import {
+  checkBudget,
+  lightningFee,
+  loadPolicy,
+  policyValues,
+  reserveSpend,
+  spendCost,
+  usedBudget,
+  SPEND_SCOPE,
+  type NodeIdentity,
+} from './policy.ts';
 
-const CONFIRMATION_TTL_MS = 2 * 60 * 1000;
+const CONFIRMATION_TTL_MS = 120000;
 const RETRY_FOR_SECONDS = 60;
-// Default fee cap until owner-set caps exist: 0.5 % of the amount, at least 5 sat (CLN's own defaults for `pay`).
-const FEE_PPM = 5_000n;
-const FEE_MINIMUM = 5_000n;
-const UNRESOLVED = ['reserved', 'sent', 'unknown'];
-// States that stop the same invoice from being paid again from the same node.
-const BLOCKING = [...UNRESOLVED, 'succeeded'];
-// An `unknown` payment is declared failed from the node's records only once xpay has stopped retrying it (retry_for)
-// plus a margin: until then the node may still start another attempt.
 const SETTLE_FAILED_AFTER_MS = (RETRY_FOR_SECONDS + 60) * 1000;
-
+const BLOCKING = ['reserved', 'sent', 'unknown', 'succeeded'];
+const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
 function blockedBy(state: string): AppError {
   return state === 'succeeded'
     ? new AppError('validation_failed', 'This invoice has already been paid from this node.')
     : new AppError('spend_unknown', 'An earlier payment of this invoice has no known outcome yet.');
 }
-
-// No new spend unless the node's chain identity is confirmed (chain-identity spec §5).
 function refuseUnlessConfirmed(identity: ChainIdentityState): void {
   if (identity.state === 'waiting') throw new AppError('chain_waiting', 'The node is not ready on its chain yet.');
   if (identity.state !== 'confirmed') throw new AppError('chain_refused', 'The node failed the chain identity check.');
 }
-
-const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
-
 interface PreviewPayload {
   bolt11: string;
+  amountless: boolean;
   paymentHash: string;
   amount: string;
   maxFee: string;
   network: Network;
   invoiceExpiresAt: string;
+  chain: string;
+  pubkey: string;
+  destination: string;
+  cost: string;
+  duplicates: string[];
 }
-
-export interface PreviewResult {
-  confirmationToken: string;
-  decoded: { kind: 'bolt11'; network: Network; paymentHash: string; amount: string; expiresAt: string };
-  cost: { amount: string; maxFee: string; total: string };
-  chainIdentity: ChainIdentityState;
-  expiresAt: string;
+interface Confirmation {
+  sessionHandle: string;
+  nodeId: string;
+  digest: string;
+  payload: PreviewPayload;
+  expiresAt: number;
 }
-
+export type PreviewResult = import('zod').infer<typeof import('@lightning-pilot/core').PaymentPreviewResponse>;
 export interface ExecuteResult {
   intentId: string;
   state: 'succeeded' | 'failed' | 'unknown';
@@ -83,252 +81,345 @@ export interface ExecuteResult {
   fee?: string;
   preimage?: string;
 }
-
 export interface SpendOptions {
   db: Db;
   nodes: NodesService;
+  auth: AuthService;
   logger: Logger;
   now?: () => Date;
 }
-
 export class SpendService {
   readonly #db: Db;
   readonly #nodes: NodesService;
+  readonly #auth: AuthService;
   readonly #log: Logger;
   readonly #now: () => Date;
-
+  readonly #unlisten: () => void;
+  readonly #expiry: ReturnType<typeof setInterval>;
+  readonly #confirmations = new Map<string, Confirmation>();
   constructor(options: SpendOptions) {
     this.#db = options.db;
     this.#nodes = options.nodes;
+    this.#auth = options.auth;
     this.#log = options.logger.child('spend');
     this.#now = options.now ?? (() => new Date());
+    this.#unlisten = this.#auth.sessions.onEnd((handle) => {
+      for (const [key, confirmation] of this.#confirmations)
+        if (confirmation.sessionHandle === handle) this.#confirmations.delete(key);
+    });
+    this.#expiry = setInterval(() => this.#prune(), 1000);
+    this.#expiry.unref();
   }
-
-  async preview(sessionHandle: string, nodeId: string, request: string, requestId: string): Promise<PreviewResult> {
+  close(): void {
+    clearInterval(this.#expiry);
+    this.#unlisten();
+    this.#confirmations.clear();
+  }
+  async #live(db: Db, handle: string) {
+    const row = await db.selectFrom('sessions').selectAll().where('handle', '=', handle).executeTakeFirst();
+    if (!row) throw new AppError('unauthenticated', 'Please log in.');
+    const live = await this.#auth.sessions.live(db, row.id_hash);
+    if (live.recovery_required === 1) throw new AppError('permission_denied', 'Complete authenticator recovery first.');
+    return live;
+  }
+  async policy(nodeId: string) {
+    const row = await this.#db.selectFrom('nodes').selectAll().where('id', '=', nodeId).executeTakeFirst();
+    if (!row) throw new AppError('not_found', 'No such node.');
+    const exists = await this.#db
+      .selectFrom('spend_limits')
+      .select('chain')
+      .where('chain', '=', row.chain)
+      .where('pubkey', '=', row.pubkey)
+      .executeTakeFirst();
+    const policy = exists ? await loadPolicy(this.#db, row) : null;
+    const used = await usedBudget(this.#db, row, this.#now());
+    return {
+      policy,
+      usedMsat: used.toString(),
+      remainingMsat:
+        policy?.max24h == null
+          ? null
+          : (BigInt(policy.max24h) * 1000n > used ? BigInt(policy.max24h) * 1000n - used : 0n).toString(),
+      scope: SPEND_SCOPE,
+    };
+  }
+  async updatePolicy(handle: string, nodeId: string, policy: SpendPolicy, requestId: string): Promise<void> {
+    await writeTx(this.#db, async (db) => {
+      this.#auth.sessions.requireGrant(await this.#live(db, handle), 'security');
+      const node = await db.selectFrom('nodes').selectAll().where('id', '=', nodeId).executeTakeFirst();
+      if (!node) throw new AppError('not_found', 'No such node.');
+      const values = policyValues(policy);
+      await db
+        .insertInto('spend_limits')
+        .values({ chain: node.chain, pubkey: node.pubkey, ...values })
+        .onConflict((oc) => oc.columns(['chain', 'pubkey']).doUpdateSet(values))
+        .execute();
+    });
+    this.#log.info('spend limits changed', { requestId, nodeId });
+  }
+  async #duplicates(db: Db, identity: NodeIdentity, destination: string, amount: string): Promise<string[]> {
+    const rows = await db
+      .selectFrom('spend_intents')
+      .select('id')
+      .where('chain', '=', identity.chain)
+      .where('pubkey', '=', identity.pubkey)
+      .where('destination', '=', destination)
+      .where('amount_msat', '=', amount)
+      .where('state', 'in', BLOCKING)
+      .where('created_at', '>', new Date(this.#now().getTime() - 600000).toISOString())
+      .where('created_at', '<=', this.#now().toISOString())
+      .orderBy('id')
+      .execute();
+    return rows.map((row) => row.id);
+  }
+  #prune(): void {
+    for (const [hash, confirmation] of this.#confirmations)
+      if (confirmation.expiresAt <= this.#now().getTime()) this.#confirmations.delete(hash);
+  }
+  async preview(
+    sessionHandle: string,
+    nodeId: string,
+    request: string,
+    requestId: string,
+    options: { amount?: string | undefined; maxFee?: string | undefined } = {},
+  ): Promise<PreviewResult> {
     const { row, adapter, canSpend } = await this.#nodes.adapter(nodeId);
     if (!canSpend) throw new AppError('capability_missing', 'This node has no spend credential.');
-    // A cheap getinfo against the last full identity check; a full check runs first if the node changed (new
-    // block, new version, another public key, back from unreachable).
     const identity = await this.#nodes.monitor.ensureFresh(nodeId);
     refuseUnlessConfirmed(identity);
-
     let decoded;
     try {
-      decoded = readBolt11(request);
+      decoded = decodeRequest(request, {
+        network: row.network as Network,
+        invoiceBit512: PROFILES[row.chain as Chain].invoiceBit512,
+      });
     } catch (err) {
-      // readBolt11 throws only Bolt11Error, whose messages are fixed text (no input echoed).
-      throw new AppError('validation_failed', `Not a payable invoice: ${(err as Bolt11Error).message}.`);
+      if (err instanceof DecodeError) throw decodeFailure(err);
+      throw err;
     }
-    if (decoded.network !== row.network) {
-      throw new AppError('validation_failed', `The invoice is for ${decoded.network}, the node is on ${row.network}.`);
-    }
-    if (decoded.amount === undefined) {
-      throw new AppError('validation_failed', 'Invoices without an amount are not supported yet.');
-    }
-    if (decoded.expiresAt.getTime() <= this.#now().getTime()) {
+    if (decoded.kind !== 'bolt11')
+      throw decodeFailure(new DecodeError('unsupported', 'Only BOLT11 payments are supported here.'));
+    const invoice = decoded.invoice;
+    const amount = invoice.amount ?? (options.amount === undefined ? undefined : parseMsat(options.amount));
+    if (
+      amount === undefined ||
+      amount === 0n ||
+      (invoice.amount !== undefined && options.amount !== undefined && parseMsat(options.amount) !== invoice.amount)
+    )
+      throw new AppError('validation_failed', 'Enter a positive amount matching the invoice.');
+    if (invoice.expiresAt.getTime() <= this.#now().getTime())
       throw new AppError('validation_failed', 'The invoice has expired.');
-    }
-
-    await this.#guardInvoice(nodeId, adapter, decoded.paymentHash, requestId);
-
-    const amount = decoded.amount;
-    const maxFee = max(msat(FEE_MINIMUM), ppm(amount, FEE_PPM));
+    await this.#guardInvoice(row, adapter, invoice.paymentHash, requestId);
+    const policy = await loadPolicy(this.#db, row);
+    const { fee, override } = lightningFee(amount, policy, options.maxFee);
+    // The estimate is advisory; it can never widen the confirmed cap. No-route remains payable by xpay's own routing.
+    const route = await adapter.pay.previewRoute({
+      destination: invoice.payee,
+      amount,
+      maxFee: fee,
+      finalCltv: invoice.minFinalCltvExpiryDelta,
+    });
+    if (route && (route.fee < 0n || route.fee > fee))
+      throw new AppError('fee_cap_exceeded', 'The node route estimate exceeds the confirmed maximum fee.');
+    const cost = spendCost({ type: 'bolt11', amount, maxFee: fee });
+    const stepUp = checkBudget(policy, await usedBudget(this.#db, row, this.#now()), cost);
+    const duplicates = await this.#duplicates(this.#db, row, invoice.payee, amount.toString());
     const payload: PreviewPayload = {
-      // The normalised text: nodes refuse some spellings our reader accepts (`Lightning:` in mixed case).
-      bolt11: decoded.bolt11,
-      paymentHash: decoded.paymentHash,
-      amount: toMsatString(amount),
-      maxFee: toMsatString(maxFee),
-      network: decoded.network,
-      invoiceExpiresAt: decoded.expiresAt.toISOString(),
+      bolt11: invoice.bolt11,
+      amountless: invoice.amount === undefined,
+      paymentHash: invoice.paymentHash,
+      amount: amount.toString(),
+      maxFee: fee.toString(),
+      network: invoice.network,
+      invoiceExpiresAt: invoice.expiresAt.toISOString(),
+      chain: row.chain,
+      pubkey: row.pubkey,
+      destination: invoice.payee,
+      cost: cost.toString(),
+      duplicates,
     };
     const digest = sha256(JSON.stringify({ nodeId, ...payload }));
+    await this.#live(this.#db, sessionHandle);
+    this.#prune();
+    if (this.#confirmations.size >= 1024) throw new AppError('busy', 'Too many pending payment previews.');
     const token = randomBytes(32).toString('base64url');
-    const expiresAt = new Date(this.#now().getTime() + CONFIRMATION_TTL_MS).toISOString();
-    await this.#db
-      .insertInto('spend_confirmations')
-      .values({
-        token_hash: sha256(token),
-        session_handle: sessionHandle,
-        node_id: nodeId,
-        digest,
-        payload: JSON.stringify(payload),
-        expires_at: expiresAt,
-        used_at: null,
-      })
-      .execute();
+    const expiresAt = Math.min(this.#now().getTime() + CONFIRMATION_TTL_MS, invoice.expiresAt.getTime());
+    this.#confirmations.set(sha256(token), { sessionHandle, nodeId, digest, payload, expiresAt });
     this.#log.info('payment preview', {
       requestId,
       nodeId,
-      paymentHash: decoded.paymentHash,
+      paymentHash: invoice.paymentHash,
       amountMsat: payload.amount,
     });
     return {
       confirmationToken: token,
       decoded: {
         kind: 'bolt11',
-        network: decoded.network,
-        paymentHash: decoded.paymentHash,
+        network: invoice.network,
+        paymentHash: invoice.paymentHash,
         amount: payload.amount,
         expiresAt: payload.invoiceExpiresAt,
       },
-      cost: { amount: payload.amount, maxFee: payload.maxFee, total: toMsatString(add(amount, maxFee)) },
+      cost: { amount: payload.amount, maxFee: payload.maxFee, total: payload.cost },
       chainIdentity: identity,
-      expiresAt,
+      expiresAt: new Date(expiresAt).toISOString(),
+      payee: invoice.payee,
+      description: invoice.description ?? '',
+      duplicateWarning: duplicates.length > 0,
+      stepUpRequired: stepUp || override,
+      feeOverride: override,
+      scope: SPEND_SCOPE,
     };
   }
-
+  #replay(
+    intent: import('kysely').Selectable<DB['spend_intents']>,
+    handle: string,
+    nodeId: string,
+    hash: string,
+  ): ExecuteResult {
+    if (intent.session_handle !== handle || intent.confirmation_hash !== hash || intent.node_id !== nodeId)
+      throw new AppError('idempotency_conflict', 'This idempotency key was used for another request.');
+    if (intent.state === 'reserved' || intent.state === 'sent')
+      throw new AppError('idempotency_conflict', 'This payment is still running.');
+    return this.#result(
+      intent.id,
+      intent.state as ExecuteResult['state'],
+      intent.payment_hash,
+      intent.amount_msat,
+      intent.fee_msat,
+    );
+  }
   async execute(
     sessionHandle: string,
     nodeId: string,
     token: string,
     idempotencyKey: string,
     requestId: string,
+    acknowledgeDuplicate = false,
   ): Promise<ExecuteResult> {
-    const { row, adapter } = await this.#nodes.adapter(nodeId);
     const tokenHash = sha256(token);
-
-    // Before the write transaction (no node call may hold the write lock): settle what the node can tell about earlier
-    // payments of this invoice. Only for a usable confirmation, and not for a retry with a known key (which only returns
-    // the first result): the transaction below gives those their own answers.
-    const pending = await this.#db
-      .selectFrom('spend_confirmations')
-      .select('payload')
-      .where('token_hash', '=', tokenHash)
-      .where('session_handle', '=', sessionHandle)
-      .where('node_id', '=', nodeId)
-      .where('used_at', 'is', null)
-      .where('expires_at', '>', this.#now().toISOString())
-      .executeTakeFirst();
+    await this.#live(this.#db, sessionHandle);
     const retried = await this.#db
       .selectFrom('spend_intents')
-      .select('id')
+      .selectAll()
       .where('idempotency_key', '=', idempotencyKey)
       .executeTakeFirst();
-    // No new spend on a node whose chain identity is not confirmed (chain-identity spec §5): the identity monitor may
-    // have refused it since the preview. A retry with a known key only returns the first result, so it goes on. This
-    // early check only avoids node calls for a refused node; the claim below checks the state again.
-    if (!retried) {
-      await this.#nodes.monitor.ensureChecked(nodeId);
-      refuseUnlessConfirmed(this.#nodes.identity(row));
-    }
-    if (pending && !retried) {
-      const { paymentHash } = JSON.parse(pending.payload) as PreviewPayload;
-      await this.#guardInvoice(nodeId, adapter, parsePaymentHash(paymentHash), requestId);
-    }
-
-    const now = this.#now();
-
-    // The claim is the admission point: it runs in the node's identity turn, so it sees every refusal stored before
-    // it (see IdentityMonitor.admit).
-    const claim = async (trx: Db) => {
-      const confirmation = await trx
-        .selectFrom('spend_confirmations')
-        .selectAll()
-        .where('token_hash', '=', tokenHash)
-        .executeTakeFirst();
-
-      // A retry with the same key returns what happened the first time; the key reused for anything else is refused.
-      const existing = await trx
-        .selectFrom('spend_intents')
-        .selectAll()
-        .where('idempotency_key', '=', idempotencyKey)
-        .executeTakeFirst();
-      if (existing) {
-        const same =
-          confirmation !== undefined && existing.digest === confirmation.digest && existing.node_id === nodeId;
-        if (!same) throw new AppError('idempotency_conflict', 'This idempotency key was used for another request.');
-        return { replay: existing } as const;
-      }
-
+    if (retried) return this.#replay(retried, sessionHandle, nodeId, tokenHash);
+    this.#prune();
+    const confirmation = this.#confirmations.get(tokenHash);
+    if (!confirmation || confirmation.sessionHandle !== sessionHandle || confirmation.nodeId !== nodeId)
+      throw new AppError('confirmation_invalid', 'The confirmation is missing, used, expired or not yours.');
+    const payload = confirmation.payload;
+    const { row, adapter, canSpend } = await this.#nodes.adapter(nodeId);
+    if (!canSpend) throw new AppError('capability_missing', 'This node has no spend credential.');
+    await this.#nodes.monitor.ensureChecked(nodeId);
+    refuseUnlessConfirmed(this.#nodes.identity(row));
+    await this.#guardInvoice(row, adapter, parsePaymentHash(payload.paymentHash), requestId, false);
+    const claim = async (trx: Db, policy: SpendPolicy, stepUp: boolean) => {
+      const live = await this.#live(trx, sessionHandle);
       const node = await trx.selectFrom('nodes').selectAll().where('id', '=', nodeId).executeTakeFirstOrThrow();
       refuseUnlessConfirmed(this.#nodes.identity(node));
-
-      const valid =
-        confirmation !== undefined &&
-        confirmation.session_handle === sessionHandle &&
-        confirmation.node_id === nodeId &&
-        confirmation.used_at === null &&
-        Date.parse(confirmation.expires_at) > now.getTime();
-      if (!valid)
+      if (
+        node.chain !== payload.chain ||
+        node.pubkey !== payload.pubkey ||
+        this.#confirmations.get(tokenHash) !== confirmation ||
+        confirmation.expiresAt <= this.#now().getTime()
+      )
         throw new AppError('confirmation_invalid', 'The confirmation is missing, used, expired or not yours.');
-      await trx
-        .updateTable('spend_confirmations')
-        .set({ used_at: now.toISOString() })
-        .where('token_hash', '=', tokenHash)
-        .execute();
-
-      const payload = JSON.parse(confirmation.payload) as PreviewPayload;
-      // Checked again inside the transaction: another request may have started paying this invoice meanwhile.
       const earlier = await trx
         .selectFrom('spend_intents')
         .select('state')
-        .where('node_id', '=', nodeId)
+        .where('chain', '=', node.chain)
+        .where('pubkey', '=', node.pubkey)
         .where('payment_hash', '=', payload.paymentHash)
         .where('state', 'in', BLOCKING)
         .executeTakeFirst();
       if (earlier) throw blockedBy(earlier.state);
-
+      const duplicates = await this.#duplicates(trx, node, payload.destination, payload.amount);
+      if (
+        duplicates.some((id) => !payload.duplicates.includes(id)) ||
+        (payload.duplicates.length > 0 && !acknowledgeDuplicate)
+      )
+        throw new AppError(
+          'confirmation_invalid',
+          'Review and acknowledge the duplicate-payment warning in a fresh preview.',
+          { reason: 'duplicate_payment' },
+        );
+      const fee = lightningFee(parseMsat(payload.amount), policy, payload.maxFee);
+      if (stepUp || fee.override) this.#auth.sessions.requireGrant(live, 'password');
       const intentId = randomUUID();
       await trx
         .insertInto('spend_intents')
         .values({
           id: intentId,
           node_id: nodeId,
-          chain: row.chain,
-          pubkey: row.pubkey,
+          chain: node.chain,
+          pubkey: node.pubkey,
           type: 'bolt11',
           payment_hash: payload.paymentHash,
           amount_msat: payload.amount,
           max_fee_msat: payload.maxFee,
+          cost_msat: payload.cost,
+          destination: payload.destination,
+          session_handle: sessionHandle,
+          confirmation_hash: tokenHash,
           fee_msat: null,
           state: 'reserved',
           idempotency_key: idempotencyKey,
           digest: confirmation.digest,
           error_code: null,
-          created_at: now.toISOString(),
-          updated_at: now.toISOString(),
+          created_at: this.#now().toISOString(),
+          updated_at: this.#now().toISOString(),
         })
         .execute();
-      return { intentId, payload } as const;
+      return { intentId };
     };
-    const claimed = await this.#nodes.monitor.admit(nodeId, () => writeTx(this.#db, claim));
-
-    if ('replay' in claimed) {
-      const intent = claimed.replay;
-      if (intent.state === 'reserved' || intent.state === 'sent') {
-        throw new AppError('idempotency_conflict', 'This payment is still running.');
-      }
-      return this.#result(
-        intent.id,
-        intent.state as ExecuteResult['state'],
-        intent.payment_hash,
-        intent.amount_msat,
-        intent.fee_msat,
-      );
-    }
-
-    const { intentId, payload } = claimed;
+    // Same-key races check replay inside the transaction before checking a newly changed policy/budget.
+    const replay = async (trx: Db) => {
+      await this.#live(trx, sessionHandle);
+      const existing = await trx
+        .selectFrom('spend_intents')
+        .selectAll()
+        .where('idempotency_key', '=', idempotencyKey)
+        .executeTakeFirst();
+      if (existing) return { replay: this.#replay(existing, sessionHandle, nodeId, tokenHash) };
+      return undefined;
+    };
+    const claimed = await this.#nodes.monitor.admit(nodeId, () =>
+      reserveSpend<{ intentId: string } | { replay: ExecuteResult }>(
+        this.#db,
+        row,
+        parseMsat(payload.cost),
+        this.#now,
+        claim,
+        replay,
+      ),
+    );
+    if ('replay' in claimed) return claimed.replay;
+    this.#confirmations.delete(tokenHash);
+    const { intentId } = claimed;
     const paymentHash = parsePaymentHash(payload.paymentHash);
-    this.#log.info('spend intent', {
-      requestId,
-      intentId,
-      nodeId,
-      chain: row.chain,
-      type: 'bolt11',
-      paymentHash,
-      amountMsat: payload.amount,
-      maxFeeMsat: payload.maxFee,
-    });
-
     let state: ExecuteResult['state'];
     let fee: Msat | undefined;
     let preimage: string | undefined;
     let errorCode: string | null = null;
     let paidAmount: Msat | undefined;
+    let nodeCallStarted = false;
     try {
+      this.#log.info('spend intent', {
+        requestId,
+        intentId,
+        nodeId,
+        chain: row.chain,
+        type: 'bolt11',
+        paymentHash,
+        amountMsat: payload.amount,
+        maxFeeMsat: payload.maxFee,
+      });
+      nodeCallStarted = true;
       const paid = await adapter.pay.pay({
         bolt11: payload.bolt11,
+        ...(payload.amountless ? { amount: parseMsat(payload.amount) } : {}),
         maxFee: parseMsat(payload.maxFee),
         label: intentId,
         retryForSeconds: RETRY_FOR_SECONDS,
@@ -359,17 +450,22 @@ export class SpendService {
         }
       }
     } catch (err) {
-      const definite = err instanceof AdapterError && (!err.sent || err.definitive);
+      const definite = !nodeCallStarted || (err instanceof AdapterError && (!err.sent || err.definitive));
       state = definite ? 'failed' : 'unknown';
       errorCode = err instanceof AdapterError ? err.code : 'internal';
-      this.#log.warn('payment not completed', {
-        requestId,
-        intentId,
-        state,
-        code: errorCode,
-        nodeCode: err instanceof AdapterError ? err.nodeCode : undefined,
-        detail: err instanceof AdapterError ? nodeDetail(err.detail) : undefined,
-      });
+      // An audit-sink failure must not prevent persisting whether funds may have moved.
+      try {
+        this.#log.warn('payment not completed', {
+          requestId,
+          intentId,
+          state,
+          code: errorCode,
+          nodeCode: err instanceof AdapterError ? err.nodeCode : undefined,
+          detail: err instanceof AdapterError ? nodeDetail(err.detail) : undefined,
+        });
+      } catch {
+        /* The database result remains authoritative. */
+      }
     }
 
     await this.#db
@@ -383,15 +479,19 @@ export class SpendService {
       })
       .where('id', '=', intentId)
       .execute();
-    this.#log.info('spend result', {
-      requestId,
-      intentId,
-      nodeId,
-      paymentHash,
-      state,
-      feeMsat: fee === undefined ? undefined : toMsatString(fee),
-      code: errorCode ?? undefined,
-    });
+    try {
+      this.#log.info('spend result', {
+        requestId,
+        intentId,
+        nodeId,
+        paymentHash,
+        state,
+        feeMsat: fee === undefined ? undefined : toMsatString(fee),
+        code: errorCode ?? undefined,
+      });
+    } catch {
+      /* A failed log sink must not replace the durable outcome. */
+    }
 
     if (state === 'failed') {
       throw new AppError('payment_failed', 'The payment failed; nothing was paid.', { intentId, reason: errorCode });
@@ -408,18 +508,25 @@ export class SpendService {
 
   // The same invoice is never paid twice from one node. Earlier payments of it are looked at: an `unknown` one is
   // checked with the node first; one that succeeded or is still unresolved refuses the new spend.
-  async #guardInvoice(nodeId: string, adapter: NodeAdapter, paymentHash: PaymentHash, requestId: string) {
+  async #guardInvoice(
+    identity: NodeIdentity,
+    adapter: NodeAdapter,
+    paymentHash: PaymentHash,
+    requestId: string,
+    refuse = true,
+  ) {
     const earlier = await this.#db
       .selectFrom('spend_intents')
       .select(['id', 'state', 'amount_msat', 'updated_at'])
-      .where('node_id', '=', nodeId)
+      .where('chain', '=', identity.chain)
+      .where('pubkey', '=', identity.pubkey)
       .where('payment_hash', '=', paymentHash)
       .where('state', 'in', BLOCKING)
       .execute();
     for (const intent of earlier) {
       const state =
         intent.state === 'unknown' ? await this.#settle(intent, adapter, paymentHash, requestId) : intent.state;
-      if (state !== 'failed') throw blockedBy(state);
+      if (refuse && state !== 'failed') throw blockedBy(state);
     }
   }
 

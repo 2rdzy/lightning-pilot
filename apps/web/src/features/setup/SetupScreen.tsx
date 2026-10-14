@@ -118,6 +118,9 @@ export function SetupScreen() {
     if (step === 'limits') {
       const nullable = (key: string) => values[key]?.trim() || null;
       const limits: SetupLimits = {
+        maxFeeRateMode: values.maxFeeRateMode === 'step-up' ? 'step-up' : 'refuse',
+        maxFeeShareMode: values.maxFeeShareMode === 'step-up' ? 'step-up' : 'refuse',
+        maxRoutingFeeMode: values.maxRoutingFeeMode === 'step-up' ? 'step-up' : 'refuse',
         maxPerPayment: nullable('maxPerPayment'),
         max24h: nullable('max24h'),
         stepUpAbove: nullable('stepUpAbove'),
@@ -291,6 +294,19 @@ export function SetupScreen() {
             {field('maxFeeSharePercent', 'setup.maxFeeSharePercent')}
             {field('maxRoutingFeeSharePercent', 'setup.maxRoutingFeeSharePercent')}
             {field('routingFeeAllowance', 'setup.routingFeeAllowance')}
+            {(['maxFeeRateMode', 'maxFeeShareMode', 'maxRoutingFeeMode'] as const).map((key) => (
+              <label key={key}>
+                {tr.t(`setup.${key}`)}
+                <select
+                  className="input"
+                  value={values[key] ?? 'refuse'}
+                  onChange={(e) => setValues({ ...values, [key]: e.target.value })}
+                >
+                  <option value="refuse">{tr.t('setup.feeRefuse')}</option>
+                  <option value="step-up">{tr.t('setup.feeStepUp')}</option>
+                </select>
+              </label>
+            ))}
           </>
         ) : null}
         {step === 'alerts' ? (

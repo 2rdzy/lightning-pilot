@@ -61,7 +61,11 @@ describe(`storage (${testDriver()})`, () => {
   it('rebuilds the throttle and limit tables without losing rows, then enforces the limit checks', async () => {
     const dir = copyMigrations();
     const later = readdirSync(dir).filter((f) => f >= '20261014T1200');
-    expect(later).toEqual(['20261014T1200_auth_setup_factor_counters.sql', '20261014T1201_spend_limits_checks.sql']);
+    expect(later).toEqual([
+      '20261014T1200_auth_setup_factor_counters.sql',
+      '20261014T1201_spend_limits_checks.sql',
+      '20261014T1500_spend_admission.sql',
+    ]);
     const held = join(dir, '..', 'held');
     mkdirSync(held);
     for (const f of later) {
@@ -172,6 +176,18 @@ describe(`storage (${testDriver()})`, () => {
       updated_at: now,
     });
     await db.insertInto('spend_intents').values(intent('ok', '1000')).execute();
+    for (const bad of ['', '-1', '01', '1.5', '1e3', 'abc', '1'.repeat(22)])
+      await expect(
+        db
+          .insertInto('spend_intents')
+          .values({ ...intent(`cost-${bad}`, '1000'), cost_msat: bad })
+          .execute(),
+      ).rejects.toThrow(/CHECK/);
+    await db
+      .insertInto('spend_intents')
+      .values({ ...intent('cost-zero', '1000'), cost_msat: '0' })
+      .execute();
+
     for (const bad of ['-1', '01', '1.5', '1e3', 'abc']) {
       await expect(
         db

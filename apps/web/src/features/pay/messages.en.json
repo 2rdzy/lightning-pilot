@@ -14,11 +14,18 @@
   "pay.previewExpires": "This preview is valid until {time}.",
   "pay.confirm": "Pay {amount} sat",
   "pay.cancel": "Cancel",
-  "pay.sending": "Paying…",
+  "pay.sending": "Paying\u2026",
   "pay.succeeded": "Paid {amount} sat",
   "pay.fee": "Fee: {amount} sat",
   "pay.preimage": "Proof of payment (preimage)",
   "pay.failed": "The payment failed. No money was sent.",
   "pay.unknown": "The payment may still complete. Its result will be shown on the payments screen.",
-  "pay.another": "New payment"
+  "pay.another": "New payment",
+  "pay.payee": "Payee",
+  "pay.duplicate": "I understand that a payment to this destination for this amount was recently made or is still pending.",
+  "pay.password": "Confirm your password to authorize this spend",
+  "pay.feeOverride": "The maximum fee exceeds your usual cap. This exception requires your password.",
+  "pay.optionalAmount": "Amount in sat (only needed for amountless invoices)",
+  "pay.optionalFee": "Maximum routing fee in sat (optional)",
+  "pay.invalidAmount": "Enter a whole number of satoshis."
 }

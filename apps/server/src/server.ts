@@ -76,7 +76,7 @@ export async function buildServer(options: ServerOptions): Promise<Server> {
     ...(options.now ? { now: options.now } : {}),
     ...(options.identityIntervalMs === undefined ? {} : { identityIntervalMs: options.identityIntervalMs }),
   });
-  const spend = new SpendService({ db, nodes, logger, ...(options.now ? { now: options.now } : {}) });
+  const spend = new SpendService({ db, nodes, auth, logger, ...(options.now ? { now: options.now } : {}) });
   const setup = new SetupService({
     db,
     vault,
@@ -99,6 +99,7 @@ export async function buildServer(options: ServerOptions): Promise<Server> {
   logger.info('vault opened', { keyId: vault.keyId, initialised: vault.initialised });
   if (options.issueSetupToken !== false) await auth.issueSetupToken();
   const close = async () => {
+    spend.close();
     setup.close();
     await auth.close();
     await nodes.monitor.stop();

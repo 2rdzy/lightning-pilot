@@ -142,6 +142,18 @@ describe(`end to end on ${chain} (profile ${profile})`, () => {
     );
     expect(node).toMatchObject({ pubkey: view.pubkey, canSpend: true, chainIdentity: { state: 'confirmed' } });
     nodeId = node.id;
+    await ok(
+      await request('POST', `/api/v1/nodes/${nodeId}/spend-policy`, {
+        maxPerPayment: null,
+        max24h: null,
+        stepUpAbove: null,
+        maxFeeRate: '10',
+        maxFeeSharePercent: 5,
+        maxRoutingFeeSharePercent: 1,
+        routingFeeAllowance: '10',
+      }),
+      204,
+    );
   });
 
   it('reads node info and balances', async () => {
