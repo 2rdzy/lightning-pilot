@@ -7,21 +7,37 @@ import { ConfigError, loadConfig } from './config/config.ts';
 import { listen } from './http/listen.ts';
 import { createLogger } from './logging/logger.ts';
 import { VaultError } from './modules/vault/index.ts';
+import { resetLoginThrottles } from './modules/auth/index.ts';
+import { kyselyOf, openRaw } from './storage/db.ts';
+import { migrate } from './storage/migrate.ts';
+import { join } from 'node:path';
 import { buildServer } from './server.ts';
 
 async function main(): Promise<void> {
   const argv = process.argv.slice(2);
   const reset = argv[0] === 'reset-auth';
   const tokenOnly = argv[0] === 'setup-token';
+  const throttleReset = argv[0] === 'reset-login-throttles';
   const { config, vaultKeyPath, dev } = loadConfig({
-    argv: reset || tokenOnly ? argv.slice(1) : argv,
+    argv: reset || tokenOnly || throttleReset ? argv.slice(1) : argv,
     env: process.env,
   });
-  if (reset || tokenOnly) requireDataOwner(config.paths.dataDir);
+  if (reset || tokenOnly || throttleReset) requireDataOwner(config.paths.dataDir);
   mkdirSync(config.paths.dataDir, { recursive: true, mode: 0o700 });
   const release = acquireServiceLock(config.paths.dataDir);
   process.once('exit', release);
   const logger = createLogger({ level: config.log.level, modules: config.log.modules });
+  if (throttleReset) {
+    const raw = await openRaw(join(config.paths.dataDir, 'lightning-pilot.db'));
+    migrate(raw);
+    const db = kyselyOf(raw);
+    try {
+      await resetLoginThrottles(db, logger);
+    } finally {
+      await db.destroy();
+    }
+    return;
+  }
   // The effective configuration holds no secrets, so it is logged as a whole.
   logger.info('starting', { config, dev });
   // The web app built next to the server (pnpm build in apps/web); packaging may move it (WP21).
@@ -57,8 +73,11 @@ async function main(): Promise<void> {
   server.nodes.monitor.start();
   const stop = () => {
     logger.info('stopping');
+    // Reject queued logins immediately, while keeping storage open until running HTTP requests drain.
+    const authClosed = server.auth.close();
     void listener
       .close()
+      .then(() => authClosed)
       .then(() => server.close())
       .finally(() => process.exit(0));
   };

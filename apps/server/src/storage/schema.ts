@@ -5,7 +5,14 @@ import type { Generated } from 'kysely';
 export interface DB {
   auth_totp: { id: number; key_id: string; nonce: Uint8Array; ciphertext: Uint8Array; last_counter: string };
   recovery_codes: { code_hash: string; used_at: string | null };
-  known_devices: { id_hash: string; created_at: string; last_seen_at: string; expires_at: string };
+  login_throttles: { counter: string; kind: string; failures: number; next_allowed_at: number; last_failed_at: number };
+  known_devices: {
+    source: Generated<string>;
+    id_hash: string;
+    created_at: string;
+    last_seen_at: string;
+    expires_at: string;
+  };
   spend_limits: {
     chain: string;
     pubkey: string;

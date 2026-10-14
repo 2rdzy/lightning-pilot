@@ -12,7 +12,7 @@ import {
   SetupStatusResponse,
   type Permission,
 } from '@lightning-pilot/core';
-import { sessionOf, type Router } from '../../http/context.ts';
+import { loginOriginOf, sessionOf, type Router } from '../../http/context.ts';
 import { declare, type Guard } from '../../http/declare.ts';
 import { csrfTokenFor, type AuthService } from './service.ts';
 
@@ -73,7 +73,7 @@ const errors = {
   403: { description: 'Not allowed', content: { 'application/json': { schema: ErrorBody } } },
 } as const;
 
-export function authRoutes(app: Router, guard: Guard, auth: AuthService): void {
+export function authRoutes(app: Router, guard: Guard, auth: AuthService, transport: 'direct' | 'tor' = 'direct'): void {
   declare(
     app,
     guard,
@@ -96,7 +96,7 @@ export function authRoutes(app: Router, guard: Guard, auth: AuthService): void {
     createRoute({
       method: 'post',
       path: '/api/v1/auth/login',
-      summary: 'Log in with the owner password',
+      summary: 'Log in with the owner password and TOTP or recovery code',
       request: { body: { required: true, content: { 'application/json': { schema: LoginRequest } } } },
       responses: {
         200: {
@@ -104,6 +104,8 @@ export function authRoutes(app: Router, guard: Guard, auth: AuthService): void {
           content: { 'application/json': { schema: SessionResponse } },
         },
         ...errors,
+        429: { description: 'Login must wait', content: { 'application/json': { schema: ErrorBody } } },
+        503: { description: 'Login lane full or stopping', content: { 'application/json': { schema: ErrorBody } } },
       },
     }),
     async (c) => {
@@ -112,6 +114,8 @@ export function authRoutes(app: Router, guard: Guard, auth: AuthService): void {
         c.get('requestId'),
         c.req.valid('json').totpCode,
         c.req.valid('json').recoveryCode,
+        loginOriginOf(c, transport),
+        getCookie(c, 'lp_device', 'host'),
       );
       setCookie(c, SESSION_COOKIE, session.cookieValue, {
         prefix: 'host',
@@ -120,6 +124,14 @@ export function authRoutes(app: Router, guard: Guard, auth: AuthService): void {
         sameSite: 'Strict',
         path: '/',
         expires: session.expiresAt,
+      });
+      setCookie(c, 'lp_device', session.deviceCookie, {
+        prefix: 'host',
+        httpOnly: true,
+        secure: true,
+        sameSite: 'Strict',
+        path: '/',
+        maxAge: 365 * 24 * 60 * 60,
       });
       return c.json(
         SessionResponse.parse({
@@ -171,7 +183,7 @@ export function authRoutes(app: Router, guard: Guard, auth: AuthService): void {
     async (c) => {
       await auth.logout(sessionOf(c).idHash, c.get('requestId'));
       deleteCookie(c, SESSION_COOKIE, { prefix: 'host', path: '/', secure: true });
-      c.header('Clear-Site-Data', '"cookies"');
+      c.header('Clear-Site-Data', '"cache", "storage"');
       return c.body(null, 204);
     },
   );

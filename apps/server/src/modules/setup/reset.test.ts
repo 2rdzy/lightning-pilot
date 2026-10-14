@@ -145,7 +145,7 @@ describe('offline authentication reset', () => {
 
   it('deletes authentication state while preserving credentials, nodes, limits, settings and history', async () => {
     const t = tempDir();
-    const { db } = await testDb(t.dir);
+    const { db, raw } = await testDb(t.dir);
     cleanups.push(async () => {
       await db.destroy();
       t.cleanup();
@@ -164,6 +164,7 @@ describe('offline authentication reset', () => {
     const vault = await Vault.start(db, randomBytes(32));
     const auth = await AuthService.create({
       db,
+      raw,
       vault,
       logger,
       setupUrl: 'https://localhost/setup',
@@ -269,6 +270,16 @@ describe('offline authentication reset', () => {
       settings: await db.selectFrom('settings').selectAll().execute(),
       history: await db.selectFrom('spend_intents').selectAll().execute(),
     };
+    await db
+      .insertInto('login_throttles')
+      .values({
+        counter: 'global',
+        kind: 'global',
+        failures: 30,
+        next_allowed_at: now.getTime() + 60000,
+        last_failed_at: now.getTime(),
+      })
+      .execute();
     await resetAuth(db, logger);
     await auth.resetState();
     for (const table of [
@@ -276,6 +287,7 @@ describe('offline authentication reset', () => {
       'auth_totp',
       'recovery_codes',
       'known_devices',
+      'login_throttles',
       'sessions',
       'spend_confirmations',
     ] as const)

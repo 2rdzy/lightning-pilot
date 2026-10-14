@@ -29,6 +29,7 @@ export async function resetAuth(db: Db, logger: Logger): Promise<void> {
   await writeTx(db, async (trx) => {
     await trx.deleteFrom('sessions').execute();
     await trx.deleteFrom('known_devices').execute();
+    await trx.deleteFrom('login_throttles').execute();
     await trx.deleteFrom('auth_totp').execute();
     await trx.deleteFrom('recovery_codes').execute();
     await trx.deleteFrom('spend_confirmations').execute();

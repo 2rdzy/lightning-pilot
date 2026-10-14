@@ -240,6 +240,7 @@ describe(`API (${testDriver()})`, () => {
       await errorCode(await h.request('POST', '/api/v1/auth/login', { body: { password: 'Wrong-password-1' } })),
     ).toBe('login_failed');
     const res = await h.request('POST', '/api/v1/auth/login', {
+      cookie: `__Host-lp_device=${enrolled.reply.deviceCookie ?? ''}`,
       body: { password: PASSWORD, totpCode: totp(h.secret ?? '', new Date(Date.now() + 30_000)) },
     });
     const setCookie = res.headers.get('set-cookie') ?? '';

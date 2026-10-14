@@ -16,7 +16,7 @@ const PASSWORD = 'Correct-horse-9-battery';
 async function service(clock: { now: Date }) {
   const t = tempDir();
   cleanups.push(t.cleanup);
-  const { db } = await testDb(t.dir);
+  const { db, raw } = await testDb(t.dir);
   const vault = await Vault.start(db, randomBytes(32));
   const tokens: string[] = [];
   const logger = createLogger({
@@ -25,6 +25,7 @@ async function service(clock: { now: Date }) {
   });
   const auth = await AuthService.create({
     db,
+    raw,
     vault,
     logger,
     setupUrl: 'https://localhost/setup',
@@ -141,14 +142,14 @@ describe('password cost', () => {
     expect(await verifyPassword(PASSWORD, 'scrypt$40$8$1$AAAA$AAAA')).toBe(false);
     const t = tempDir();
     cleanups.push(t.cleanup);
-    const { db } = await testDb(t.dir);
+    const { db, raw } = await testDb(t.dir);
     const tokens: string[] = [];
     const logger = createLogger({
       sink: () => undefined,
       stdout: (l) => tokens.push((JSON.parse(l) as { setupToken: string }).setupToken),
     });
     const vault = await Vault.start(db, randomBytes(32));
-    const auth = await AuthService.create({ db, vault, logger, setupUrl: 'x' });
+    const auth = await AuthService.create({ db, raw, vault, logger, setupUrl: 'x' });
     const nodes = new NodesService({ db, vault, logger, dev: true, maxNodes: 10 });
     const setup = new SetupService({ db, vault, auth, nodes, logger });
     await auth.issueSetupToken();
