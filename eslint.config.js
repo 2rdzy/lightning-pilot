@@ -1,6 +1,7 @@
 // Lint rules: strict TypeScript, a few security rules, and the module boundaries of the architecture (§4):
 // core depends on nothing of ours; chain and the adapters only on core; the web app only on core and ui;
 // the server on everything except ui. A boundary mistake fails CI.
+import { spendBoundary } from './tools/spend-boundary.mjs';
 import js from '@eslint/js';
 import boundaries from 'eslint-plugin-boundaries';
 import globals from 'globals';
@@ -83,6 +84,12 @@ export default tseslint.config(
   {
     files: ['packages/ui/**/*.{ts,tsx}', 'apps/web/**/*.{ts,tsx}'],
     languageOptions: { globals: { ...globals.browser } },
+  },
+  {
+    files: ['apps/server/src/**/*.ts'],
+    ignores: ['apps/server/src/modules/spend/**', '**/*.test.ts', 'apps/server/src/testing.ts'],
+    plugins: { spend: { rules: { boundary: spendBoundary } } },
+    rules: { 'spend/boundary': 'error' },
   },
   // Second guard for imports by package name: the boundaries plugin does not see through the workspace links in
   // node_modules, so each package also lists which of our packages it may import.

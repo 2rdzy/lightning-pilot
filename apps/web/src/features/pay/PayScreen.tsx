@@ -13,7 +13,7 @@ import { useApi } from '../../app/api-context.tsx';
 import { useT } from '../../app/i18n.tsx';
 import { Amount, Card, ChainBadge, ErrorNote, Field } from '../../app/parts.tsx';
 import { nodeRoute, payRoute } from '../../app/router.tsx';
-import { formatCost, formatDateTime, shortId } from '../../i18n/format.ts';
+import { formatCost, formatDateTime, shortId, parseSatsInput } from '../../i18n/format.ts';
 
 type Preview = z.infer<typeof PaymentPreviewResponse>;
 type Result = z.infer<typeof PaymentResultResponse>;
@@ -27,7 +27,12 @@ export function PayScreen() {
   const search = payRoute.useSearch();
   const [fromLink, setFromLink] = useState(false);
   const [preview, setPreview] = useState<{ data: Preview; key: string } | undefined>();
-  const form = useForm<{ request: string }>({ defaultValues: { request: '' } });
+  const [acknowledged, setAcknowledged] = useState(false);
+  const [password, setPassword] = useState('');
+  const [authorized, setAuthorized] = useState(false);
+  const form = useForm<{ request: string; amount: string; maxFee: string }>({
+    defaultValues: { request: '', amount: '', maxFee: '' },
+  });
 
   // Read ?request= once, then replace the history entry with the plain route.
   useEffect(() => {
@@ -38,18 +43,49 @@ export function PayScreen() {
   }, [search.request, form, navigate, node.id]);
 
   const previewMutation = useMutation({
-    mutationFn: (request: string) =>
-      api.call('previewPayment', { userActivity: true, params: { nodeId: node.id }, body: { request } }),
-    onSuccess: (data) => setPreview({ data, key: newIdempotencyKey() }),
-  });
-  const execute = useMutation({
-    mutationFn: (p: { data: Preview; key: string }) =>
-      api.call('executePayment', {
+    mutationFn: (values: { request: string; amount: string; maxFee: string }) => {
+      const optional = (value: string) => {
+        if (!value.trim()) return undefined;
+        const amount = parseSatsInput(value, tr.locale);
+        if (amount === undefined) throw new Error(tr.t('pay.invalidAmount'));
+        return amount.toString();
+      };
+      const amount = optional(values.amount),
+        maxFee = optional(values.maxFee);
+      return api.call('previewPayment', {
         userActivity: true,
         params: { nodeId: node.id },
-        body: { confirmationToken: p.data.confirmationToken },
+        body: {
+          request: values.request.trim(),
+          ...(amount === undefined ? {} : { amount }),
+          ...(maxFee === undefined ? {} : { maxFee }),
+        },
+      });
+    },
+    onSuccess: (data) => {
+      setPreview({ data, key: newIdempotencyKey() });
+      setAcknowledged(false);
+      setAuthorized(false);
+    },
+  });
+  const execute = useMutation({
+    mutationFn: async (p: { data: Preview; key: string }) => {
+      if (password) {
+        const proof = password;
+        setPassword('');
+        await api.call('stepUp', { userActivity: true, body: { password: proof, strength: 'password' } });
+        setAuthorized(true);
+      }
+      return api.call('executePayment', {
+        userActivity: true,
+        params: { nodeId: node.id },
+        body: { confirmationToken: p.data.confirmationToken, acknowledgeDuplicate: acknowledged },
         idempotencyKey: p.key,
-      }),
+      });
+    },
+    onError: (error) => {
+      if (error instanceof ApiError && error.code === 'step_up_required') setAuthorized(false);
+    },
     onSettled: () => queryClient.invalidateQueries({ queryKey: ['balances', node.id] }),
   });
 
@@ -58,7 +94,10 @@ export function PayScreen() {
     setFromLink(false);
     previewMutation.reset();
     execute.reset();
-    form.reset({ request: '' });
+    setPassword('');
+    setAuthorized(false);
+    setAcknowledged(false);
+    form.reset({ request: '', amount: '', maxFee: '' });
   };
 
   if (execute.data || (execute.error instanceof ApiError && execute.error.code === 'payment_failed')) {
@@ -67,6 +106,9 @@ export function PayScreen() {
 
   if (preview) {
     const p = preview.data;
+    const needsStepUp =
+      !authorized &&
+      (p.stepUpRequired || (execute.error instanceof ApiError && execute.error.code === 'step_up_required'));
     const amountText = formatCost(BigInt(p.cost.amount), tr.locale);
     return (
       <div className="flex max-w-[640px] flex-col gap-6">
@@ -102,12 +144,38 @@ export function PayScreen() {
             {tr.t('pay.previewExpires', { time: formatDateTime(p.expiresAt, tr.locale) })}
           </p>
         </Card>
+        <p role="note">{p.scope}</p>
+        {p.payee ? (
+          <p className="break-all">
+            {tr.t('pay.payee')}: {p.payee}
+          </p>
+        ) : null}
+        {p.description ? <p className="break-all">{p.description}</p> : null}
+        {p.feeOverride ? <Notice text={tr.t('pay.feeOverride')} /> : null}
+        {p.duplicateWarning ? (
+          <label>
+            <input type="checkbox" checked={acknowledged} onChange={(e) => setAcknowledged(e.target.checked)} />{' '}
+            {tr.t('pay.duplicate')}
+          </label>
+        ) : null}
+        {needsStepUp ? (
+          <Field label={tr.t('pay.password')} htmlFor="spend-password">
+            <input
+              id="spend-password"
+              className="input"
+              type="password"
+              autoComplete="current-password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+            />
+          </Field>
+        ) : null}
         {execute.error ? <ErrorNote error={execute.error} /> : null}
         <div className="flex gap-2">
           <button
             type="button"
             className="btn-primary"
-            disabled={execute.isPending}
+            disabled={execute.isPending || (p.duplicateWarning && !acknowledged) || (needsStepUp && !password)}
             onClick={() => execute.mutate(preview)}
           >
             {execute.isPending ? tr.t('pay.sending') : tr.t('pay.confirm', { amount: amountText })}
@@ -127,7 +195,7 @@ export function PayScreen() {
       <form
         className="rounded-card border-border bg-surface flex flex-col gap-4 border p-4"
         noValidate
-        onSubmit={form.handleSubmit((v) => previewMutation.mutate(v.request.trim()))}
+        onSubmit={form.handleSubmit((v) => previewMutation.mutate(v))}
       >
         <Field
           label={tr.t('pay.request')}
@@ -142,6 +210,12 @@ export function PayScreen() {
             autoComplete="off"
             {...form.register('request', { validate: (v) => v.trim().length > 0 })}
           />
+        </Field>
+        <Field label={tr.t('pay.optionalAmount')} htmlFor="pay-amount">
+          <input id="pay-amount" className="input" inputMode="numeric" {...form.register('amount')} />
+        </Field>
+        <Field label={tr.t('pay.optionalFee')} htmlFor="pay-fee">
+          <input id="pay-fee" className="input" inputMode="numeric" {...form.register('maxFee')} />
         </Field>
         {previewMutation.error ? <ErrorNote error={previewMutation.error} /> : null}
         <button type="submit" className="btn-primary self-start" disabled={previewMutation.isPending}>

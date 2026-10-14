@@ -33,7 +33,7 @@ export async function setupForTest(
   setup: import('./modules/setup/service.ts').SetupService,
   token: string,
   password: string,
-  now = new Date(),
+  now?: Date,
 ) {
   let result = await setup.act({ action: 'start', token }, undefined, undefined, 'r-test');
   const cookie = result.cookie;
@@ -43,7 +43,16 @@ export async function setupForTest(
   const secret = result.progress.secret;
   if (!secret) throw new Error('No enrolment secret');
   const { totp } = await import('./modules/auth/totp/totp.ts');
-  result = await act({ action: 'totp', code: totp(secret, new Date(now.getTime() - 30_000)) });
+  const proofTime = now ?? new Date();
+  try {
+    result = await act({ action: 'totp', code: totp(secret, new Date(proofTime.getTime() - 30_000)) });
+  } catch (error) {
+    // Preserve the current counter for a later login. Only retry if real time crossed a TOTP window during setup.
+    const current = new Date();
+    if (now !== undefined || Math.floor(current.getTime() / 30_000) === Math.floor(proofTime.getTime() / 30_000))
+      throw error;
+    result = await act({ action: 'totp', code: totp(secret, new Date(current.getTime() - 30_000)) });
+  }
   const code = result.progress.recoveryCodes?.[0];
   if (!code) throw new Error('No recovery code');
   await act({ action: 'recovery', code });

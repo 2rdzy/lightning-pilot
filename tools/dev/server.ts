@@ -135,7 +135,23 @@ async function addNodes(): Promise<void> {
   for (const node of nodes) {
     if (existing.has(node.name)) continue;
     const { name, ...input } = node;
-    await server.nodes.add({ name, implementation: 'cln', ...input }, 'r-dev');
+    const added = await server.nodes.add({ name, implementation: 'cln', ...input }, 'r-dev');
+    // Explicit development-only choices. Production nodes must be configured by their owner.
+    await server.db
+      .insertInto('spend_limits')
+      .values({
+        chain: input.chain,
+        pubkey: added.pubkey,
+        max_per_payment_sat: null,
+        max_24h_sat: null,
+        step_up_above_sat: '0',
+        max_fee_rate: '10',
+        max_fee_share_percent: 5,
+        max_routing_fee_share_percent: 1,
+        routing_fee_allowance_sat: '10',
+      })
+      .onConflict((oc) => oc.columns(['chain', 'pubkey']).doNothing())
+      .execute();
   }
   logger.info('development nodes ready', { nodes: nodes.map((n) => n.name) });
 }
