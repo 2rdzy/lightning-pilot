@@ -1414,7 +1414,9 @@ describe(`WP09 spending policy (${testDriver()})`, () => {
       expirySeconds: 1,
     });
     const p = await s.prepare(invoice.bolt11);
-    s.h.clock.now = new Date(s.h.clock.now.getTime() + 1001);
+    // Past the invoice's own expiry: the fake stamps invoices with the wall clock, which under load runs ahead of
+    // the test clock by more than the one-second expiry.
+    s.h.clock.now = new Date(Math.max(s.h.clock.now.getTime() + 1001, Date.parse(invoice.expiresAt) + 1));
     expect(await errorCode(await s.execute(p.confirmationToken))).toBe('confirmation_invalid');
   });
   it('releases the reservation if the action fails before the RPC and keeps its key terminal', async () => {
