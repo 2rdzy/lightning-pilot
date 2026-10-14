@@ -13,3 +13,4 @@ export * from './text.ts';
 export * from './setup.ts';
 
 export * from './sessions.ts';
+export * from './spend.ts';

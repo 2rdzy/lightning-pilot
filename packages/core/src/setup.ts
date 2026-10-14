@@ -9,6 +9,9 @@ const rate = z
   .regex(/^(0|[1-9][0-9]{0,6})(\.[0-9]{1,3})?$/)
   .refine((v) => Number(v) > 0);
 export const SetupLimits = z.strictObject({
+  maxFeeRateMode: z.enum(['refuse', 'step-up']).optional(),
+  maxFeeShareMode: z.enum(['refuse', 'step-up']).optional(),
+  maxRoutingFeeMode: z.enum(['refuse', 'step-up']).optional(),
   maxPerPayment: sats.nullable(),
   max24h: sats.nullable(),
   stepUpAbove: sats.nullable(),
