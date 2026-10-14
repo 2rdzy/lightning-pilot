@@ -7,7 +7,14 @@ import { dirname, join } from 'node:path';
 import { sql } from 'kysely';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { FakeAdapter, FakeNetwork } from '@lightning-pilot/adapter-kit';
-import { AdapterError, msat, parsePaymentHash, type Chain, type Network } from '@lightning-pilot/core';
+import {
+  AdapterError,
+  msat,
+  parsePaymentHash,
+  type Chain,
+  type Network,
+  type PaymentHash,
+} from '@lightning-pilot/core';
 import { loadConfig } from './config/config.ts';
 import { declaredPermissions } from './http/declare.ts';
 import { openApiDocument } from './http/app.ts';
@@ -1510,5 +1517,234 @@ describe(`WP09 spending policy (${testDriver()})`, () => {
     });
     expect(response.status, await response.clone().text()).toBe(200);
     expect(await response.json()).toMatchObject({ intentId: original.intentId, state: 'succeeded' });
+  });
+});
+
+describe(`WP10 crash recovery of BOLT11 spends (${testDriver()})`, () => {
+  async function crashed() {
+    const h = await harness();
+    const auth = await loggedIn(h);
+    const { id } = (await (await addNode(h, auth, 'https://a.blake2b.test', 'blake2b')).json()) as { id: string };
+    const path = `/api/v1/nodes/${id}`;
+    const payer = h.fakes.get('https://a.blake2b.test');
+    const recipient = h.fakes.get('https://b.blake2b.test');
+    if (!payer || !recipient) throw new Error('Missing fake');
+    const invoice = async () =>
+      (
+        await recipient.receive.createInvoice({
+          amount: msat(1000n),
+          description: 'x',
+          label: randomBytes(8).toString('hex'),
+        })
+      ).bolt11;
+    const preview = async (request: string) =>
+      h.request('POST', `${path}/payments/preview`, { ...auth, body: { request } });
+    const execute = async (request: string, key: string) => {
+      const { confirmationToken } = (await (await preview(request)).json()) as { confirmationToken: string };
+      return h.request('POST', `${path}/payments/execute`, {
+        ...auth,
+        headers: { 'idempotency-key': key },
+        body: { confirmationToken, acknowledgeDuplicate: true },
+      });
+    };
+    // Leaves the intent as a stop between commit and outcome write leaves it.
+    const interrupt = async (intentId: string, values: Record<string, string> = {}) =>
+      h.server.db
+        .updateTable('spend_intents')
+        .set({ state: 'reserved', fee_msat: null, preimage: null, error_code: null, ...values })
+        .where('id', '=', intentId)
+        .execute();
+    let current = h.server;
+    const restart = async () => {
+      const databases = await sql<{ file: string }>`PRAGMA database_list`.execute(current.db);
+      const dir = dirname(databases.rows[0]?.file ?? '');
+      const vaultKey = join(dir, 'vault-key');
+      const { config } = loadConfig({
+        readFile: () => JSON.stringify({ tls: { mode: 'off' }, paths: { dataDir: dir, vaultKey } }),
+      });
+      await current.close();
+      current.close = async () => undefined;
+      current = await buildServer({
+        config,
+        vaultKeyPath: vaultKey,
+        dev: true,
+        logger: createLogger({ level: 'debug', sink: (l) => h.lines.push(l) }),
+        now: () => h.clock.now,
+        driver: testDriver(),
+        scryptCost: { log2N: 10, r: 8, p: 1 },
+        adapterFactory: (connection) => {
+          const fake = h.fakes.get(connection.url);
+          if (!fake) throw new Error('Missing fake');
+          return fake;
+        },
+      });
+      const reopened = current;
+      cleanups.unshift(() => reopened.close());
+      return reopened;
+    };
+    const intent = async (server: Server, intentId: string) =>
+      server.db
+        .selectFrom('spend_intents')
+        .select(['state', 'fee_msat', 'preimage', 'error_code'])
+        .where('id', '=', intentId)
+        .executeTakeFirstOrThrow();
+    const replay = (server: Server, request: string, key: string) =>
+      Promise.resolve(
+        server.app.request(`${path}/payments/execute`, {
+          method: 'POST',
+          headers: {
+            host: 'localhost',
+            origin: 'https://localhost',
+            'content-type': 'application/json',
+            cookie: auth.cookie,
+            'x-csrf-token': auth.csrf,
+            'idempotency-key': key,
+          },
+          body: JSON.stringify({ confirmationToken: request }),
+        }),
+      );
+    return { h, auth, id, path, payer, invoice, preview, execute, interrupt, restart, intent, replay };
+  }
+  const tokenOf = new Map<string, string>();
+  const paid = async (s: Awaited<ReturnType<typeof crashed>>, key: string) => {
+    const bolt11 = await s.invoice();
+    const { confirmationToken } = (await (await s.preview(bolt11)).json()) as { confirmationToken: string };
+    tokenOf.set(key, confirmationToken);
+    const res = await s.h.request('POST', `${s.path}/payments/execute`, {
+      ...s.auth,
+      headers: { 'idempotency-key': key },
+      body: { confirmationToken, acknowledgeDuplicate: true },
+    });
+    expect(res.status, await res.clone().text()).toBe(200);
+    return { bolt11, ...((await res.json()) as { intentId: string; preimage: string; fee?: string }) };
+  };
+
+  it('marks interrupted intents unknown before serving, then resolves a payment the node made', async () => {
+    const s = await crashed();
+    const key = 'wp10-after-node-call';
+    const { intentId, preimage } = await paid(s, key);
+    await s.interrupt(intentId);
+    const server = await s.restart();
+    // Before any node call: unknown, still counted, and the same key is no longer "still running" forever.
+    expect((await s.intent(server, intentId)).state).toBe('unknown');
+    expect(s.h.lines.some((l) => l.includes('spend intents interrupted by a stop') && l.includes('"count":1'))).toBe(
+      true,
+    );
+    expect(await server.recovery.resolvePass()).toBe(0);
+    expect(await s.intent(server, intentId)).toMatchObject({ state: 'succeeded', preimage });
+    const again = await s.replay(server, tokenOf.get(key) ?? '', key);
+    expect(again.status).toBe(200);
+    expect(await again.json()).toMatchObject({ intentId, state: 'succeeded', preimage });
+  });
+
+  it('fails an intent the node never saw once xpay would have stopped, and frees its invoice', async () => {
+    const s = await crashed();
+    const key = 'wp10-before-node-call';
+    const { intentId } = await paid(s, key);
+    const bolt11 = await s.invoice();
+    const { decodeBolt11 } = await import('@lightning-pilot/core');
+    const hash = decodeBolt11(bolt11).paymentHash;
+    const reserved = s.h.clock.now.toISOString();
+    await s.interrupt(intentId, { payment_hash: hash, created_at: reserved, updated_at: reserved });
+    // The fixture reused a paid intent: the node must know nothing under its label either.
+    s.payer.pay.listByLabel = async () => [];
+    const server = await s.restart();
+    // Within xpay's retry window: no record yet proves nothing.
+    expect(await server.recovery.resolvePass()).toBe(1);
+    expect((await s.intent(server, intentId)).state).toBe('unknown');
+    s.h.clock.now = new Date(s.h.clock.now.getTime() + 121_000);
+    // The backoff holds the next attempt; resolving now needs a fresh recovery (a restart forgets the backoff).
+    expect(await server.recovery.resolvePass()).toBe(1);
+    const later = await s.restart();
+    expect(await later.recovery.resolvePass()).toBe(0);
+    expect(await s.intent(later, intentId)).toMatchObject({ state: 'failed', error_code: 'not_on_node' });
+    const retry = await s.replay(later, tokenOf.get(key) ?? '', key);
+    expect(retry.status).toBe(422);
+    expect(await errorCode(retry)).toBe('payment_failed');
+  });
+
+  it('keeps unclear intents unknown: pending, unreadable, node gone, or no record after 24 hours', async () => {
+    const s = await crashed();
+    const ids: string[] = [];
+    for (const key of ['wp10-pending-payment', 'wp10-unreadable-payment', 'wp10-very-old-payment']) {
+      const { intentId } = await paid(s, key);
+      ids.push(intentId);
+    }
+    const [pending, unreadable, old] = ids as [string, string, string];
+    const long = new Date(s.h.clock.now.getTime() - 2 * 86_400_000).toISOString();
+    for (const id of ids) await s.interrupt(id, id === old ? { created_at: long, updated_at: long } : {});
+    const server = await s.restart();
+    s.h.clock.now = new Date(s.h.clock.now.getTime() + 121_000);
+    const real = s.payer.pay.getPayment;
+    const rows = await server.db.selectFrom('spend_intents').select(['id', 'payment_hash']).execute();
+    const hashOf = (id: string) => rows.find((r) => r.id === id)?.payment_hash;
+    s.payer.pay.getPayment = async (hash) => {
+      if (hash === hashOf(pending)) return { paymentHash: hash, status: 'pending' };
+      if (hash === hashOf(unreadable))
+        throw new AdapterError({ code: 'node_unreachable', sent: true, definitive: false });
+      return undefined;
+    };
+    expect(await server.recovery.resolvePass()).toBe(3);
+    for (const id of ids) expect((await s.intent(server, id)).state).toBe('unknown');
+    expect(s.h.lines.some((l) => l.includes('payment status not readable'))).toBe(true);
+    s.payer.pay.getPayment = real;
+
+    // A node that cannot be loaded leaves its intents unknown and is asked again later.
+    const fresh = await s.restart();
+    s.h.fakes.delete('https://a.blake2b.test');
+    expect(await fresh.recovery.resolvePass()).toBe(3);
+    expect(s.h.lines.some((l) => l.includes('spend recovery: node not available'))).toBe(true);
+    // Not due yet: the next pass does not ask again.
+    expect(await fresh.recovery.resolvePass()).toBe(3);
+    expect(s.h.lines.filter((l) => l.includes('spend recovery: node not available'))).toHaveLength(1);
+  });
+
+  it('never fails a run-time unknown for lack of a record, nor an interrupted one the node paid under our label', async () => {
+    const s = await crashed();
+    // The node paid another hash than confirmed: unknown at run time, and no record under the confirmed hash.
+    const real = s.payer.pay.pay;
+    s.payer.pay.pay = async (request) => ({ ...(await real(request)), paymentHash: '00'.repeat(32) as PaymentHash });
+    const bolt11 = await s.invoice();
+    const res = await s.execute(bolt11, 'wp10-node-bad-response');
+    expect(((await res.json()) as { state: string }).state).toBe('unknown');
+    s.payer.pay.pay = real;
+    const { intentId: wrong } = (await s.h.server.db
+      .selectFrom('spend_intents')
+      .select('id as intentId')
+      .where('idempotency_key', '=', 'wp10-node-bad-response')
+      .executeTakeFirstOrThrow()) as { intentId: string };
+    s.h.clock.now = new Date(s.h.clock.now.getTime() + 121_000);
+    s.payer.pay.getPayment = async () => undefined;
+    expect(await s.h.server.recovery.resolvePass()).toBe(1);
+    expect((await s.intent(s.h.server, wrong)).state).toBe('unknown');
+
+    // Interrupted, no record by hash, but a record under our label: stays unknown.
+    const { intentId } = await paid(s, 'wp10-paid-under-label');
+    await s.interrupt(intentId);
+    const server = await s.restart();
+    s.payer.pay.listByLabel = async (label) =>
+      label === intentId ? [{ paymentHash: '11'.repeat(32) as PaymentHash, status: 'succeeded' }] : [];
+    expect(await server.recovery.resolvePass()).toBe(2);
+    expect((await s.intent(server, intentId)).state).toBe('unknown');
+    s.payer.pay.listByLabel = async () => {
+      throw new AdapterError({ code: 'node_unreachable', sent: true, definitive: false });
+    };
+    const again = await s.restart();
+    expect(await again.recovery.resolvePass()).toBe(2);
+    expect((await s.intent(again, intentId)).state).toBe('unknown');
+  });
+
+  it('runs in the background once started, and stops with the server', async () => {
+    const s = await crashed();
+    const { intentId } = await paid(s, 'wp10-background-loop');
+    await s.interrupt(intentId);
+    const server = await s.restart();
+    server.recovery.start();
+    server.recovery.start(); // a second start is ignored
+    await vi.waitFor(async () => expect((await s.intent(server, intentId)).state).toBe('succeeded'), {
+      timeout: 5000,
+    });
+    await server.recovery.stop();
+    server.recovery.start(); // ignored after stop
   });
 });

@@ -7,7 +7,6 @@ import {
   DecodeError,
   decodeFailure,
   decodeRequest,
-  msat,
   parseMsat,
   parsePaymentHash,
   toMsatString,
@@ -36,17 +35,11 @@ import {
   SPEND_SCOPE,
   type NodeIdentity,
 } from './policy.ts';
+import { provenPreimage, RETRY_FOR_SECONDS, settleBolt11 } from './recovery/index.ts';
 
 const CONFIRMATION_TTL_MS = 120000;
-const RETRY_FOR_SECONDS = 60;
-const SETTLE_FAILED_AFTER_MS = (RETRY_FOR_SECONDS + 60) * 1000;
 const BLOCKING = ['reserved', 'sent', 'unknown', 'succeeded'];
 const sha256 = (text: string) => createHash('sha256').update(text).digest('hex');
-// A preimage is stored only when it proves the payment: 32 bytes whose SHA-256 is the payment hash.
-function provenPreimage(preimage: string | undefined, paymentHash: string): string | undefined {
-  if (preimage === undefined || !/^[0-9a-f]{64}$/.test(preimage)) return undefined;
-  return createHash('sha256').update(Buffer.from(preimage, 'hex')).digest('hex') === paymentHash ? preimage : undefined;
-}
 function blockedBy(state: string): AppError {
   return state === 'succeeded'
     ? new AppError('validation_failed', 'This invoice has already been paid from this node.')
@@ -532,7 +525,7 @@ export class SpendService {
   ) {
     const earlier = await this.#db
       .selectFrom('spend_intents')
-      .select(['id', 'state', 'amount_msat', 'updated_at'])
+      .select(['id', 'state', 'amount_msat', 'updated_at', 'error_code'])
       .where('chain', '=', identity.chain)
       .where('pubkey', '=', identity.pubkey)
       .where('payment_hash', '=', paymentHash)
@@ -540,64 +533,18 @@ export class SpendService {
       .execute();
     for (const intent of earlier) {
       const state =
-        intent.state === 'unknown' ? await this.#settle(intent, adapter, paymentHash, requestId) : intent.state;
+        intent.state === 'unknown'
+          ? await settleBolt11(
+              this.#db,
+              adapter,
+              { ...intent, payment_hash: paymentHash },
+              this.#now(),
+              this.#log,
+              requestId,
+            )
+          : intent.state;
       if (refuse && state !== 'failed') throw blockedBy(state);
     }
-  }
-
-  // Reads the node's record of an `unknown` payment and stores the outcome when the record is clear: complete →
-  // succeeded; every part failed (and xpay has stopped retrying) → failed. Anything else stays unknown. `reserved`
-  // and `sent` are never settled here: in a running server they mean the node call is still in progress.
-  async #settle(
-    intent: { id: string; amount_msat: string; updated_at: string },
-    adapter: NodeAdapter,
-    paymentHash: PaymentHash,
-    requestId: string,
-  ): Promise<string> {
-    let record;
-    try {
-      record = await adapter.pay.getPayment(paymentHash);
-    } catch (err) {
-      this.#log.warn('payment status not readable', {
-        requestId,
-        intentId: intent.id,
-        code: err instanceof AdapterError ? err.code : 'internal',
-      });
-      return 'unknown';
-    }
-    const now = this.#now();
-    let state: 'succeeded' | 'failed' | undefined;
-    let fee: Msat | undefined;
-    let preimage: string | undefined;
-    if (record?.status === 'succeeded') {
-      state = 'succeeded';
-      const amount = parseMsat(intent.amount_msat);
-      if (record.amountSent !== undefined && record.amountSent >= amount) fee = msat(record.amountSent - amount);
-      preimage = provenPreimage(record.preimage, paymentHash);
-    } else if (record?.status === 'failed' && now.getTime() - Date.parse(intent.updated_at) >= SETTLE_FAILED_AFTER_MS) {
-      state = 'failed';
-    }
-    if (state === undefined) return 'unknown';
-    await this.#db
-      .updateTable('spend_intents')
-      .set({
-        state,
-        ...(fee === undefined ? {} : { fee_msat: toMsatString(fee) }),
-        ...(preimage === undefined ? {} : { preimage }),
-        updated_at: now.toISOString(),
-      })
-      .where('id', '=', intent.id)
-      .where('state', '=', 'unknown')
-      .execute();
-    this.#log.info('spend settled', {
-      requestId,
-      intentId: intent.id,
-      security: true,
-      paymentHash,
-      state,
-      ...(fee === undefined ? {} : { feeMsat: toMsatString(fee) }),
-    });
-    return state;
   }
 
   #result(
