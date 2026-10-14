@@ -1,7 +1,7 @@
 // Proves that the lint rules of eslint.config.js enforce the module boundaries of the architecture (§4):
 // a forbidden import fails lint whether it uses the package name or a relative path, and an allowed one passes.
 import { ESLint } from 'eslint';
-import { describe, expect, it } from 'vitest';
+import { beforeAll, describe, expect, it } from 'vitest';
 
 const eslint = new ESLint();
 
@@ -11,6 +11,13 @@ async function errorsFor(filePath: string, code: string): Promise<string[]> {
 }
 
 describe('module boundaries', () => {
+  beforeAll(async () => {
+    // Cold ESLint configuration and the server's TypeScript program can exceed five seconds on CI.
+    // Keep initialization separate from the assertions, which retain their normal test timeout.
+    await errorsFor('apps/web/src/probe.ts', '');
+    await errorsFor('apps/server/src/probe.ts', '');
+  }, 30000);
+
   it('refuses an adapter imported by package name from the web app', async () => {
     const errors = await errorsFor('apps/web/src/probe.ts', "import '@lightning-pilot/adapter-cln';\n");
     expect(errors).toContain('no-restricted-imports');
