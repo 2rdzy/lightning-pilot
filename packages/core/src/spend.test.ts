@@ -32,3 +32,21 @@ it('bounds preview options and requires explicit boolean duplicate acknowledgmen
     maxFee: '0',
   });
 });
+
+it('checks on-chain and channel spend requests strictly', async () => {
+  const { OnchainPreviewRequest, ChannelOpenPreviewRequest, ChannelClosePreviewRequest, PeerConnectRequest } =
+    await import('./spend.ts');
+  const peer = '02' + 'ab'.repeat(32);
+  expect(OnchainPreviewRequest.safeParse({ address: 'bcrt1qxyz', amount: '12345000' }).success).toBe(true);
+  for (const amount of ['0', '12345001', '1.5', '-1000'])
+    expect(OnchainPreviewRequest.safeParse({ address: 'bcrt1qxyz', amount }).success).toBe(false);
+  for (const feeRate of ['0', '0.000', '1.2345', '1e3', '10000000'])
+    expect(OnchainPreviewRequest.safeParse({ address: 'a', amount: '1000', feeRate }).success).toBe(false);
+  expect(OnchainPreviewRequest.safeParse({ address: 'a', amount: '1000', other: 1 }).success).toBe(false);
+  expect(ChannelOpenPreviewRequest.safeParse({ peer, amount: '100000000', push: '1' }).success).toBe(true);
+  expect(ChannelOpenPreviewRequest.safeParse({ peer: 'ab', amount: '100000000' }).success).toBe(false);
+  expect(ChannelClosePreviewRequest.parse({ channel: '103x1x0' })).toEqual({ channel: '103x1x0', force: false });
+  expect(ChannelClosePreviewRequest.safeParse({ channel: 'AB'.repeat(32) }).success).toBe(false);
+  expect(PeerConnectRequest.safeParse({ uri: `${peer}@127.0.0.1:9735` }).success).toBe(true);
+  expect(PeerConnectRequest.safeParse({ uri: 'short' }).success).toBe(false);
+});

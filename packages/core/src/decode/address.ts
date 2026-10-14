@@ -17,6 +17,8 @@ export interface OnchainAddress {
   address: string;
   type: AddressType;
   network: Network;
+  // The output script that pays this address (scriptPubKey), hex.
+  script: string;
 }
 
 interface AddressParams {
@@ -36,6 +38,7 @@ const KNOWN_HRPS = new Set(Object.values(ADDRESS_PARAMS).map((p) => p.hrp));
 const KNOWN_VERSIONS = new Set(Object.values(ADDRESS_PARAMS).flatMap((p) => [p.p2pkh, p.p2sh]));
 
 const base58check = createBase58check(sha256);
+const hex = (bytes: number[]) => bytes.map((b) => b.toString(16).padStart(2, '0')).join('');
 
 // The witness programs we send to. Other versions and lengths are valid addresses (BIP350 allows versions 1-16 with
 // 2-40 byte programs) but nothing spends them today, so coins sent there may be lost or taken by anyone.
@@ -81,7 +84,9 @@ function decodeSegwit(text: string, network: Network): OnchainAddress {
   }
   const type = witnessType(version, program.length);
   if (!type) throw new DecodeError('unsupported', 'This kind of address is not supported.');
-  return { address: lower, type, network };
+  // OP_0 or OP_1..OP_16, then a push of the program.
+  const script = [version === 0 ? 0 : 0x50 + version, program.length, ...program];
+  return { address: lower, type, network, script: hex(script) };
 }
 
 function decodeBase58(text: string, network: Network): OnchainAddress {
@@ -94,8 +99,9 @@ function decodeBase58(text: string, network: Network): OnchainAddress {
   const [version] = bytes;
   if (bytes.length !== 21 || version === undefined) throw new DecodeError('malformed', 'Not a valid address.');
   const params = ADDRESS_PARAMS[network];
-  if (version === params.p2pkh) return { address: text, type: 'p2pkh', network };
-  if (version === params.p2sh) return { address: text, type: 'p2sh', network };
+  const hash = hex([...bytes.subarray(1)]);
+  if (version === params.p2pkh) return { address: text, type: 'p2pkh', network, script: `76a914${hash}88ac` };
+  if (version === params.p2sh) return { address: text, type: 'p2sh', network, script: `a914${hash}87` };
   if (KNOWN_VERSIONS.has(version)) throw new DecodeError('wrong_network', `This address is not for ${network}.`);
   throw new DecodeError('unknown_prefix', 'Unknown address prefix.');
 }

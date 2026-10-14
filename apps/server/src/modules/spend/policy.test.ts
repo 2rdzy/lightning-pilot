@@ -59,6 +59,8 @@ it('uses exact inclusive caps and a strictly-above step-up threshold', () => {
   expect(checkBudget(policy, 0n, 50000n)).toBe(false);
   expect(() => checkBudget(policy, 0n, 100001n)).toThrow('exceeds');
   expect(() => checkBudget(policy, 200000n, 1n)).toThrow('exceeds');
+  // Nothing added: a close to the node's own wallet goes through even above a lowered cap.
+  expect(checkBudget(policy, 300000n, 0n)).toBe(false);
   expect(checkBudget({ ...policy, maxPerPayment: null, max24h: null, stepUpAbove: null }, 999999n, 999999n)).toBe(
     false,
   );

@@ -173,6 +173,8 @@ const app = {
 
 const listener = listen(app, config, logger);
 server.nodes.monitor.start();
+// Interrupted spends are read from their nodes in the background.
+server.recovery.start();
 logger.info('development server ready', {
   url: `http://localhost:${await listener.port}`,
   nodes: values.nodes,

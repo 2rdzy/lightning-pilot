@@ -71,6 +71,8 @@ async function main(): Promise<void> {
   const listener = listen(server.app, config, logger);
   // Chain identity of every node now, then on every new block (identity monitor).
   server.nodes.monitor.start();
+  // Interrupted spends are read from their nodes in the background.
+  server.recovery.start();
   const stop = () => {
     logger.info('stopping');
     // Reject queued logins immediately, while keeping storage open until running HTTP requests drain.

@@ -10,7 +10,7 @@ import type { Logger } from './logging/logger.ts';
 import { AuthService, type ScryptCost } from './modules/auth/index.ts';
 import { NodesService, type AdapterFactory } from './modules/nodes/index.ts';
 import { SetupService } from './modules/setup/index.ts';
-import { SpendService } from './modules/spend/index.ts';
+import { ChainSpends, SpendRecovery, SpendService } from './modules/spend/index.ts';
 import { loadVaultKey, Vault } from './modules/vault/index.ts';
 import type { Config } from './config/config.ts';
 
@@ -38,6 +38,8 @@ export interface Server {
   auth: AuthService;
   nodes: NodesService;
   setup: SetupService;
+  // Resolves interrupted spends against their nodes; start it once the listener is open (main.ts).
+  recovery: SpendRecovery;
   close(): Promise<void>;
 }
 
@@ -77,6 +79,17 @@ export async function buildServer(options: ServerOptions): Promise<Server> {
     ...(options.identityIntervalMs === undefined ? {} : { identityIntervalMs: options.identityIntervalMs }),
   });
   const spend = new SpendService({ db, nodes, auth, logger, ...(options.now ? { now: options.now } : {}) });
+  const chainSpends = new ChainSpends({
+    db,
+    nodes,
+    auth,
+    vault,
+    logger,
+    ...(options.now ? { now: options.now } : {}),
+  });
+  // Before any request: intents a stopped process left reserved may have reached the node (spend policy §4).
+  const recovery = new SpendRecovery({ db, nodes, logger, ...(options.now ? { now: options.now } : {}) });
+  await recovery.markUnresolved();
   const setup = new SetupService({
     db,
     vault,
@@ -91,6 +104,7 @@ export async function buildServer(options: ServerOptions): Promise<Server> {
     auth,
     nodes,
     spend,
+    chainSpends,
     logger,
     hosts: config.server.hosts,
     loginTransport: options.loginTransport ?? 'direct',
@@ -99,12 +113,14 @@ export async function buildServer(options: ServerOptions): Promise<Server> {
   logger.info('vault opened', { keyId: vault.keyId, initialised: vault.initialised });
   if (options.issueSetupToken !== false) await auth.issueSetupToken();
   const close = async () => {
+    await recovery.stop();
     spend.close();
+    chainSpends.close();
     setup.close();
     await auth.close();
     await nodes.monitor.stop();
     await db.destroy();
     vault.close();
   };
-  return { app, db, auth, nodes, setup, close };
+  return { app, db, auth, nodes, setup, recovery, close };
 }

@@ -77,12 +77,20 @@ export interface DB {
     session_handle: Generated<string | null>;
     confirmation_hash: Generated<string | null>;
     preimage: Generated<string | null>;
+    txid: Generated<string | null>;
+    psbt_key_id: Generated<string | null>;
+    psbt_nonce: Generated<Uint8Array | null>;
+    psbt_ciphertext: Generated<Uint8Array | null>;
+    channel_id: Generated<string | null>;
+    peer: Generated<string | null>;
+    close_force: Generated<number | null>;
     id: string;
     node_id: string;
     chain: string;
     pubkey: string;
     type: string;
-    payment_hash: string;
+    // BOLT11 only.
+    payment_hash: string | null;
     amount_msat: string;
     max_fee_msat: string;
     fee_msat: string | null;

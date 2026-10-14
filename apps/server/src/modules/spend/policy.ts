@@ -102,7 +102,9 @@ export async function usedBudget(db: Db, identity: NodeIdentity, now: Date): Pro
 export function checkBudget(policy: SpendPolicy, used: bigint, cost: bigint): boolean {
   if (
     (policy.maxPerPayment !== null && cost > BigInt(policy.maxPerPayment) * 1000n) ||
-    (policy.max24h !== null && used + cost > BigInt(policy.max24h) * 1000n)
+    // A spend that costs nothing (a close to the node's own wallet) adds nothing to the window, even when the
+    // owner has lowered the cap below what was already used.
+    (policy.max24h !== null && cost > 0n && used + cost > BigInt(policy.max24h) * 1000n)
   )
     throw new AppError('limit_exceeded', 'This spend exceeds the Lightning Pilot spending limits.');
   return policy.stepUpAbove !== null && cost > BigInt(policy.stepUpAbove) * 1000n;
