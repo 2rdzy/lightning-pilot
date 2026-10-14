@@ -73,12 +73,28 @@ describe('decodeAddress', () => {
     );
   });
 
+  it('gives the output script that pays each kind of address (BIP173, BIP350 vectors)', () => {
+    expect(decodeAddress('1RustyRX2oai4EYYDpQGWvEL62BBGqN9T', 'mainnet').script).toBe(
+      '76a91404b61f7dc1ea0dc99424464cc4064dc564d91e8988ac',
+    );
+    expect(decodeAddress('BC1QW508D6QEJXTDG4Y5R3ZARVARY0C5XW7KV8F3T4', 'mainnet').script).toBe(
+      '0014751e76e8199196d454941c45d1b3a323f1433bd6',
+    );
+    expect(decodeAddress('bc1qrp33g0q5c5txsp9arysrx4k6zdkfs4nce4xj0gdcccefvpysxf3qccfmv3', 'mainnet').script).toBe(
+      '00201863143c14c5166804bd19203356da136c985678cd4d27a1b8c6329604903262',
+    );
+    expect(decodeAddress('bc1p0xlxvlhemja6c4dqv22uapctqupfhlxm9h8z3k2e72q4k9hcz7vqzk5jj0', 'mainnet').script).toBe(
+      '512079be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798',
+    );
+  });
+
   it('checks base58 addresses: checksum, length, version and network', () => {
     expect(decodeAddress('1RustyRX2oai4EYYDpQGWvEL62BBGqN9T', 'mainnet').type).toBe('p2pkh');
     expect(decodeAddress(' 3EktnHQD7RiAE6uzMj2ZifT9YgRrkSgzQX ', 'mainnet')).toEqual({
       address: '3EktnHQD7RiAE6uzMj2ZifT9YgRrkSgzQX',
       type: 'p2sh',
       network: 'mainnet',
+      script: 'a9148f55563b9a19f321c211e9b9f38cdf686ea0784587',
     });
     expect(reasonOf(() => decodeAddress('1RustyRX2oai4EYYDpQGWvEL62BBGqN9U', 'mainnet'))).toBe('malformed');
     expect(reasonOf(() => decodeAddress('1RustyRX2oai4EYYDpQGWvEL62BBGqN9T', 'regtest'))).toBe('wrong_network');
