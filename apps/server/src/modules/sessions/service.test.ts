@@ -106,6 +106,24 @@ describe('server-side session lifecycle', () => {
     expect(hook).toHaveBeenCalledTimes(2);
     expect(await h.sessions.session(other.cookieValue)).toBeUndefined();
   });
+  it('logs revocations and everywhere logout as security warnings, ordinary logout and expiry as info', async () => {
+    const h = await fixture();
+    const other = await h.sessions.create(h.db, h.clock.now, false, 'lan');
+    const otherRow = await h.sessions.live(h.db, sessionDigest(other.cookieValue));
+    await h.sessions.end(otherRow.handle, 'revoked');
+    await h.sessions.create(h.db, h.clock.now, false, 'lan');
+    await h.sessions.endAll('everywhere');
+    const third = await h.sessions.create(h.db, h.clock.now, false, 'lan');
+    await h.sessions.end((await h.sessions.live(h.db, sessionDigest(third.cookieValue))).handle, 'logout');
+    const ended = h.logs
+      .map((line) => JSON.parse(line) as { msg: string; level: string; reason: string; security: boolean })
+      .filter((e) => e.msg === 'session ended');
+    expect(ended.map((e) => [e.reason, e.level, e.security])).toEqual([
+      ['revoked', 'warn', true],
+      ['everywhere', 'warn', true],
+      ['logout', 'info', true],
+    ]);
+  });
   it('can revoke other sessions only, and a missing handle is idempotent', async () => {
     const h = await fixture();
     const other = await h.sessions.create(h.db, h.clock.now);

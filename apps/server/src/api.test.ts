@@ -1,13 +1,13 @@
 // API tests over HTTP (in memory) with the fake adapter: request checks, setup, login, every route's permission,
 // nodes, invoices and the spend flow, the error format, and that no secret reaches the log.
 import { totp } from './modules/auth/totp/totp.ts';
-import { randomBytes } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { sql } from 'kysely';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { FakeAdapter, FakeNetwork } from '@lightning-pilot/adapter-kit';
-import { AdapterError, msat, type Chain, type Network } from '@lightning-pilot/core';
+import { AdapterError, msat, parsePaymentHash, type Chain, type Network } from '@lightning-pilot/core';
 import { loadConfig } from './config/config.ts';
 import { declaredPermissions } from './http/declare.ts';
 import { openApiDocument } from './http/app.ts';
@@ -1270,6 +1270,75 @@ describe(`WP09 spending policy (${testDriver()})`, () => {
     expect(replies.every((r) => r.status === 200 || r.status === 409)).toBe(true);
     expect(pay).toHaveBeenCalledTimes(1);
     expect(await s.h.server.db.selectFrom('spend_intents').selectAll().execute()).toHaveLength(1);
+  });
+  it('logs limit changes, spend intents and outcomes as security events bound to the session', async () => {
+    const s = await spending();
+    expect((await s.policy({ max24h: '100' })).status).toBe(204);
+    const p = await s.prepare();
+    expect((await s.execute(p.confirmationToken)).status).toBe(200);
+    const events = s.h.lines.map(
+      (line) => JSON.parse(line) as { msg: string; level: string; security?: boolean; sessionHandle?: string },
+    );
+    for (const [msg, level] of [
+      ['spend limits changed', 'warn'],
+      ['spend intent', 'info'],
+      ['spend result', 'info'],
+    ] as const)
+      expect(events.find((e) => e.msg === msg)).toMatchObject({ level, security: true, sessionHandle: s.handle });
+  });
+  it('a second key cannot use the token between the first admission commit and the node call', async () => {
+    const s = await spending();
+    const p = await s.prepare();
+    const pay = vi.spyOn(s.payer.pay, 'pay');
+    const monitor = s.h.server.nodes.monitor;
+    const admit = monitor.admit.bind(monitor);
+    let second: Response | undefined;
+    // Run the second execute after the first admission has committed and before the first execute continues.
+    vi.spyOn(monitor, 'admit').mockImplementationOnce(async (id, fn) => {
+      const admitted = await admit(id, fn);
+      second = await s.execute(p.confirmationToken, 'review-second-key-0002');
+      return admitted;
+    });
+    expect((await s.execute(p.confirmationToken, 'review-first-key-0001')).status).toBe(200);
+    expect(second && (await errorCode(second))).toBe('confirmation_invalid');
+    expect(pay).toHaveBeenCalledTimes(1);
+    expect(await s.h.server.db.selectFrom('spend_intents').selectAll().execute()).toHaveLength(1);
+  });
+  it('returns the stored proof of payment on a same-key replay', async () => {
+    const s = await spending();
+    const p = await s.prepare();
+    const first = (await (await s.execute(p.confirmationToken, 'review-preimage-key-01')).json()) as {
+      preimage: string;
+      paymentHash: string;
+    };
+    expect(createHash('sha256').update(Buffer.from(first.preimage, 'hex')).digest('hex')).toBe(first.paymentHash);
+    const replay = await s.execute(p.confirmationToken, 'review-preimage-key-01');
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toMatchObject({ preimage: first.preimage });
+    const intent = await s.h.server.db.selectFrom('spend_intents').selectAll().executeTakeFirstOrThrow();
+    expect(intent.preimage).toBe(first.preimage);
+  });
+  it('stores only a preimage that proves the payment hash', async () => {
+    const s = await spending();
+    // A node reply whose preimage does not hash to the payment hash: the payment is recorded, the value is not.
+    vi.spyOn(s.payer.pay, 'pay').mockImplementationOnce(async () => {
+      const intent = await s.h.server.db.selectFrom('spend_intents').selectAll().executeTakeFirstOrThrow();
+      return {
+        paymentHash: parsePaymentHash(intent.payment_hash),
+        preimage: '00'.repeat(32),
+        amount: msat(BigInt(intent.amount_msat)),
+        amountSent: msat(BigInt(intent.amount_msat)),
+        fee: msat(0n),
+      };
+    });
+    const p = await s.prepare();
+    expect((await s.execute(p.confirmationToken, 'review-bad-preimage-key')).status).toBe(200);
+    const intent = await s.h.server.db.selectFrom('spend_intents').selectAll().executeTakeFirstOrThrow();
+    expect(intent.state).toBe('succeeded');
+    expect(intent.preimage).toBeNull();
+    expect(await (await s.execute(p.confirmationToken, 'review-bad-preimage-key')).json()).not.toHaveProperty(
+      'preimage',
+    );
   });
   it('rejects a session revoked during preview or admission awaits', async () => {
     const s = await spending();

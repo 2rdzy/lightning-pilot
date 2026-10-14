@@ -235,7 +235,7 @@ export class SessionsService {
       return this.markEnded(db, [handle], reason);
     });
     this.notifyEnded(ended, reason);
-    if (ended.length > 0) this.#log.info('session ended', { reason, security: true });
+    if (ended.length > 0) this.#logEnded(reason, ended.length);
     return ended.length > 0;
   }
 
@@ -249,6 +249,14 @@ export class SessionsService {
       return handles;
     });
     this.notifyEnded(handles, reason);
+    if (handles.length > 0) this.#logEnded(reason, handles.length);
+  }
+
+  // Logging §5: a revoked session is a warning; an ordinary logout or timeout is not.
+  #logEnded(reason: EndReason, count: number): void {
+    const fields = { reason, count, security: true };
+    if (reason === 'logout' || reason === 'expired') this.#log.info('session ended', fields);
+    else this.#log.warn('session ended', fields);
   }
 
   onEnd(fn: (handle: string, reason: EndReason) => void): () => void {
