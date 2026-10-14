@@ -90,15 +90,15 @@ describe('sessions', () => {
   }
   const at = (iso: string) => new Date(iso);
 
-  it('ends after one idle hour and deletes the session', async () => {
+  it('ends after one idle hour and retains an ended row', async () => {
     const { auth, db, clock, cookie } = await loggedIn();
     clock.now = at('2026-10-12T10:59:00Z');
-    expect(await auth.session(cookie)).toBeDefined();
+    expect(await auth.session(cookie, true)).toBeDefined();
     clock.now = at('2026-10-12T11:58:00Z');
-    expect(await auth.session(cookie)).toBeDefined();
+    expect(await auth.session(cookie, true)).toBeDefined();
     clock.now = at('2026-10-12T13:00:00Z');
     expect(await auth.session(cookie)).toBeUndefined();
-    expect(await db.selectFrom('sessions').selectAll().execute()).toEqual([]);
+    expect((await db.selectFrom('sessions').selectAll().executeTakeFirstOrThrow()).end_reason).toBe('expired');
   });
 
   it('ends after seven days even when used every half hour', async () => {
@@ -108,13 +108,13 @@ describe('sessions', () => {
     while (t + 30 * 60_000 < end) {
       t += 30 * 60_000;
       clock.now = new Date(t);
-      expect(await auth.session(cookie)).toBeDefined();
+      expect(await auth.session(cookie, true)).toBeDefined();
     }
     clock.now = new Date(end);
     expect(await auth.session(cookie)).toBeUndefined();
   });
 
-  it('writes last-seen at most once a minute', async () => {
+  it('background reads do not touch last-seen; user activity does', async () => {
     const { auth, db, clock, cookie } = await loggedIn();
     const seen = async () =>
       (await db.selectFrom('sessions').select('last_seen_at').executeTakeFirstOrThrow()).last_seen_at;
@@ -122,7 +122,7 @@ describe('sessions', () => {
     await auth.session(cookie);
     expect(await seen()).toBe('2026-10-12T10:00:00.000Z');
     clock.now = at('2026-10-12T10:01:30Z');
-    await auth.session(cookie);
+    await auth.session(cookie, true);
     expect(await seen()).toBe('2026-10-12T10:01:30.000Z');
   });
 

@@ -38,12 +38,14 @@ export function PayScreen() {
   }, [search.request, form, navigate, node.id]);
 
   const previewMutation = useMutation({
-    mutationFn: (request: string) => api.call('previewPayment', { params: { nodeId: node.id }, body: { request } }),
+    mutationFn: (request: string) =>
+      api.call('previewPayment', { userActivity: true, params: { nodeId: node.id }, body: { request } }),
     onSuccess: (data) => setPreview({ data, key: newIdempotencyKey() }),
   });
   const execute = useMutation({
     mutationFn: (p: { data: Preview; key: string }) =>
       api.call('executePayment', {
+        userActivity: true,
         params: { nodeId: node.id },
         body: { confirmationToken: p.data.confirmationToken },
         idempotencyKey: p.key,

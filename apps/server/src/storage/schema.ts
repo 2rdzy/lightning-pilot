@@ -7,6 +7,7 @@ export interface DB {
   recovery_codes: { code_hash: string; used_at: string | null };
   login_throttles: { counter: string; kind: string; failures: number; next_allowed_at: number; last_failed_at: number };
   known_devices: {
+    handle: Generated<string>;
     source: Generated<string>;
     id_hash: string;
     created_at: string;
@@ -28,6 +29,11 @@ export interface DB {
   owner: { id: number; password_hash: string; created_at: string };
   setup_token: { id: number; token_hash: string; expires_at: string };
   sessions: {
+    source: Generated<string>;
+    ended_at: Generated<string | null>;
+    end_reason: Generated<string | null>;
+    step_up_failures: Generated<number>;
+    step_up_retry_at: Generated<number>;
     recovery_required: Generated<number>;
     id_hash: string;
     handle: string;

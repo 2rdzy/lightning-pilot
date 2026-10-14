@@ -1,13 +1,14 @@
 // Password + TOTP authentication, setup-token issuance and server-side sessions. Login admission is bounded;
 // accepted factors, device registration, counter reset and sessions commit atomically. Step-up belongs to WP08.
 import { createHash, randomBytes, scrypt as scryptCallback, timingSafeEqual, type ScryptOptions } from 'node:crypto';
-import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { LoginThrottle, DEVICE_LIFETIME_MS, deviceDigest, type LoginOrigin } from './login/index.ts';
 import type { LoginAttempt } from './login/throttle.ts';
-import { AppError } from '@lightning-pilot/core';
+import { AppError, type StepUpStrength } from '@lightning-pilot/core';
+import { SessionsService, publicSource, type NewSession } from '../sessions/index.ts';
+export { csrfTokenFor, type NewSession } from '../sessions/index.ts';
 import { writeTx, type Db, type RawDb } from '../../storage/db.ts';
-import { hashRecoveryCode } from './totp/recovery.ts';
+import { generateRecoveryCodes, hashRecoveryCode } from './totp/recovery.ts';
 import { generateTotpSecret, otpauthUri } from './totp/totp.ts';
 import { matchTotp } from './totp/totp.ts';
 import type { Logger } from '../../logging/logger.ts';
@@ -23,10 +24,6 @@ export interface ScryptCost {
 export const DEFAULT_SCRYPT: ScryptCost = { log2N: 17, r: 8, p: 1 };
 
 const SETUP_TOKEN_TTL_MS = 24 * 60 * 60 * 1000;
-const SESSION_IDLE_MS = 60 * 60 * 1000;
-const SESSION_ABSOLUTE_MS = 7 * 24 * 60 * 60 * 1000;
-// last_seen_at is written at most this often, so reads do not turn into writes.
-const TOUCH_INTERVAL_MS = 60 * 1000;
 const BASE32 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
 
 function scrypt(password: string, salt: Buffer, cost: ScryptCost): Promise<Buffer> {
@@ -90,13 +87,8 @@ export interface AuthOptions {
   setupUrl: string;
   scryptCost?: ScryptCost;
   now?: () => Date;
-}
-
-export interface NewSession {
-  cookieValue: string;
-  csrfToken: string;
-  expiresAt: Date;
-  recoveryRequired: boolean;
+  sessionIdleMs?: number;
+  sessionAbsoluteMs?: number;
 }
 
 export interface LoginSession extends NewSession {
@@ -104,6 +96,7 @@ export interface LoginSession extends NewSession {
 }
 
 export class AuthService {
+  readonly sessions: SessionsService;
   readonly #db: Db;
   readonly #login: LoginThrottle;
   readonly #verifyPassword: typeof verifyPassword;
@@ -112,7 +105,8 @@ export class AuthService {
   readonly #setupUrl: string;
   readonly #now: () => Date;
   #ownerExists = false;
-  readonly #recovery = new Map<string, { secret: string; expires: number }>();
+  readonly #recovery = new Map<string, { secret: string; expires: number; handle: string }>();
+  readonly #changes = new Map<string, { secret: string; expires: number; passwordHash: string }>();
 
   private constructor(options: AuthOptions) {
     this.#db = options.db;
@@ -121,6 +115,17 @@ export class AuthService {
     this.#setupUrl = options.setupUrl;
     this.#now = options.now ?? (() => new Date());
     this.#verifyPassword = options.passwordVerifier ?? verifyPassword;
+    this.sessions = new SessionsService({
+      db: options.db,
+      logger: options.logger,
+      now: this.#now,
+      ...(options.sessionIdleMs === undefined ? {} : { idleMs: options.sessionIdleMs }),
+      ...(options.sessionAbsoluteMs === undefined ? {} : { absoluteMs: options.sessionAbsoluteMs }),
+    });
+    this.sessions.onEnd((handle) => {
+      for (const [id, pending] of this.#recovery) if (pending.handle === handle) this.#recovery.delete(id);
+      this.#changes.delete(handle);
+    });
     this.#login = new LoginThrottle({
       db: options.db,
       raw: options.raw,
@@ -132,6 +137,7 @@ export class AuthService {
 
   static async create(options: AuthOptions): Promise<AuthService> {
     const service = new AuthService(options);
+    await service.sessions.loadPolicy();
     service.#ownerExists = (await options.db.selectFrom('owner').select('id').executeTakeFirst()) !== undefined;
     return service;
   }
@@ -159,21 +165,8 @@ export class AuthService {
     this.#ownerExists = true;
   }
 
-  async newSession(db: Db, now: Date, recoveryRequired = false): Promise<NewSession> {
-    const cookieValue = randomBytes(32).toString('base64url');
-    const expiresAt = new Date(now.getTime() + SESSION_ABSOLUTE_MS);
-    await db
-      .insertInto('sessions')
-      .values({
-        id_hash: sha256(cookieValue),
-        recovery_required: recoveryRequired ? 1 : 0,
-        handle: randomUUID(),
-        created_at: now.toISOString(),
-        last_seen_at: now.toISOString(),
-        expires_at: expiresAt.toISOString(),
-      })
-      .execute();
-    return { cookieValue, csrfToken: csrfTokenFor(cookieValue), expiresAt, recoveryRequired };
+  newSession(db: Db, now: Date, recoveryRequired = false, source = 'setup'): Promise<NewSession> {
+    return this.sessions.create(db, now, recoveryRequired, source);
   }
 
   async resetState(): Promise<void> {
@@ -256,7 +249,7 @@ export class AuthService {
         if (counter === undefined) throw factorFailed('totp');
         await trx.updateTable('auth_totp').set({ last_counter: counter.toString() }).where('id', '=', 1).execute();
       }
-      const session = await this.newSession(trx, now, recoveryRequired);
+      const session = await this.newSession(trx, now, recoveryRequired, publicSource(attempt.source.descriptor));
       const hash = deviceDigest(attempt.deviceCookie);
       // Revocation or expiry during the hash must not resurrect an old cookie. Register a fresh device instead.
       const existing = hash
@@ -279,7 +272,12 @@ export class AuthService {
       else
         await trx
           .insertInto('known_devices')
-          .values({ id_hash: deviceHash, created_at: now.toISOString(), ...dates, source: attempt.source.descriptor })
+          .values({
+            id_hash: deviceHash,
+            created_at: now.toISOString(),
+            ...dates,
+            source: publicSource(attempt.source.descriptor),
+          })
           .execute();
       await this.#login.succeeded(trx, attempt.source);
       if (recoveryRequired) this.#log.warn('recovery code used', { requestId, security: true });
@@ -287,34 +285,8 @@ export class AuthService {
     });
   }
 
-  // The session behind a cookie value, or undefined if there is none or it has expired (idle 1 hour, absolute
-  // 7 days). Expired sessions are deleted.
-  async session(
-    cookieValue: string,
-  ): Promise<{ idHash: string; handle: string; expiresAt: Date; recoveryRequired: boolean } | undefined> {
-    const idHash = sha256(cookieValue);
-    const row = await this.#db.selectFrom('sessions').selectAll().where('id_hash', '=', idHash).executeTakeFirst();
-    if (!row) return undefined;
-    const now = this.#now().getTime();
-    const lastSeen = Date.parse(row.last_seen_at);
-    if (now >= Date.parse(row.expires_at) || now - lastSeen >= SESSION_IDLE_MS) {
-      await this.#db.deleteFrom('sessions').where('id_hash', '=', idHash).execute();
-      this.#recovery.delete(idHash);
-      return undefined;
-    }
-    if (now - lastSeen >= TOUCH_INTERVAL_MS) {
-      await this.#db
-        .updateTable('sessions')
-        .set({ last_seen_at: new Date(now).toISOString() })
-        .where('id_hash', '=', idHash)
-        .execute();
-    }
-    return {
-      idHash,
-      recoveryRequired: row.recovery_required === 1,
-      handle: row.handle,
-      expiresAt: new Date(Math.min(Date.parse(row.expires_at), now + SESSION_IDLE_MS)),
-    };
+  session(cookie: string, activity = false) {
+    return this.sessions.session(cookie, activity);
   }
 
   // Throttled setup-token check: verify returns the matched token row, or undefined for a wrong token.
@@ -323,19 +295,15 @@ export class AuthService {
   }
 
   async beginRecovery(idHash: string): Promise<{ secret: string; uri: string }> {
-    const row = await this.#db
-      .selectFrom('sessions')
-      .select('recovery_required')
-      .where('id_hash', '=', idHash)
-      .executeTakeFirst();
-    if (row?.recovery_required !== 1)
+    const row = await this.sessions.live(this.#db, idHash);
+    if (row.recovery_required !== 1)
       throw new AppError('step_up_required', 'Use a recovery login before enrolling a new authenticator.');
     const now = this.#now().getTime();
     for (const [id, pending] of this.#recovery) if (pending.expires <= now) this.#recovery.delete(id);
     const existing = this.#recovery.get(idHash);
     if (existing) return { secret: existing.secret, uri: otpauthUri(existing.secret, 'owner') };
     const secret = generateTotpSecret();
-    this.#recovery.set(idHash, { secret, expires: this.#now().getTime() + 15 * 60_000 });
+    this.#recovery.set(idHash, { secret, expires: this.#now().getTime() + 15 * 60_000, handle: row.handle });
     return { secret, uri: otpauthUri(secret, 'owner') };
   }
 
@@ -352,19 +320,25 @@ export class AuthService {
     const rotated = await writeTx(this.#db, async (trx) => {
       if (this.#recovery.get(idHash) !== pending || pending.expires <= this.#now().getTime())
         throw new AppError('validation_failed', 'The enrolment expired. Start again.');
-      const row = await trx
-        .selectFrom('sessions')
-        .select('recovery_required')
-        .where('id_hash', '=', idHash)
-        .executeTakeFirst();
-      if (row?.recovery_required !== 1)
+      const row = await this.sessions.live(trx, idHash);
+      if (row.recovery_required !== 1)
         throw new AppError('step_up_required', 'Use a recovery login before enrolling a new authenticator.');
       await trx
         .updateTable('auth_totp')
         .set({ ...this.#vault.sealSecret(pending.secret, 'totp'), last_counter: counter.toString() })
         .where('id', '=', 1)
         .execute();
-      await trx.deleteFrom('sessions').where('id_hash', '!=', idHash).execute();
+      const others = await trx
+        .selectFrom('sessions')
+        .select('handle')
+        .where('id_hash', '!=', idHash)
+        .where('ended_at', 'is', null)
+        .execute();
+      await this.sessions.markEnded(
+        trx,
+        others.map((r) => r.handle),
+        'recovery',
+      );
       const cookieValue = randomBytes(32).toString('base64url');
       const updated = await trx
         .updateTable('sessions')
@@ -372,26 +346,190 @@ export class AuthService {
         .where('id_hash', '=', idHash)
         .returning('expires_at')
         .executeTakeFirstOrThrow();
-      return { cookieValue, expiresAt: new Date(updated.expires_at) };
+      return {
+        cookieValue,
+        expiresAt: new Date(updated.expires_at),
+        ended: others.map((r) => r.handle),
+        handle: row.handle,
+      };
     });
+    this.sessions.notifyEnded(rotated.ended, 'recovery');
+    this.sessions.clearGrants(rotated.handle);
     this.#recovery.clear();
     this.#log.warn('authenticator recovered', { requestId, security: true });
     return rotated;
   }
 
-  close(): Promise<void> {
+  async close(): Promise<void> {
     this.#recovery.clear();
-    return this.#login.close();
+    this.#changes.clear();
+    await this.sessions.close();
+    await this.#login.close();
   }
 
   async logout(idHash: string, requestId: string): Promise<void> {
-    await this.#db.deleteFrom('sessions').where('id_hash', '=', idHash).execute();
-    this.#recovery.delete(idHash);
+    const row = await this.sessions.live(this.#db, idHash);
+    await this.sessions.end(row.handle, 'logout');
     this.#log.info('logout', { requestId });
   }
-}
 
-// The CSRF token is derived from the session cookie, so it needs no storage and cannot be computed without the
-// cookie (which scripts on other sites cannot read).
-export const csrfTokenFor = (cookieValue: string): string =>
-  createHash('sha256').update(`csrf|${cookieValue}`).digest('base64url');
+  stepUp(idHash: string, password: string, strength: StepUpStrength, totpCode: string | undefined, requestId: string) {
+    return this.sessions.stepUp(
+      idHash,
+      strength,
+      requestId,
+      async () => {
+        const owner = await this.#db.selectFrom('owner').select('password_hash').executeTakeFirstOrThrow();
+        return { matches: await this.#verifyPassword(password, owner.password_hash), snapshot: owner.password_hash };
+      },
+      async (db, snapshot) => {
+        const owner = await db.selectFrom('owner').select('password_hash').executeTakeFirst();
+        if (owner?.password_hash !== snapshot) return false;
+        if (strength === 'password') return true;
+        const factor = await db.selectFrom('auth_totp').selectAll().executeTakeFirst();
+        const counter =
+          factor && totpCode
+            ? matchTotp(this.#vault.openSecret(factor, 'totp'), totpCode, this.#now(), BigInt(factor.last_counter))
+            : undefined;
+        if (counter === undefined) return false;
+        await db.updateTable('auth_totp').set({ last_counter: counter.toString() }).where('id', '=', 1).execute();
+        return true;
+      },
+    );
+  }
+
+  async requireStepUp(idHash: string, strength: StepUpStrength, db: Db = this.#db): Promise<void> {
+    const row = await this.sessions.live(db, idHash);
+    this.sessions.requireGrant(row, strength);
+  }
+
+  async devices(idHash: string) {
+    return this.sessions.authorized(idHash, 'security', async (db) => {
+      const now = this.#now().toISOString();
+      const rows = await db
+        .selectFrom('known_devices')
+        .selectAll()
+        .where('expires_at', '>', now)
+        .where('last_seen_at', '>', new Date(this.#now().getTime() - DEVICE_LIFETIME_MS).toISOString())
+        .execute();
+      return {
+        items: rows.map((r) => ({
+          id: r.handle,
+          createdAt: r.created_at,
+          lastUsedAt: r.last_seen_at,
+          expiresAt: r.expires_at,
+          source: publicSource(r.source),
+        })),
+      };
+    });
+  }
+
+  async revokeDevice(idHash: string, handle: string, requestId: string): Promise<void> {
+    await this.sessions.authorized(idHash, 'security', async (db) => {
+      await db.deleteFrom('known_devices').where('handle', '=', handle).execute();
+    });
+    this.#log.info('known device revoked', { requestId, security: true });
+  }
+
+  async recoveryCount(idHash: string) {
+    return this.sessions.authorized(idHash, 'security', async (db) => ({
+      remaining: (await db.selectFrom('recovery_codes').select('code_hash').where('used_at', 'is', null).execute())
+        .length,
+    }));
+  }
+
+  async regenerateRecoveryCodes(idHash: string, requestId: string) {
+    const codes = generateRecoveryCodes();
+    await this.sessions.authorized(idHash, 'security', async (db) => {
+      await db.deleteFrom('recovery_codes').execute();
+      await db
+        .insertInto('recovery_codes')
+        .values(codes.map((code) => ({ code_hash: hashRecoveryCode(code), used_at: null })))
+        .execute();
+    });
+    this.#log.warn('recovery codes regenerated', { requestId, security: true });
+    return { codes };
+  }
+
+  async #securityChange(
+    idHash: string,
+    requestId: string,
+    change: (db: Db, handle: string) => Promise<void>,
+  ): Promise<void> {
+    const result = await this.sessions.authorized(idHash, 'security', async (db, row) => {
+      await change(db, row.handle);
+      const others = await db
+        .selectFrom('sessions')
+        .select('handle')
+        .where('handle', '!=', row.handle)
+        .where('ended_at', 'is', null)
+        .execute();
+      const ended = others.map((r) => r.handle);
+      await this.sessions.markEnded(db, ended, 'security_change');
+      this.sessions.clearGrants(row.handle);
+      return { ended, handle: row.handle };
+    });
+    this.sessions.notifyEnded(result.ended, 'security_change');
+    this.sessions.clearGrants(result.handle);
+    this.#changes.delete(result.handle);
+    this.#log.warn('authentication settings changed', { requestId, security: true });
+  }
+
+  async changePassword(idHash: string, password: string, requestId: string): Promise<void> {
+    return this.sessions.passwordWork(async () => {
+      const snapshot = await this.sessions.authorized(
+        idHash,
+        'security',
+        async (db) => (await db.selectFrom('owner').select('password_hash').executeTakeFirstOrThrow()).password_hash,
+      );
+      // Password generation uses the owner's existing measured cost, not the development/test default.
+      const [, log2N, r, p] = snapshot.split('$');
+      const hash = await hashPassword(password, { log2N: Number(log2N), r: Number(r), p: Number(p) });
+      await this.#securityChange(idHash, requestId, async (db) => {
+        const owner = await db.selectFrom('owner').select('password_hash').executeTakeFirstOrThrow();
+        if (owner.password_hash !== snapshot)
+          throw new AppError('step_up_required', 'Authentication settings changed.');
+        await db.updateTable('owner').set({ password_hash: hash }).where('id', '=', 1).execute();
+      });
+    });
+  }
+
+  async beginTotpChange(idHash: string) {
+    const row = await this.sessions.authorized(idHash, 'security', async (db, row) => ({
+      handle: row.handle,
+      passwordHash: (await db.selectFrom('owner').select('password_hash').executeTakeFirstOrThrow()).password_hash,
+    }));
+    const now = this.#now().getTime();
+    for (const [id, pending] of this.#changes) if (pending.expires <= now) this.#changes.delete(id);
+    let pending = this.#changes.get(row.handle);
+    if (!pending) {
+      if (this.#changes.size >= 10)
+        throw new AppError('busy', 'Too many pending authenticator changes.', { retryAfter: 1 });
+      pending = { secret: generateTotpSecret(), expires: now + 15 * 60_000, passwordHash: row.passwordHash };
+      this.#changes.set(row.handle, pending);
+    }
+    return {
+      secret: pending.secret,
+      uri: otpauthUri(pending.secret, 'owner'),
+      expiresAt: new Date(pending.expires).toISOString(),
+    };
+  }
+
+  async finishTotpChange(idHash: string, code: string, requestId: string): Promise<void> {
+    await this.#securityChange(idHash, requestId, async (db, handle) => {
+      const pending = this.#changes.get(handle);
+      const owner = await db.selectFrom('owner').select('password_hash').executeTakeFirstOrThrow();
+      const counter =
+        pending && pending.expires > this.#now().getTime() && owner.password_hash === pending.passwordHash
+          ? matchTotp(pending.secret, code, this.#now())
+          : undefined;
+      if (!pending || counter === undefined)
+        throw new AppError('validation_failed', 'The enrolment code is not valid.');
+      await db
+        .updateTable('auth_totp')
+        .set({ ...this.#vault.sealSecret(pending.secret, 'totp'), last_counter: counter.toString() })
+        .where('id', '=', 1)
+        .execute();
+    });
+  }
+}

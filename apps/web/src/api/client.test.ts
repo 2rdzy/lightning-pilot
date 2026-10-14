@@ -161,3 +161,51 @@ describe('API client', () => {
     }
   });
 });
+
+describe('WP08 user activity and step-up', () => {
+  it('marks only explicit user-driven calls, leaving background reads and session probes untouched', async () => {
+    const { api, calls } = client(() => json(200, { csrfToken: 'csrf', expiresAt: '2026-10-14T09:00:00Z' }));
+    await api.call('session');
+    await api.call('session', { userActivity: true });
+    expect(header(calls[0]?.init, 'x-user-activity')).toBeUndefined();
+    expect(header(calls[1]?.init, 'x-user-activity')).toBe('1');
+  });
+  it('adopts rotated CSRF after successful step-up but ignores a late response from a previous session', async () => {
+    const { api, calls } = client(() =>
+      json(200, {
+        csrfToken: 'rotated',
+        expiresAt: '2026-10-14T09:00:00Z',
+        strength: 'password',
+        stepUpExpiresAt: '2026-10-14T08:05:00Z',
+      }),
+    );
+    api.setCsrfToken('old');
+    await api.call('stepUp', { body: { password: 'password', strength: 'password' }, userActivity: true });
+    await api.call('stepUp', { body: { password: 'password', strength: 'password' } });
+    expect(header(calls[1]?.init, 'x-csrf-token')).toBe('rotated');
+    let release: (value: Response) => void = () => {};
+    const late = client(
+      () =>
+        new Promise<Response>((r) => {
+          release = r;
+        }),
+    );
+    late.api.setCsrfToken('earlier');
+    const pending = late.api.call('stepUp', { body: { password: 'value', strength: 'password' } });
+    late.api.setCsrfToken('newer');
+    release(
+      json(200, {
+        csrfToken: 'stale',
+        expiresAt: '2026-10-14T09:00:00Z',
+        strength: 'password',
+        stepUpExpiresAt: '2026-10-14T08:05:00Z',
+      }),
+    );
+    await pending;
+    const probe = late.api.call('logout');
+    const seen = header(late.calls[1]?.init, 'x-csrf-token');
+    release(new Response(null, { status: 204 }));
+    await probe;
+    expect(seen).toBe('newer');
+  });
+});

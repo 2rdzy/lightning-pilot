@@ -17,6 +17,7 @@ import type { Logger } from '../logging/logger.ts';
 import { nodeDetail } from '../logging/redact.ts';
 import { setupRoutes, type SetupService } from '../modules/setup/index.ts';
 import { authRoutes, createGuard, type AuthService } from '../modules/auth/index.ts';
+import { sessionsRoutes } from '../modules/sessions/index.ts';
 import { nodesRoutes, type NodesService } from '../modules/nodes/index.ts';
 import { spendRoutes, type SpendService } from '../modules/spend/index.ts';
 import type { AppEnv, Router } from './context.ts';
@@ -210,7 +211,8 @@ export function createApp(deps: AppDeps): Router {
   );
   authRoutes(app, guard, deps.auth, deps.loginTransport ?? 'direct');
   setupRoutes(app, guard, deps.setup, deps.loginTransport ?? 'direct');
-  nodesRoutes(app, guard, deps.nodes);
+  sessionsRoutes(app, guard, deps.auth);
+  nodesRoutes(app, guard, deps.nodes, deps.auth);
   spendRoutes(app, guard, deps.spend);
   return app;
 }

@@ -186,9 +186,17 @@ export class NodesService {
     });
   }
 
-  async add(input: AddNodeRequest & { serverName: string }, requestId: string): Promise<NodeSummaryData> {
+  async add(
+    input: AddNodeRequest & { serverName: string },
+    requestId: string,
+    authorize?: (db: Db) => Promise<void>,
+  ): Promise<NodeSummaryData> {
     const prepared = await this.prepare(input, requestId);
-    await writeTx(this.#db, (trx) => this.storePrepared(trx, prepared));
+    await writeTx(this.#db, async (trx) => {
+      // Verification performs RPCs; authorization can expire or be revoked while they are pending.
+      await authorize?.(trx);
+      await this.storePrepared(trx, prepared);
+    });
     this.rememberPrepared(prepared, requestId);
     return this.summary(prepared.row.id);
   }

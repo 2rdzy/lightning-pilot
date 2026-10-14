@@ -21,6 +21,7 @@ export function ReceiveScreen() {
   const create = useMutation({
     mutationFn: (v: { amount: bigint; description: string }) =>
       api.call('createInvoice', {
+        userActivity: true,
         params: { nodeId: node.id },
         body: { amount: v.amount.toString(), description: v.description },
       }),

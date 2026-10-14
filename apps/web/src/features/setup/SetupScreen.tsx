@@ -43,6 +43,7 @@ export function SetupScreen() {
     setNote('');
     try {
       const reply = await api.call('setup', {
+        userActivity: true,
         body: action,
         ...(progress ? { setupCsrfToken: progress.csrfToken } : {}),
       });
