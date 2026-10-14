@@ -40,7 +40,7 @@ const LIMITS: SetupLimits = {
 
 async function harness() {
   const t = tempDir();
-  const { db } = await testDb(t.dir);
+  const { db, raw } = await testDb(t.dir);
   const clock = { now: new Date('2026-10-13T12:00:00Z') };
   const lines: string[] = [];
   const tokens: string[] = [];
@@ -54,6 +54,7 @@ async function harness() {
   const vault = await Vault.start(db, randomBytes(32));
   const auth = await AuthService.create({
     db,
+    raw,
     vault,
     logger,
     setupUrl: 'https://localhost/setup',

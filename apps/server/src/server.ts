@@ -28,6 +28,8 @@ export interface ServerOptions {
   // Chain identity polling interval (ms); tests set it short.
   identityIntervalMs?: number;
   issueSetupToken?: boolean;
+  // Trusted listener property for the future separate onion listener, never read from a client header.
+  loginTransport?: 'direct' | 'tor';
 }
 
 export interface Server {
@@ -56,6 +58,8 @@ export async function buildServer(options: ServerOptions): Promise<Server> {
   const setupUrl = `${scheme}://${config.server.hosts[0] ?? 'localhost'}${port}/setup`;
   const auth = await AuthService.create({
     db,
+    raw,
+    trustedProxies: config.server.trustedProxies,
     vault,
     logger,
     setupUrl,
@@ -89,13 +93,14 @@ export async function buildServer(options: ServerOptions): Promise<Server> {
     spend,
     logger,
     hosts: config.server.hosts,
+    loginTransport: options.loginTransport ?? 'direct',
     ...(options.webRoot ? { webRoot: options.webRoot } : {}),
   });
   logger.info('vault opened', { keyId: vault.keyId, initialised: vault.initialised });
   if (options.issueSetupToken !== false) await auth.issueSetupToken();
   const close = async () => {
     setup.close();
-    auth.close();
+    await auth.close();
     await nodes.monitor.stop();
     await db.destroy();
     vault.close();

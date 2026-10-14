@@ -30,6 +30,7 @@ export interface AppDeps {
   logger: Logger;
   // Host allowlist (server.hosts).
   hosts: readonly string[];
+  loginTransport?: 'direct' | 'tor';
   bodyLimitBytes?: number;
   // Directory of the built web app (apps/web/dist); without it the server answers the API only.
   webRoot?: string;
@@ -161,7 +162,7 @@ export function createApp(deps: AppDeps): Router {
     const requestId = c.get('requestId');
     if (err instanceof AppError) {
       if (
-        err.code === 'too_early' &&
+        (err.code === 'too_early' || err.code === 'busy') &&
         typeof err.details === 'object' &&
         err.details !== null &&
         'retryAfter' in err.details
@@ -207,7 +208,7 @@ export function createApp(deps: AppDeps): Router {
     }),
     (c) => c.json(HealthResponse.parse({ status: 'ok' }), 200),
   );
-  authRoutes(app, guard, deps.auth);
+  authRoutes(app, guard, deps.auth, deps.loginTransport ?? 'direct');
   setupRoutes(app, guard, deps.setup);
   nodesRoutes(app, guard, deps.nodes);
   spendRoutes(app, guard, deps.spend);

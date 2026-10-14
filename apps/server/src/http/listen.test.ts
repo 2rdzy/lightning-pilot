@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 import { loadConfig } from '../config/config.ts';
 import { createLogger } from '../logging/logger.ts';
 import { buildServer, type Server } from '../server.ts';
-import { tempDir, testDriver, writeVaultKey } from '../testing.ts';
+import { tempDir, testDriver, writeVaultKey, setupForTest } from '../testing.ts';
 import { listen, type Listener } from './listen.ts';
 
 const cleanups: (() => Promise<void> | void)[] = [];
@@ -87,7 +87,12 @@ describe('listen', () => {
         }),
     });
     config.server.port = 0;
-    const logger = createLogger({ level: 'error', sink: () => undefined });
+    const lines: string[] = [];
+    const logger = createLogger({
+      level: 'error',
+      sink: (line) => lines.push(line),
+      stdout: (line) => lines.push(line),
+    });
     const server = await buildServer({ config, vaultKeyPath: vaultKey, dev: false, logger, driver: testDriver() });
     const listener = listen(server.app, config, logger);
     const port = await listener.port;
@@ -136,5 +141,32 @@ describe('listen', () => {
     expect(JSON.parse(foreign.text)).toMatchObject({ error: { code: 'bad_origin' } });
     const unknown = await call({ ':method': 'GET', ':path': '/healthz', ':authority': `evil.example:${port}` });
     expect(unknown.status).toBe(421);
+    const token = (JSON.parse(lines.find((line) => line.includes('"setupToken"')) ?? '{}') as { setupToken: string })
+      .setupToken;
+    await setupForTest(server.setup, token, 'Correct-horse-9-battery');
+    const wrong = (source: string) =>
+      call(
+        {
+          ':method': 'POST',
+          ':path': '/api/v1/auth/login',
+          origin: `https://localhost:${port}`,
+          'content-type': 'application/json',
+          'x-forwarded-for': source,
+          'x-tor': '1',
+        },
+        '{"password":"incorrect"}',
+      );
+    expect((await wrong('198.51.100.1')).status).toBe(401);
+    expect((await wrong('198.51.100.2')).status).toBe(429);
+    const { directSource } = await import('../modules/auth/login/source.ts');
+    expect(
+      (
+        await server.db
+          .selectFrom('login_throttles')
+          .select('counter')
+          .where('kind', '=', 'ip')
+          .executeTakeFirstOrThrow()
+      ).counter,
+    ).toBe(directSource({ peerAddress: '127.0.0.1' }, []).counter);
   });
 });

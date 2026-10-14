@@ -35,6 +35,7 @@ test('setup, login, receive, pay and log out in the browser', async ({ page }, t
     // problem.
     const expected =
       /status of 401 \(Unauthorized\)/.test(msg.text()) ||
+      (/status of 429/.test(msg.text()) && msg.location().url.endsWith('/api/v1/auth/login')) ||
       (/status of 500/.test(msg.text()) && msg.location().url.endsWith('/api/v1/auth/logout'));
     if (msg.type() === 'error' && !expected) problems.push(msg.text());
   });
@@ -74,9 +75,16 @@ test('setup, login, receive, pay and log out in the browser', async ({ page }, t
   await page.getByRole('button', { name: 'Create owner' }).click();
   await expect(page.getByTestId('balance-spendable')).toBeVisible();
 
+  const deviceCookie = (await page.context().cookies()).find((cookie) => cookie.name === '__Host-lp_device');
+  expect(deviceCookie?.value).toHaveLength(43);
+  expect(deviceCookie).toMatchObject({ httpOnly: true, secure: true, sameSite: 'Strict', path: '/' });
+
   // Setup authenticates automatically. Log out to exercise the ordinary password + TOTP login.
   await page.getByRole('button', { name: 'Log out' }).click();
   await expect(page.getByRole('heading', { name: 'Log in' })).toBeVisible();
+  expect((await page.context().cookies()).find((cookie) => cookie.name === '__Host-lp_device')?.value).toBe(
+    deviceCookie?.value,
+  );
   await page.getByLabel('Password').fill('Wrong-password-1!');
   await page.getByLabel('Authenticator code').fill(hotp(secret, lastCounter + 1n));
   await page.getByRole('button', { name: 'Log in' }).click();
@@ -93,7 +101,26 @@ test('setup, login, receive, pay and log out in the browser', async ({ page }, t
     const counter = current > lastCounter ? current : current + 1n;
     await page.getByLabel('Password').fill(PASSWORD);
     await page.getByLabel('Authenticator code').fill(hotp(secret, counter));
+    const reply = () =>
+      page.waitForResponse(
+        (response) => response.url().endsWith('/api/v1/auth/login') && response.request().method() === 'POST',
+      );
+    let responsePromise = reply();
     await page.getByRole('button', { name: 'Log in' }).click();
+    let response = await responsePromise;
+    if (response.status() === 429) {
+      const seconds = Number(response.headers()['retry-after']);
+      expect(seconds).toBe(1);
+      const ready = Date.now() + seconds * 1000;
+      await expect.poll(() => Date.now() >= ready, { intervals: [100], timeout: 3000 }).toBe(true);
+      responsePromise = reply();
+      await page.getByRole('button', { name: 'Log in' }).click();
+      response = await responsePromise;
+    }
+    expect(response.status(), await response.text()).toBe(200);
+    expect((await page.context().cookies()).find((cookie) => cookie.name === '__Host-lp_device')?.value).toBe(
+      deviceCookie?.value,
+    );
     lastCounter = counter;
   };
   await login();

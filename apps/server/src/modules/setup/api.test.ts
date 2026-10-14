@@ -124,18 +124,23 @@ describe('setup HTTP boundary', () => {
   it('enforces TOTP on login and atomically refuses code replay including parallel login', async () => {
     const h = await harness();
     const { secret } = await h.finish();
-    const login = (code?: string) =>
-      h.server.app.request('/api/v1/auth/login', {
-        method: 'POST',
-        headers: { host: 'localhost', origin: 'https://localhost', 'content-type': 'application/json' },
-        body: JSON.stringify({ password: PASSWORD, ...(code ? { totpCode: code } : {}) }),
-      });
+    const login = (code?: string, peerAddress = '192.0.2.1') =>
+      h.server.app.request(
+        '/api/v1/auth/login',
+        {
+          method: 'POST',
+          headers: { host: 'localhost', origin: 'https://localhost', 'content-type': 'application/json' },
+          body: JSON.stringify({ password: PASSWORD, ...(code ? { totpCode: code } : {}) }),
+        },
+        { incoming: { socket: { remoteAddress: peerAddress } } },
+      );
     expect((await login()).status).toBe(401);
+    h.clock.now = new Date(h.clock.now.getTime() + 1000);
     expect((await login('000000')).status).toBe(401);
     const code = totp(secret, h.clock.now);
-    const attempts = await Promise.all([login(code), login(code)]);
+    const attempts = await Promise.all([login(code, '192.0.2.2'), login(code, '192.0.2.3')]);
     expect(attempts.map((r) => r.status).sort()).toEqual([200, 401]);
-    expect((await login(code)).status).toBe(401);
+    expect((await login(code, '192.0.2.4')).status).toBe(401);
     const second = await h.server.db.selectFrom('auth_totp').selectAll().executeTakeFirstOrThrow();
     expect(second.last_counter).toBe(String(Math.floor(h.clock.now.getTime() / 30_000)));
   });
@@ -161,19 +166,23 @@ describe('setup HTTP boundary', () => {
 async function authRequest(
   server: Server,
   path: string,
-  options: { method?: string; body?: unknown; cookie?: string; csrf?: string | undefined } = {},
+  options: { method?: string; body?: unknown; cookie?: string; csrf?: string | undefined; peerAddress?: string } = {},
 ) {
-  return server.app.request(path, {
-    method: options.method ?? 'POST',
-    headers: {
-      host: 'localhost',
-      origin: 'https://localhost',
-      'content-type': 'application/json',
-      ...(options.cookie ? { cookie: options.cookie } : {}),
-      ...(options.csrf ? { 'x-csrf-token': options.csrf } : {}),
+  return server.app.request(
+    path,
+    {
+      method: options.method ?? 'POST',
+      headers: {
+        host: 'localhost',
+        origin: 'https://localhost',
+        'content-type': 'application/json',
+        ...(options.cookie ? { cookie: options.cookie } : {}),
+        ...(options.csrf ? { 'x-csrf-token': options.csrf } : {}),
+      },
+      ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
     },
-    ...(options.body === undefined ? {} : { body: JSON.stringify(options.body) }),
-  });
+    options.peerAddress ? { incoming: { socket: { remoteAddress: options.peerAddress } } } : undefined,
+  );
 }
 function sessionCookie(res: Response): string {
   const cookie = res.headers
@@ -190,9 +199,10 @@ describe('recovery login HTTP boundary', () => {
     const initial = await h.finish();
     const ordinaryCookie = sessionCookie(initial.res);
     const logins = await Promise.all(
-      [0, 1].map(() =>
+      [0, 1].map((i) =>
         authRequest(h.server, '/api/v1/auth/login', {
           body: { password: PASSWORD, recoveryCode: initial.recoveryCode },
+          peerAddress: `192.0.2.${i + 1}`,
         }),
       ),
     );
@@ -257,12 +267,13 @@ describe('recovery login HTTP boundary', () => {
   it('rejects malformed recovery codes, ambiguous factors and incorrect passwords without consuming codes', async () => {
     const h = await harness();
     const initial = await h.finish();
+    let source = 10;
     for (const body of [
       { password: PASSWORD, recoveryCode: 'bad_code' },
       { password: 'Wrong-pass-123!', recoveryCode: initial.recoveryCode },
       { password: PASSWORD, totpCode: totp(initial.secret, h.clock.now), recoveryCode: initial.recoveryCode },
     ]) {
-      const res = await authRequest(h.server, '/api/v1/auth/login', { body });
+      const res = await authRequest(h.server, '/api/v1/auth/login', { body, peerAddress: `192.0.2.${source++}` });
       expect([400, 401]).toContain(res.status);
     }
     expect(
