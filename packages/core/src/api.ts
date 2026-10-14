@@ -147,13 +147,23 @@ export const InvoiceResponse = z
   .meta({ id: 'Invoice' });
 
 export const PaymentPreviewRequest = z
-  .strictObject({ request: z.string().trim().min(1).max(4096) })
+  .strictObject({
+    request: z.string().trim().min(1).max(4096),
+    amount: MsatString.optional(),
+    maxFee: MsatString.optional(),
+  })
   .meta({ id: 'PaymentPreviewRequest' });
 
 export const PaymentPreviewResponse = z
   .strictObject({
     // Single-use, valid for two minutes, only for this session; the only way to execute this payment.
     confirmationToken: z.string(),
+    payee: z.string().optional(),
+    description: z.string().optional(),
+    duplicateWarning: z.boolean().default(false),
+    stepUpRequired: z.boolean().default(false),
+    feeOverride: z.boolean().default(false),
+    scope: z.string().default('Lightning Pilot spending limits — payments made by other apps are not limited.'),
     decoded: z.strictObject({
       kind: z.literal('bolt11'),
       network: Network,
@@ -168,7 +178,7 @@ export const PaymentPreviewResponse = z
   .meta({ id: 'PaymentPreview' });
 
 export const PaymentExecuteRequest = z
-  .strictObject({ confirmationToken: z.string().min(1).max(200) })
+  .strictObject({ confirmationToken: z.string().min(1).max(200), acknowledgeDuplicate: z.boolean().optional() })
   .meta({ id: 'PaymentExecuteRequest' });
 
 // Sent by the client with every spending request; a retry with the same key returns the first result. Not strict:
