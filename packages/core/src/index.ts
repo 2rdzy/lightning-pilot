@@ -14,3 +14,4 @@ export * from './setup.ts';
 
 export * from './sessions.ts';
 export * from './spend.ts';
+export * from './psbt.ts';

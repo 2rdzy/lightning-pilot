@@ -7,7 +7,9 @@ import { getPublicKey, signAsync } from '@noble/secp256k1';
 import { bech32, bech32m } from '@scure/base';
 import {
   AdapterError,
+  buildPsbt,
   CAPABILITIES,
+  decodeAddress,
   msat,
   PAGE_LIMIT_MAX,
   parseChannelId,
@@ -220,7 +222,7 @@ export class FakeAdapter implements NodeAdapter {
   readonly #closed: ClosedChannel[] = [];
   readonly #offers = new Map<string, Offer>();
   readonly #utxos: Utxo[] = [];
-  readonly #prepared = new Map<string, { inputs: string[]; psbt: string; amount: Msat }>();
+  readonly #prepared = new Map<string, { inputs: string[]; psbt: string; amount: Msat; change: Msat }>();
   readonly #transactions: OnchainTx[] = [];
   readonly #events: NodeEvent[] = [];
   readonly #listeners = new Set<() => void>();
@@ -782,11 +784,45 @@ export class FakeAdapter implements NodeAdapter {
       if (available === 0n || total > available) {
         throw new AdapterError({ code: 'node_error', sent: true, definitive: true, nodeCode: 301 });
       }
-      for (const u of free) u.reserved = true;
-      const txid = parseTxid(randomHex(32));
-      const psbt = Buffer.from(`fake-psbt:${txid}`).toString('base64');
+      // A real unsigned PSBT (version 2, witness UTXOs, like CLN's) so callers can check fee and outputs.
       const all = request.outputs.some((o) => o.amount === 'all');
-      this.#prepared.set(txid, { inputs: free.map((u) => u.outpoint), psbt, amount: msat(all ? available : total) });
+      const vbytes = 11n + 68n * BigInt(free.length) + 43n * BigInt(request.outputs.length + 1);
+      const rate = Number(request.feeRate ?? '2');
+      const fee = BigInt(Math.ceil(rate * Number(vbytes)));
+      const sats = (m: bigint) => m / 1000n;
+      const inputSats = sats(available);
+      const sent = all ? inputSats - fee : request.outputs.reduce((sum, o) => sum + sats(o.amount as bigint), 0n);
+      if (sent + fee > inputSats) {
+        throw new AdapterError({ code: 'node_error', sent: true, definitive: true, nodeCode: 301 });
+      }
+      const scriptOf = (address: string) => {
+        try {
+          return decodeAddress(address, this.#options.network).script;
+        } catch {
+          return '0014' + createHash('sha256').update(address).digest('hex').slice(0, 40);
+        }
+      };
+      const change = inputSats - sent - fee;
+      const { psbt, txid } = buildPsbt({
+        inputs: free.map((u) => {
+          const [hash, vout] = u.outpoint.split(':') as [string, string];
+          return { txid: hash, vout: Number(vout), amountSat: sats(u.amount), script: '0014' + '00'.repeat(20) };
+        }),
+        outputs: [
+          ...request.outputs.map((o) => ({
+            amountSat: all ? sent : sats(o.amount as bigint),
+            script: scriptOf(o.address),
+          })),
+          ...(all || change === 0n ? [] : [{ amountSat: change, script: '5120' + randomHex(32) }]),
+        ],
+      });
+      for (const u of free) u.reserved = true;
+      this.#prepared.set(txid, {
+        inputs: free.map((u) => u.outpoint),
+        psbt,
+        amount: msat(all ? available : total),
+        change: msat(all ? 0n : change * 1000n),
+      });
       return { txid, psbt };
     },
     send: async (txid: Txid) => {
@@ -795,6 +831,16 @@ export class FakeAdapter implements NodeAdapter {
       if (!prepared) throw new AdapterError({ code: 'node_error', sent: true, definitive: false, nodeCode: -1 });
       this.#prepared.delete(txid);
       for (const u of this.#utxos) if (prepared.inputs.includes(u.outpoint)) u.status = 'spent';
+      // The change comes back as a new coin, confirmed at once (a fake has no mempool).
+      if (prepared.change > 0n)
+        this.#utxos.push({
+          outpoint: parseFundingOutpoint(`${txid}:1`),
+          amount: prepared.change,
+          address: this.#address('p2tr'),
+          status: 'confirmed',
+          reserved: false,
+          blockHeight: this.blockHeight,
+        });
       this.#transactions.push({
         txid,
         amount: { direction: 'out', value: prepared.amount },
