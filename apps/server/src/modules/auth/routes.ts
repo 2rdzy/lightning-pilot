@@ -217,7 +217,15 @@ export function authRoutes(app: Router, guard: Guard, auth: AuthService, transpo
       responses: { 204: { description: 'Authenticator verified' }, ...errors },
     }),
     async (c) => {
-      await auth.finishRecovery(sessionOf(c).idHash, c.req.valid('json').code, c.get('requestId'));
+      const rotated = await auth.finishRecovery(sessionOf(c).idHash, c.req.valid('json').code, c.get('requestId'));
+      setCookie(c, SESSION_COOKIE, rotated.cookieValue, {
+        prefix: 'host',
+        httpOnly: true,
+        secure: true,
+        sameSite: 'Strict',
+        path: '/',
+        expires: rotated.expiresAt,
+      });
       return c.body(null, 204);
     },
   );

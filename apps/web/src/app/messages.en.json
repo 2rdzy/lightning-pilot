@@ -48,5 +48,7 @@
   "errors.fee_cap_exceeded": "The fee would be higher than the maximum allowed.",
   "errors.limit_exceeded": "This payment is above the spending limit.",
   "errors.busy": "The server is busy. Try again shortly.",
+  "errors.too_early.one": "Too many attempts. Wait {seconds} second before trying again.",
+  "errors.too_early.other": "Too many attempts. Wait {seconds} seconds before trying again.",
   "errors.internal": "Something went wrong on the server."
 }

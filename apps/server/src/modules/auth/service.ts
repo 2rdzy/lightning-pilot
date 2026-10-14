@@ -221,13 +221,18 @@ export class AuthService {
     return writeTx(this.#db, async (trx) => {
       const now = this.#now();
       let recoveryRequired = false;
+      // From here the password is known to be right: a refusal also counts on the account's factor counter.
+      const factorFailed = (factor: 'totp' | 'recovery') => {
+        attempt.failedFactor = factor;
+        return new AppError('login_failed', 'Login failed.');
+      };
       if (recoveryCode) {
-        if (totpCode) throw new AppError('login_failed', 'Login failed.');
+        if (totpCode) throw factorFailed('recovery');
         let hash;
         try {
           hash = hashRecoveryCode(recoveryCode);
         } catch {
-          throw new AppError('login_failed', 'Login failed.');
+          throw factorFailed('recovery');
         }
         const code = await trx
           .selectFrom('recovery_codes')
@@ -235,7 +240,7 @@ export class AuthService {
           .where('code_hash', '=', hash)
           .where('used_at', 'is', null)
           .executeTakeFirst();
-        if (!code) throw new AppError('login_failed', 'Login failed.');
+        if (!code) throw factorFailed('recovery');
         await trx
           .updateTable('recovery_codes')
           .set({ used_at: now.toISOString() })
@@ -248,7 +253,7 @@ export class AuthService {
           factor && totpCode
             ? matchTotp(this.#vault.openSecret(factor, 'totp'), totpCode, now, BigInt(factor.last_counter))
             : undefined;
-        if (counter === undefined) throw new AppError('login_failed', 'Login failed.');
+        if (counter === undefined) throw factorFailed('totp');
         await trx.updateTable('auth_totp').set({ last_counter: counter.toString() }).where('id', '=', 1).execute();
       }
       const session = await this.newSession(trx, now, recoveryRequired);
@@ -312,6 +317,11 @@ export class AuthService {
     };
   }
 
+  // Throttled setup-token check: verify returns the matched token row, or undefined for a wrong token.
+  setupAttempt<T>(origin: LoginOrigin, requestId: string, verify: () => Promise<T | undefined>): Promise<T> {
+    return this.#login.setup(origin, requestId, verify);
+  }
+
   async beginRecovery(idHash: string): Promise<{ secret: string; uri: string }> {
     const row = await this.#db
       .selectFrom('sessions')
@@ -329,12 +339,17 @@ export class AuthService {
     return { secret, uri: otpauthUri(secret, 'owner') };
   }
 
-  async finishRecovery(idHash: string, code: string, requestId: string): Promise<void> {
+  // The session gains every permission here, so it gets a new id (its internal handle stays, as at step-up).
+  async finishRecovery(
+    idHash: string,
+    code: string,
+    requestId: string,
+  ): Promise<{ cookieValue: string; expiresAt: Date }> {
     const pending = this.#recovery.get(idHash);
     const counter =
       pending && pending.expires > this.#now().getTime() ? matchTotp(pending.secret, code, this.#now()) : undefined;
     if (counter === undefined || !pending) throw new AppError('validation_failed', 'The enrolment code is not valid.');
-    await writeTx(this.#db, async (trx) => {
+    const rotated = await writeTx(this.#db, async (trx) => {
       if (this.#recovery.get(idHash) !== pending || pending.expires <= this.#now().getTime())
         throw new AppError('validation_failed', 'The enrolment expired. Start again.');
       const row = await trx
@@ -350,10 +365,18 @@ export class AuthService {
         .where('id', '=', 1)
         .execute();
       await trx.deleteFrom('sessions').where('id_hash', '!=', idHash).execute();
-      await trx.updateTable('sessions').set({ recovery_required: 0 }).where('id_hash', '=', idHash).execute();
+      const cookieValue = randomBytes(32).toString('base64url');
+      const updated = await trx
+        .updateTable('sessions')
+        .set({ recovery_required: 0, id_hash: sha256(cookieValue) })
+        .where('id_hash', '=', idHash)
+        .returning('expires_at')
+        .executeTakeFirstOrThrow();
+      return { cookieValue, expiresAt: new Date(updated.expires_at) };
     });
     this.#recovery.clear();
     this.#log.warn('authenticator recovered', { requestId, security: true });
+    return rotated;
   }
 
   close(): Promise<void> {

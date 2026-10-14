@@ -1,4 +1,4 @@
-import { mkdirSync, readdirSync, writeFileSync, copyFileSync } from 'node:fs';
+import { mkdirSync, readdirSync, writeFileSync, copyFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { tempDir, testDriver } from '../testing.ts';
@@ -56,6 +56,78 @@ describe(`storage (${testDriver()})`, () => {
     expect(() => migrate(raw, dir)).toThrow();
     const tables = raw.prepare("SELECT name FROM sqlite_master WHERE name = 'half'").all([]);
     expect(tables).toEqual([]);
+  });
+
+  it('rebuilds the throttle and limit tables without losing rows, then enforces the limit checks', async () => {
+    const dir = copyMigrations();
+    const later = readdirSync(dir).filter((f) => f >= '20261014T1200');
+    expect(later).toEqual(['20261014T1200_auth_setup_factor_counters.sql', '20261014T1201_spend_limits_checks.sql']);
+    const held = join(dir, '..', 'held');
+    mkdirSync(held);
+    for (const f of later) {
+      copyFileSync(join(dir, f), join(held, f));
+      unlinkSync(join(dir, f));
+    }
+    const raw = await freshRaw();
+    migrate(raw, dir);
+    raw.exec(`INSERT INTO login_throttles VALUES ('ip:a', 'ip', 3, 10, 5), ('global', 'global', 31, 70, 6)`);
+    raw.exec(`INSERT INTO spend_limits VALUES ('blake2b', '02aa', '100', NULL, '50', '12.5', 5, 1, '10')`);
+    for (const f of later) copyFileSync(join(held, f), join(dir, f));
+    expect(migrate(raw, dir)).toEqual(later);
+    const db = kyselyOf(raw);
+    expect(await db.selectFrom('login_throttles').selectAll().orderBy('counter').execute()).toEqual([
+      { counter: 'global', kind: 'global', failures: 31, next_allowed_at: 70, last_failed_at: 6 },
+      { counter: 'ip:a', kind: 'ip', failures: 3, next_allowed_at: 10, last_failed_at: 5 },
+    ]);
+    expect(await db.selectFrom('spend_limits').select(['max_fee_rate', 'step_up_above_sat']).execute()).toEqual([
+      { max_fee_rate: '12.5', step_up_above_sat: '50' },
+    ]);
+    const row = (change: Record<string, unknown>) => ({
+      chain: 'sha256d',
+      pubkey: `02${Object.keys(change).join('')}${JSON.stringify(Object.values(change))}`,
+      max_per_payment_sat: null,
+      max_24h_sat: null,
+      step_up_above_sat: null,
+      max_fee_rate: '3',
+      max_fee_share_percent: 5,
+      max_routing_fee_share_percent: 1,
+      routing_fee_allowance_sat: '10',
+      ...change,
+    });
+    for (const rate of ['0.001', '1', '9999999.999', '30.25'])
+      await db
+        .insertInto('spend_limits')
+        .values(row({ max_fee_rate: rate }))
+        .execute();
+    await db
+      .insertInto('spend_limits')
+      .values(row({ max_fee_share_percent: 100, max_routing_fee_share_percent: 0 }))
+      .execute();
+    for (const bad of [
+      { max_fee_rate: '0' },
+      { max_fee_rate: '0.000' },
+      { max_fee_rate: 'fast' },
+      { max_fee_rate: '01' },
+      { max_fee_rate: '1.' },
+      { max_fee_rate: '.5' },
+      { max_fee_rate: '1.2345' },
+      { max_fee_rate: '1.2.3' },
+      { max_fee_rate: '10000000' },
+      { max_fee_rate: '-1' },
+      { max_fee_share_percent: 0 },
+      { max_fee_share_percent: 101 },
+      { max_routing_fee_share_percent: -1 },
+      { max_routing_fee_share_percent: 101 },
+    ])
+      await expect(db.insertInto('spend_limits').values(row(bad)).execute(), JSON.stringify(bad)).rejects.toThrow(
+        /CHECK/,
+      );
+    await expect(
+      db
+        .insertInto('login_throttles')
+        .values({ counter: 'x', kind: 'factor', failures: 1, next_allowed_at: 0, last_failed_at: 0 })
+        .execute(),
+    ).rejects.toThrow(/CHECK/);
   });
 
   it('refuses amounts that are not canonical decimal msat', async () => {

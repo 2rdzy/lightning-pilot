@@ -18,6 +18,13 @@ describe('configuration', () => {
     expect(dev).toBe(false);
   });
 
+  it('refuses an IPv6 zone ID as a trusted proxy, which login source matching would never trust', () => {
+    expect(
+      load({ ...base, server: { trustedProxies: ['fe80::1', '192.0.2.1'] } }).config.server.trustedProxies,
+    ).toEqual(['fe80::1', '192.0.2.1']);
+    expect(() => load({ ...base, server: { trustedProxies: ['fe80::1%eth0'] } })).toThrow(/trustedProxies/);
+  });
+
   it('refuses unknown keys with their full path', () => {
     expect(() => load({ ...base, server: { prot: 1 } })).toThrow('server.prot is not a known key');
     expect(() => load({ ...base, extra: true })).toThrow('extra is not a known key');

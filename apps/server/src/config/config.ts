@@ -20,7 +20,10 @@ const Schema = z.strictObject({
         .default('127.0.0.1'),
       port: z.int().min(1).max(65535).default(8443),
       hosts: z.array(z.string().min(1).max(253)).min(1).default(['localhost', '127.0.0.1', '::1']),
-      trustedProxies: z.array(z.string().refine((a) => isIP(a) !== 0, 'an IP address')).default([]),
+      // isIP accepts IPv6 zone IDs (fe80::1%eth0), which login source matching never trusts: refuse them here.
+      trustedProxies: z
+        .array(z.string().refine((a) => isIP(a) !== 0 && !a.includes('%'), 'an IP address without a zone ID'))
+        .default([]),
     })
     .prefault({}),
   tls: z

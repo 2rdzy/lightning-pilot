@@ -25,6 +25,7 @@
   "setup.skipNode": "Skip, add a node later",
   "setup.limitsScope": "These choices apply to Lightning Pilot only. Payments made by other apps are not limited. Enforcement and step-up are still under development.",
   "setup.noLimit": "Leave empty to explicitly choose no limit.",
+  "setup.limitsOrder": "The step-up threshold must not exceed the per-payment limit, and the per-payment limit must not exceed the 24-hour limit.",
   "setup.maxPerPayment": "Maximum cost per payment (sat)",
   "setup.max24h": "Maximum cost in 24 hours (sat)",
   "setup.stepUpAbove": "Ask for password above (sat)",

@@ -4,7 +4,7 @@ import { AdapterError, type SetupAction, type SetupLimits } from '@lightning-pil
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { createLogger } from '../../logging/logger.ts';
 import { tempDir, testDb } from '../../testing.ts';
-import { AuthService } from '../auth/index.ts';
+import { AuthService, type LoginOrigin } from '../auth/index.ts';
 import { totp } from '../auth/totp/totp.ts';
 import { NodesService } from '../nodes/service.ts';
 import { Vault } from '../vault/index.ts';
@@ -28,6 +28,8 @@ const INPUT = {
   viewRune: 'synthetic-view',
   spendRune: 'synthetic-spend',
 };
+const ATTACKER = { peerAddress: '203.0.113.9' };
+const OWNER = { peerAddress: '192.0.2.5' };
 const LIMITS: SetupLimits = {
   maxPerPayment: '100',
   max24h: '200',
@@ -185,16 +187,16 @@ describe('first-run setup service', () => {
     const h = await harness();
     for (let i = 0; i < 12; i++) {
       await expect(
-        h.setup.act({ action: 'start', token: 'wrong' }, undefined, undefined, 't', 'attacker'),
+        h.setup.act({ action: 'start', token: 'wrong' }, undefined, undefined, 't', ATTACKER),
       ).rejects.toMatchObject({ code: 'setup_token_invalid' });
       const seconds = Math.min(2 ** i, 900);
       await expect(
-        h.setup.act({ action: 'start', token: 'wrong' }, undefined, undefined, 't', 'attacker'),
+        h.setup.act({ action: 'start', token: 'wrong' }, undefined, undefined, 't', ATTACKER),
       ).rejects.toMatchObject({ code: 'too_early', details: { retryAfter: seconds } });
       h.advance(seconds * 1000);
     }
     expect(
-      (await h.setup.act({ action: 'start', token: h.token }, undefined, undefined, 't', 'owner')).progress.step,
+      (await h.setup.act({ action: 'start', token: h.token }, undefined, undefined, 't', OWNER)).progress.step,
     ).toBe('password');
   });
 
@@ -367,18 +369,67 @@ describe('first-run setup service', () => {
     expect(await h.db.selectFrom('recovery_codes').selectAll().execute()).toEqual([]);
   });
 
-  it('bounds source throttle state without suppressing unrelated sources', async () => {
+  it('keeps setup-token counters in the database, grouped like login sources', async () => {
     const h = await harness();
-    for (let i = 0; i < 1025; i++)
-      await expect(
-        h.setup.act({ action: 'start', token: 'wrong' }, undefined, undefined, 'test', `source-${i}`),
-      ).rejects.toMatchObject({ code: 'setup_token_invalid' });
+    const start = (origin: LoginOrigin, token = 'wrong') =>
+      h.setup.act({ action: 'start', token }, undefined, undefined, 't', origin);
+    await expect(start({ peerAddress: '2001:db8:1:2::1' })).rejects.toMatchObject({ code: 'setup_token_invalid' });
+    // Another address in the same IPv6 /64 shares the counter.
+    await expect(start({ peerAddress: '2001:db8:1:2::ffff' })).rejects.toMatchObject({ code: 'too_early' });
+    // Another network does not.
+    await expect(start({ peerAddress: '2001:db8:1:3::1' })).rejects.toMatchObject({ code: 'setup_token_invalid' });
+    // The Tor listener has one shared counter, whatever the peer address says.
+    await expect(start({ transport: 'tor', peerAddress: '127.0.0.1' })).rejects.toMatchObject({
+      code: 'setup_token_invalid',
+    });
+    await expect(start({ transport: 'tor', peerAddress: '127.0.0.2' })).rejects.toMatchObject({ code: 'too_early' });
+    const rows = await h.db.selectFrom('login_throttles').select(['kind', 'failures']).execute();
+    expect(rows).toEqual(Array.from({ length: 3 }, () => ({ kind: 'setup', failures: 1 })));
+    expect(
+      h.lines.some((line) => line.includes('"setup token refused"') && line.includes('2001:0db8:0001:0002::/64')),
+    ).toBe(true);
+    // A fresh service (as after a restart) reads the same counters.
+    const again = new SetupService(h.options);
     await expect(
-      h.setup.act({ action: 'start', token: 'wrong' }, undefined, undefined, 'test', 'source-1024'),
+      again.act({ action: 'start', token: 'wrong' }, undefined, undefined, 't', { peerAddress: '2001:db8:1:2::1' }),
     ).rejects.toMatchObject({ code: 'too_early' });
-    await expect(
-      h.setup.act({ action: 'start', token: 'wrong' }, undefined, undefined, 'test', 'source-0'),
-    ).rejects.toMatchObject({ code: 'setup_token_invalid' });
+    again.close();
+    // The right token from a counted source, once allowed, starts setup and clears that source's counter.
+    await h.act({ action: 'cancel' });
+    h.advance(1000);
+    expect((await start({ peerAddress: '2001:db8:1:3::9' }, h.token)).progress.step).toBe('password');
+    expect(await h.db.selectFrom('login_throttles').select('counter').execute()).toHaveLength(2);
+  });
+
+  it('refuses a second setup-token check from the same source while one is running', async () => {
+    const h = await harness();
+    let release: () => void = () => {};
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const origin = { peerAddress: '192.0.2.44' };
+    const verify = vi.fn(async () => {
+      await gate;
+      return undefined;
+    });
+    const first = h.auth.setupAttempt(origin, 'one', verify);
+    await expect(h.auth.setupAttempt(origin, 'two', verify)).rejects.toMatchObject({ code: 'too_early' });
+    release();
+    await expect(first).rejects.toMatchObject({ code: 'setup_token_invalid' });
+    expect(verify).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses limits that could never take effect', async () => {
+    const h = await harness();
+    await h.enrol();
+    await h.act({ action: 'node', node: INPUT });
+    const order = (limits: Partial<SetupLimits>) => h.act({ action: 'limits', limits: { ...LIMITS, ...limits } });
+    await expect(order({ maxPerPayment: '300' })).rejects.toMatchObject({ code: 'validation_failed' });
+    await expect(order({ stepUpAbove: '150' })).rejects.toMatchObject({ code: 'validation_failed' });
+    await expect(order({ maxPerPayment: null, stepUpAbove: '250' })).rejects.toMatchObject({
+      code: 'validation_failed',
+    });
+    expect((await order({ maxPerPayment: null, max24h: null, stepUpAbove: '999999' })).progress.step).toBe('alerts');
   });
 
   it('propagates unavailable node fee estimates without advancing the node step', async () => {

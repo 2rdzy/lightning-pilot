@@ -49,6 +49,12 @@ export function ChainBadge({ identity }: { identity: Identity }) {
 
 // The translated text of an error code; the server's English message only when there is no translation.
 export function errorText(tr: ReturnType<typeof useT>, error: unknown): string {
+  // A throttled request says how long to wait (the server's Retry-After, also in the error details).
+  if (error instanceof ApiError && error.code === 'too_early') {
+    const details = error.details as { retryAfter?: unknown } | undefined;
+    if (typeof details?.retryAfter === 'number' && details.retryAfter > 0)
+      return tr.plural('errors.too_early', details.retryAfter, { seconds: details.retryAfter });
+  }
   if (error instanceof ApiError) return tr.has(`errors.${error.code}`) ? tr.t(`errors.${error.code}`) : error.message;
   return tr.t('errors.internal');
 }

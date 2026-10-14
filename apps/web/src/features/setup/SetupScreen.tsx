@@ -13,6 +13,7 @@ import { useT } from '../../app/i18n.tsx';
 import { ErrorNote, Field } from '../../app/parts.tsx';
 import { QrCode } from '../../app/qr.tsx';
 import { generatePassword } from './password.ts';
+import { limitsInOrder } from './limits.ts';
 
 export function SetupScreen() {
   const tr = useT();
@@ -124,6 +125,10 @@ export function SetupScreen() {
         maxRoutingFeeSharePercent: Number(values.maxRoutingFeeSharePercent),
         routingFeeAllowance: values.routingFeeAllowance ?? '',
       };
+      if (!limitsInOrder(limits)) {
+        setNote(tr.t('setup.limitsOrder'));
+        return;
+      }
       return act({ action: 'limits', limits });
     }
     if (step === 'alerts') {
@@ -151,8 +156,11 @@ export function SetupScreen() {
     const link = document.createElement('a');
     link.href = url;
     link.download = 'lightning-pilot-recovery-codes.txt';
+    document.body.append(link);
     link.click();
-    URL.revokeObjectURL(url);
+    link.remove();
+    // Revoking in the same tick can cancel the download in Firefox and Safari; the codes are on screen anyway.
+    setTimeout(() => URL.revokeObjectURL(url), 10_000);
   };
   return (
     <main className="mx-auto flex max-w-[640px] flex-col gap-6 p-4 md:p-8">
