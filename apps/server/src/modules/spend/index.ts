@@ -4,3 +4,4 @@ export { SpendService } from './service.ts';
 export { SpendRecovery } from './recovery/index.ts';
 export { ChainSpends } from './chain.ts';
 export { SpendResolution } from './resolve.ts';
+export { loadPolicy, policyValues } from './policy.ts';

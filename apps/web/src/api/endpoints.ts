@@ -2,6 +2,10 @@
 // (`@lightning-pilot/core` api.ts). A test in tools/ checks every entry against the server's OpenAPI document, so a
 // route that moves or changes its success status fails CI instead of the browser.
 import {
+  ExportRequest,
+  ExportEnvelope,
+  ImportRequest,
+  ImportResponse,
   SpendPolicy,
   SpendPolicyResponse,
   StepUpRequest,
@@ -48,6 +52,20 @@ export interface Endpoint<Body extends z.ZodType | undefined, Response extends z
 const endpoint = <B extends z.ZodType | undefined, R extends z.ZodType | undefined>(e: Endpoint<B, R>) => e;
 
 export const ENDPOINTS = {
+  exportData: endpoint({
+    method: 'POST',
+    path: '/api/v1/export',
+    status: 200,
+    body: ExportRequest,
+    response: ExportEnvelope,
+  }),
+  importData: endpoint({
+    method: 'POST',
+    path: '/api/v1/export/import',
+    status: 200,
+    body: ImportRequest,
+    response: ImportResponse,
+  }),
   spendPolicy: endpoint({
     method: 'GET',
     path: '/api/v1/nodes/{nodeId}/spend-policy',

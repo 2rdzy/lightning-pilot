@@ -54,6 +54,9 @@ export function Shell() {
   return (
     <div className="flex min-h-dvh flex-col">
       <header className="bg-bar md:bg-surface md:border-border flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3 text-white md:border-b md:text-text">
+        <Link to="/settings/export" className="underline">
+          {tr.t('export.title')}
+        </Link>
         <span className="font-semibold">{tr.t('app.name')}</span>
         <label className="flex items-center gap-2 text-sm">
           <span className="sr-only md:not-sr-only">{tr.t('nav.node')}</span>
@@ -147,9 +150,14 @@ export function NotFound() {
 export function NoNodes() {
   const tr = useT();
   return (
-    <main className="mx-auto max-w-xl p-8">
-      <h1 className="mb-2 text-2xl font-semibold">{tr.t('app.noNodes.title')}</h1>
-      <p className="text-muted">{tr.t('app.noNodes.body')}</p>
-    </main>
+    <>
+      <Link to="/settings/export" className="underline">
+        {tr.t('export.title')}
+      </Link>
+      <main className="mx-auto max-w-xl p-8">
+        <h1 className="mb-2 text-2xl font-semibold">{tr.t('app.noNodes.title')}</h1>
+        <p className="text-muted">{tr.t('app.noNodes.body')}</p>
+      </main>
+    </>
   );
 }
