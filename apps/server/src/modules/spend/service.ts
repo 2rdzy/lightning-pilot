@@ -24,6 +24,7 @@ import { nodeDetail } from '../../logging/redact.ts';
 import type { NodesService } from '../nodes/index.ts';
 import type { AuthService } from '../auth/index.ts';
 import {
+  admissionBudget,
   checkBudget,
   lightningFee,
   loadPolicy,
@@ -205,7 +206,7 @@ export class SpendService {
     if (route && (route.fee < 0n || route.fee > fee))
       throw new AppError('fee_cap_exceeded', 'The node route estimate exceeds the confirmed maximum fee.');
     const cost = spendCost({ type: 'bolt11', amount, maxFee: fee });
-    const stepUp = checkBudget(policy, await usedBudget(this.#db, row, this.#now()), cost);
+    const stepUp = checkBudget(policy, await admissionBudget(this.#db, row, this.#now(), cost), cost);
     const duplicates = await this.#duplicates(this.#db, row, invoice.payee, amount.toString());
     const payload: PreviewPayload = {
       bolt11: invoice.bolt11,

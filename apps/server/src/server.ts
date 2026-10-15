@@ -4,6 +4,7 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { kyselyOf, openRaw, type Db, type Driver } from './storage/db.ts';
 import { migrate } from './storage/migrate.ts';
+import { consumeRestoreMarker } from './modules/restore/index.ts';
 import { createApp } from './http/app.ts';
 import type { Router } from './http/context.ts';
 import type { Logger } from './logging/logger.ts';
@@ -55,6 +56,8 @@ export async function buildServer(options: ServerOptions): Promise<Server> {
   });
   if (applied.length > 0) logger.info('migrations applied', { count: applied.length });
   const db = kyselyOf(raw);
+  // Before any other module reads the database: a restore revokes sessions and pauses spending until reconciled.
+  await consumeRestoreMarker(db, config.paths.dataDir, logger, options.now);
   const vault = await Vault.start(db, key);
   key.fill(0);
 

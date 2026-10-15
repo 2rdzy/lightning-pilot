@@ -82,6 +82,28 @@ export function policyValues(policy: SpendPolicy) {
     max_routing_fee_mode: policy.maxRoutingFeeMode,
   };
 }
+// After a restore (modules/restore), the node's own spends since the backup are unknown until counted: spending on
+// that identity is refused meanwhile (fail closed), except what costs nothing. Once counted, they add to the window.
+export async function admissionBudget(db: Db, identity: NodeIdentity, now: Date, cost: bigint): Promise<bigint> {
+  if (cost > 0n) {
+    const pending = await db
+      .selectFrom('restore_counts')
+      .select('restore_id')
+      .where('chain', '=', identity.chain)
+      .where('pubkey', '=', identity.pubkey)
+      .where('state', '=', 'pending')
+      .where('until', '>', now.toISOString())
+      .executeTakeFirst();
+    if (pending)
+      throw new AppError(
+        'setup_required',
+        'Spending is paused after a restore until the node has been read again. Try again shortly.',
+        { reason: 'restore_reconciliation' },
+      );
+  }
+  return usedBudget(db, identity, now);
+}
+
 export async function usedBudget(db: Db, identity: NodeIdentity, now: Date): Promise<bigint> {
   const rows = await db
     .selectFrom('spend_intents')
@@ -92,11 +114,19 @@ export async function usedBudget(db: Db, identity: NodeIdentity, now: Date): Pro
     .where('created_at', '>', new Date(now.getTime() - 86400000).toISOString())
     .where('created_at', '<=', now.toISOString())
     .execute();
+  const restored = await db
+    .selectFrom('restore_counts')
+    .select('counted_msat')
+    .where('chain', '=', identity.chain)
+    .where('pubkey', '=', identity.pubkey)
+    .where('state', '=', 'counted')
+    .where('until', '>', now.toISOString())
+    .execute();
   // Legacy rows have no immutable cost; preserve their reservation conservatively.
   return rows.reduce(
     (sum, row) =>
       sum + (row.cost_msat === null ? BigInt(row.amount_msat) + BigInt(row.max_fee_msat) : BigInt(row.cost_msat)),
-    0n,
+    restored.reduce((sum, row) => sum + BigInt(row.counted_msat ?? '0'), 0n),
   );
 }
 export function checkBudget(policy: SpendPolicy, used: bigint, cost: bigint): boolean {
@@ -151,7 +181,8 @@ export async function reserveSpend<T>(
     const existing = await replay?.(trx);
     if (existing !== undefined) return existing;
     const policy = await loadPolicy(trx, identity);
-    const stepUp = checkBudget(policy, await usedBudget(trx, identity, typeof now === 'function' ? now() : now), cost);
+    const at = typeof now === 'function' ? now() : now;
+    const stepUp = checkBudget(policy, await admissionBudget(trx, identity, at, cost), cost);
     return claim(trx, policy, stepUp);
   });
 }
