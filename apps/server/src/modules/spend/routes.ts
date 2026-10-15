@@ -22,11 +22,16 @@ import {
   PeerDisconnectRequest,
   PeerParam,
   SpendOutcomeResponse,
+  SpendIntentParam,
+  SpendResolveRequest,
+  SpendResolveResponse,
+  UnresolvedSpendsResponse,
 } from '@lightning-pilot/core';
 import { sessionOf, type Router } from '../../http/context.ts';
 import { declare, type Guard } from '../../http/declare.ts';
 import type { SpendService } from './service.ts';
 import type { ChainSpendKind, ChainSpends } from './chain.ts';
+import type { SpendResolution } from './resolve.ts';
 
 const json = <T>(schema: T) => ({ content: { 'application/json': { schema } } });
 const errors = {
@@ -39,7 +44,13 @@ const errors = {
   502: { description: 'The node did not answer as expected', ...json(ErrorBody) },
 } as const;
 
-export function spendRoutes(app: Router, guard: Guard, spend: SpendService, chain: ChainSpends): void {
+export function spendRoutes(
+  app: Router,
+  guard: Guard,
+  spend: SpendService,
+  chain: ChainSpends,
+  resolution: SpendResolution,
+): void {
   declare(
     app,
     guard,
@@ -126,6 +137,47 @@ export function spendRoutes(app: Router, guard: Guard, spend: SpendService, chai
   );
 
   chainSpendRoutes(app, guard, chain);
+  resolutionRoutes(app, guard, resolution);
+}
+
+// Spends with no known outcome, and the owner's choice of outcome for one (security step-up).
+function resolutionRoutes(app: Router, guard: Guard, resolution: SpendResolution): void {
+  declare(
+    app,
+    guard,
+    'read',
+    createRoute({
+      method: 'get',
+      path: '/api/v1/nodes/{nodeId}/spends/unresolved',
+      summary: 'Spends whose outcome is unknown, oldest first, with the warning to show before resolving one',
+      request: { params: NodeIdParam },
+      responses: { 200: { description: 'Unresolved spends', ...json(UnresolvedSpendsResponse) }, ...errors },
+    }),
+    async (c) => c.json(UnresolvedSpendsResponse.parse(await resolution.list(c.req.valid('param').nodeId)), 200),
+  );
+  declare(
+    app,
+    guard,
+    'spend',
+    createRoute({
+      method: 'post',
+      path: '/api/v1/nodes/{nodeId}/spends/{intentId}/resolve',
+      summary: 'Set the outcome of an unresolved spend by hand (security step-up)',
+      request: { params: SpendIntentParam, body: { required: true, ...json(SpendResolveRequest) } },
+      responses: { 200: { description: 'Resolved', ...json(SpendResolveResponse) }, ...errors },
+    }),
+    async (c) => {
+      const { nodeId, intentId } = c.req.valid('param');
+      const resolved = await resolution.resolve(
+        sessionOf(c).handle,
+        nodeId,
+        intentId,
+        c.req.valid('json').outcome,
+        c.get('requestId'),
+      );
+      return c.json(SpendResolveResponse.parse(resolved), 200);
+    },
+  );
 }
 
 function chainSpendRoutes(app: Router, guard: Guard, chain: ChainSpends): void {

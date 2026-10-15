@@ -1,8 +1,8 @@
 // On-chain sends, channel opens and channel closes (WP09b), and the peer connections a channel needs. Same protocol
 // as a payment (spend policy §3, §10): a preview computes the cost and issues a single-use confirmation token; the
 // execute call admits the intent atomically (limits, rolling window, step-up, idempotency key) before any
-// fund-moving node call, and stores the outcome. Crash recovery of these types is not built yet: an intent left
-// `reserved` becomes `unknown` at the next start and stays counted against the limits.
+// fund-moving node call, and stores the outcome. An intent left `reserved` by a crash becomes `unknown` at the next
+// start and is resolved from the node's wallet and channel lists (recovery/chain.ts).
 import { randomBytes, randomUUID } from 'node:crypto';
 import {
   AdapterError,

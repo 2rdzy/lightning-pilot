@@ -19,7 +19,7 @@ import { setupRoutes, type SetupService } from '../modules/setup/index.ts';
 import { authRoutes, createGuard, type AuthService } from '../modules/auth/index.ts';
 import { sessionsRoutes } from '../modules/sessions/index.ts';
 import { nodesRoutes, type NodesService } from '../modules/nodes/index.ts';
-import { spendRoutes, type ChainSpends, type SpendService } from '../modules/spend/index.ts';
+import { spendRoutes, type ChainSpends, type SpendResolution, type SpendService } from '../modules/spend/index.ts';
 import type { AppEnv, Router } from './context.ts';
 import { declare } from './declare.ts';
 
@@ -29,6 +29,7 @@ export interface AppDeps {
   nodes: NodesService;
   spend: SpendService;
   chainSpends: ChainSpends;
+  spendResolution: SpendResolution;
   logger: Logger;
   // Host allowlist (server.hosts).
   hosts: readonly string[];
@@ -214,7 +215,7 @@ export function createApp(deps: AppDeps): Router {
   setupRoutes(app, guard, deps.setup, deps.loginTransport ?? 'direct');
   sessionsRoutes(app, guard, deps.auth);
   nodesRoutes(app, guard, deps.nodes, deps.auth);
-  spendRoutes(app, guard, deps.spend, deps.chainSpends);
+  spendRoutes(app, guard, deps.spend, deps.chainSpends, deps.spendResolution);
   return app;
 }
 
