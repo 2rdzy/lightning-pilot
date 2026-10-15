@@ -3,6 +3,7 @@
 import type { Generated } from 'kysely';
 
 export interface DB {
+  event_cursors: { node_id: string; cursor: string };
   auth_totp: { id: number; key_id: string; nonce: Uint8Array; ciphertext: Uint8Array; last_counter: string };
   recovery_codes: { code_hash: string; used_at: string | null };
   login_throttles: { counter: string; kind: string; failures: number; next_allowed_at: number; last_failed_at: number };

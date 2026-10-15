@@ -73,6 +73,7 @@ async function main(): Promise<void> {
   server.nodes.monitor.start();
   // Interrupted spends are read from their nodes in the background.
   server.recovery.start();
+  server.events.workers.start();
   const stop = () => {
     logger.info('stopping');
     // Reject queued logins immediately, while keeping storage open until running HTTP requests drain.
