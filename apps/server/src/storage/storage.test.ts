@@ -1,4 +1,4 @@
-import { mkdirSync, readdirSync, writeFileSync, copyFileSync, unlinkSync } from 'node:fs';
+import { mkdirSync, readdirSync, statSync, writeFileSync, copyFileSync, unlinkSync } from 'node:fs';
 import { join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 import { tempDir, testDriver } from '../testing.ts';
@@ -56,6 +56,104 @@ describe(`storage (${testDriver()})`, () => {
     expect(() => migrate(raw, dir)).toThrow();
     const tables = raw.prepare("SELECT name FROM sqlite_master WHERE name = 'half'").all([]);
     expect(tables).toEqual([]);
+  });
+
+  // update-rollback §3 and §6: a backup before the first migration of an update, only the latest kept, named by a
+  // failed migration and by the refusal of a database from a newer version.
+  describe('pre-update backup', () => {
+    const backups = () => {
+      const { dir, cleanup } = tempDir();
+      cleanups.push(cleanup);
+      return join(dir, 'backups');
+    };
+    const tables = (raw: Awaited<ReturnType<typeof openRaw>>) =>
+      (
+        raw.prepare("SELECT name FROM sqlite_master WHERE type = 'table' ORDER BY name").all([]) as { name: string }[]
+      ).map((r) => r.name);
+
+    it('writes no backup for a fresh database', async () => {
+      const target = backups();
+      migrate(await freshRaw(), MIGRATIONS_DIR, { dir: target });
+      expect(() => readdirSync(target)).toThrow();
+    });
+
+    it('writes a backup before the first migration of an update, keeps only the latest, mode 0600', async () => {
+      const dir = copyMigrations();
+      const target = backups();
+      const raw = await freshRaw();
+      migrate(raw, dir, { dir: target });
+      writeFileSync(join(dir, '29990101T0000_test_first.sql'), 'CREATE TABLE first_update (a TEXT) STRICT;');
+      expect(migrate(raw, dir, { dir: target, now: () => new Date('2026-10-15T10:00:00.123Z') })).toEqual([
+        '29990101T0000_test_first.sql',
+      ]);
+      const [first] = readdirSync(target);
+      expect(first).toMatch(/^pre-\d{8}T\d{4}-to-29990101T0000-20261015T100000Z\.sqlite$/);
+      expect(statSync(join(target, first ?? '')).mode & 0o777).toBe(0o600);
+      // The backup holds the database as it was before the update.
+      const saved = await openRaw(join(target, first ?? ''), testDriver());
+      expect(tables(saved)).not.toContain('first_update');
+      expect(tables(saved)).toContain('spend_intents');
+      saved.close();
+      writeFileSync(join(dir, '29990102T0000_test_second.sql'), 'CREATE TABLE second_update (a TEXT) STRICT;');
+      migrate(raw, dir, { dir: target, now: () => new Date('2026-10-16T10:00:00Z') });
+      expect(readdirSync(target)).toEqual(['pre-29990101T0000-to-29990102T0000-20261016T100000Z.sqlite']);
+      // Nothing pending: no new backup.
+      migrate(raw, dir, { dir: target, now: () => new Date('2026-10-17T10:00:00Z') });
+      expect(readdirSync(target)).toHaveLength(1);
+    });
+
+    it('names the migration and the backup when a migration fails', async () => {
+      const dir = copyMigrations();
+      const target = backups();
+      const raw = await freshRaw();
+      migrate(raw, dir, { dir: target });
+      writeFileSync(join(dir, '29991231T2359_test_broken.sql'), 'NOT SQL;');
+      expect(() => migrate(raw, dir, { dir: target })).toThrow(
+        /migration 29991231T2359_test_broken\.sql failed and was rolled back: .*the database before this update is in .*backups\/pre-.*\.sqlite/,
+      );
+    });
+
+    it('keeps the first backup when a failed update is retried, and prunes older ones only once it applies', async () => {
+      const dir = copyMigrations();
+      const target = backups();
+      const raw = await freshRaw();
+      migrate(raw, dir, { dir: target });
+      writeFileSync(join(dir, '29990101T0000_test_old.sql'), 'SELECT 1;');
+      migrate(raw, dir, { dir: target, now: () => new Date('2026-10-14T10:00:00Z') });
+      const older = readdirSync(target);
+      expect(older).toHaveLength(1);
+      // An update with two migrations, the second failing; the service restarts and retries.
+      writeFileSync(join(dir, '29990201T0000_test_m1.sql'), 'CREATE TABLE m1 (a TEXT) STRICT;');
+      writeFileSync(join(dir, '29990202T0000_test_m2.sql'), 'NOT SQL;');
+      for (const at of ['2026-10-15T10:00:00Z', '2026-10-15T10:01:00Z'])
+        expect(() => migrate(raw, dir, { dir: target, now: () => new Date(at) })).toThrow(
+          /pre-29990101T0000-to-29990202T0000-20261015T100000Z\.sqlite/,
+        );
+      const kept = readdirSync(target).filter((f) => !older.includes(f));
+      expect(kept).toEqual(['pre-29990101T0000-to-29990202T0000-20261015T100000Z.sqlite']);
+      // The previous update's backup stays until this one applies; the new one does not hold the migration that did.
+      expect(readdirSync(target)).toHaveLength(2);
+      const saved = await openRaw(join(target, kept[0] ?? ''), testDriver());
+      expect(tables(saved)).not.toContain('m1');
+      saved.close();
+      writeFileSync(join(dir, '29990202T0000_test_m2.sql'), 'CREATE TABLE m2 (a TEXT) STRICT;');
+      expect(migrate(raw, dir, { dir: target })).toEqual(['29990202T0000_test_m2.sql']);
+      expect(readdirSync(target)).toEqual(kept);
+    });
+
+    it('refuses a database migrated by a newer version, naming the backup to restore', async () => {
+      const dir = copyMigrations();
+      const target = backups();
+      const raw = await freshRaw();
+      migrate(raw, dir, { dir: target });
+      writeFileSync(join(dir, '29990101T0000_test_newer.sql'), 'SELECT 1;');
+      migrate(raw, dir, { dir: target });
+      unlinkSync(join(dir, '29990101T0000_test_newer.sql'));
+      expect(() => migrate(raw, dir, { dir: target })).toThrow(
+        /database was upgraded by a newer Lightning Pilot .*29990101T0000_test_newer\.sql.*install that version or newer, or restore .*pre-.*\.sqlite/,
+      );
+      expect(() => migrate(raw, dir)).toThrow(/install that version or newer$/);
+    });
   });
 
   it('rebuilds the intent table for new spend types without losing a row or an index', async () => {
