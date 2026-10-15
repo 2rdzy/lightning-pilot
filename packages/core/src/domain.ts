@@ -294,8 +294,8 @@ export const ONCHAIN_TX_KINDS = ['receive', 'send', 'channel-open', 'channel-clo
 export type OnchainTxKind = (typeof ONCHAIN_TX_KINDS)[number];
 export interface OnchainTx {
   txid: Txid;
-  // Net effect on the wallet: positive received, negative sent. Absent when the node cannot tell (CLN without the
-  // bookkeeper plugin).
+  // Net effect on the wallet: positive received, negative sent. Absent when the node cannot tell (an old CLN whose
+  // listtransactions has no inputs and outputs, and no bookkeeper plugin).
   amount?: { direction: 'in' | 'out'; value: Msat };
   fee?: Msat;
   blockHeight?: number;

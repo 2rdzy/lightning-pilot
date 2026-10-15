@@ -247,7 +247,14 @@ export const XpayReply = z.object({
 });
 
 export const ListTransactions = z.object({
-  transactions: z.array(z.object({ hash: hex32, blockheight: u32 })),
+  transactions: z.array(
+    z.object({
+      hash: hex32,
+      blockheight: u32,
+      inputs: z.array(z.object({ txid: hex32, index: u32 })).optional(),
+      outputs: z.array(z.object({ index: u32, amount_msat: msat })).optional(),
+    }),
+  ),
 });
 
 export const AccountEvents = z.object({
