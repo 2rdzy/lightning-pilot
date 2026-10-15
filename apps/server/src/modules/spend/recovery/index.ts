@@ -6,7 +6,9 @@ import { AdapterError, AppError } from '@lightning-pilot/core';
 import type { Db } from '../../../storage/db.ts';
 import type { Logger } from '../../../logging/logger.ts';
 import type { NodesService } from '../../nodes/index.ts';
+import type { Vault } from '../../vault/index.ts';
 import { INTERRUPTED, settleBolt11 } from './bolt11.ts';
+import { settleChainSpend } from './chain.ts';
 
 export { settleBolt11, provenPreimage, RETRY_FOR_SECONDS, SETTLE_FAILED_AFTER_MS } from './bolt11.ts';
 
@@ -16,6 +18,8 @@ const MAX_RETRY_MS = 600_000;
 export interface RecoveryOptions {
   db: Db;
   nodes: NodesService;
+  // Opens the sealed PSBT of an on-chain send, to release its inputs.
+  vault: Vault;
   logger: Logger;
   now?: () => Date;
 }
@@ -23,6 +27,7 @@ export interface RecoveryOptions {
 export class SpendRecovery {
   readonly #db: Db;
   readonly #nodes: NodesService;
+  readonly #vault: Vault;
   readonly #log: Logger;
   readonly #now: () => Date;
   // Next attempt and current delay per intent; in memory, so a restart asks the node again at once.
@@ -34,6 +39,7 @@ export class SpendRecovery {
   constructor(options: RecoveryOptions) {
     this.#db = options.db;
     this.#nodes = options.nodes;
+    this.#vault = options.vault;
     this.#log = options.logger.child('spend');
     this.#now = options.now ?? (() => new Date());
   }
@@ -68,7 +74,23 @@ export class SpendRecovery {
   async resolvePass(): Promise<number> {
     const pending = await this.#db
       .selectFrom('spend_intents')
-      .select(['id', 'node_id', 'type', 'payment_hash', 'amount_msat', 'updated_at', 'error_code'])
+      .select([
+        'id',
+        'node_id',
+        'chain',
+        'pubkey',
+        'type',
+        'payment_hash',
+        'amount_msat',
+        'updated_at',
+        'error_code',
+        'txid',
+        'psbt_key_id',
+        'psbt_nonce',
+        'psbt_ciphertext',
+        'channel_id',
+        'peer',
+      ])
       .where('state', '=', 'unknown')
       .orderBy('created_at')
       .execute();
@@ -124,7 +146,15 @@ export class SpendRecovery {
             this.#now(),
             this.#log,
           );
-        // On-chain and channel intents are not resolved yet (WP10 follow-up): they stay unknown and counted.
+        else if (intent.type === 'onchain' || intent.type === 'channel-open' || intent.type === 'channel-close')
+          state = await settleChainSpend(
+            this.#db,
+            adapter,
+            this.#vault,
+            { ...intent, type: intent.type },
+            this.#now(),
+            this.#log,
+          );
         else
           this.#log.warn('spend recovery: no resolver for this spend type', { intentId: intent.id, type: intent.type });
         if (state === 'unknown') {

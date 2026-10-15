@@ -10,7 +10,7 @@ import type { Logger } from './logging/logger.ts';
 import { AuthService, type ScryptCost } from './modules/auth/index.ts';
 import { NodesService, type AdapterFactory } from './modules/nodes/index.ts';
 import { SetupService } from './modules/setup/index.ts';
-import { ChainSpends, SpendRecovery, SpendService } from './modules/spend/index.ts';
+import { ChainSpends, SpendRecovery, SpendResolution, SpendService } from './modules/spend/index.ts';
 import { loadVaultKey, Vault } from './modules/vault/index.ts';
 import type { Config } from './config/config.ts';
 
@@ -87,8 +87,16 @@ export async function buildServer(options: ServerOptions): Promise<Server> {
     logger,
     ...(options.now ? { now: options.now } : {}),
   });
+  const spendResolution = new SpendResolution({
+    db,
+    nodes,
+    auth,
+    vault,
+    logger,
+    ...(options.now ? { now: options.now } : {}),
+  });
   // Before any request: intents a stopped process left reserved may have reached the node (spend policy §4).
-  const recovery = new SpendRecovery({ db, nodes, logger, ...(options.now ? { now: options.now } : {}) });
+  const recovery = new SpendRecovery({ db, nodes, vault, logger, ...(options.now ? { now: options.now } : {}) });
   await recovery.markUnresolved();
   const setup = new SetupService({
     db,
@@ -105,6 +113,7 @@ export async function buildServer(options: ServerOptions): Promise<Server> {
     nodes,
     spend,
     chainSpends,
+    spendResolution,
     logger,
     hosts: config.server.hosts,
     loginTransport: options.loginTransport ?? 'direct',

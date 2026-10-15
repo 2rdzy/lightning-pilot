@@ -179,6 +179,36 @@ async function addNode(h: Harness, auth: { cookie: string; csrf: string }, url: 
   return response;
 }
 
+// Stops the server and opens a new one on the same data directory, as a restart after a crash does.
+async function reopen(h: Harness, current: Server): Promise<Server> {
+  const databases = await sql<{ file: string }>`PRAGMA database_list`.execute(current.db);
+  const dir = dirname(databases.rows[0]?.file ?? '');
+  const vaultKey = join(dir, 'vault-key');
+  const { config } = loadConfig({
+    readFile: () => JSON.stringify({ tls: { mode: 'off' }, paths: { dataDir: dir, vaultKey } }),
+  });
+  await current.close();
+  current.close = async () => undefined;
+  const server = await buildServer({
+    config,
+    vaultKeyPath: vaultKey,
+    dev: true,
+    logger: createLogger({ level: 'debug', sink: (l) => h.lines.push(l) }),
+    now: () => h.clock.now,
+    driver: testDriver(),
+    scryptCost: { log2N: 10, r: 8, p: 1 },
+    adapterFactory: (connection) => {
+      const fake = h.fakes.get(connection.url);
+      if (!fake) throw new Error('Missing fake');
+      return fake;
+    },
+  });
+  cleanups.unshift(() => server.close());
+  h.server = server;
+  return server;
+}
+const randomUUIDv4 = () => crypto.randomUUID();
+
 const errorCode = async (res: Response) => ((await res.json()) as { error: { code: string } }).error.code;
 
 describe(`API (${testDriver()})`, () => {
@@ -1999,8 +2029,9 @@ describe(`WP09b on-chain and channel spends (${testDriver()})`, () => {
     const row = await s.intent(outcome.intentId);
     expect(row.txid).toBe(outcome.txid);
     expect(row.psbt_ciphertext).not.toBeNull();
+    // Recovery leaves a run-time unknown that the wallet does not list as it is: it did reach the node.
     expect(await s.h.server.recovery.resolvePass()).toBe(1);
-    expect(s.h.lines.some((l) => l.includes('no resolver for this spend type'))).toBe(true);
+    expect(await s.intent(outcome.intentId)).toMatchObject({ state: 'unknown', txid: outcome.txid });
 
     s.payer.onchain.send = async () => {
       throw new AdapterError({ code: 'node_error', sent: true, definitive: true, nodeCode: -1 });
@@ -2201,5 +2232,520 @@ describe(`WP09b on-chain and channel spends (${testDriver()})`, () => {
     s.payer.failNext(new AdapterError({ code: 'node_unreachable', sent: true, definitive: false }));
     const unknown = await s.execute('channels/open', lostToken, undefined, false, rotated);
     expect(((await unknown.json()) as { state: string }).state).toBe('unknown');
+  });
+
+  // WP10: on-chain and channel spends interrupted by a stop, resolved from the node's wallet and channel lists.
+  describe('crash recovery of on-chain and channel spends', () => {
+    async function interrupted() {
+      const s = await chainSpending();
+      let current = s.h.server;
+      const restart = async () => {
+        current = await reopen(s.h, current);
+        return current;
+      };
+      // Leaves the intent as a stop between commit and outcome write leaves it (the txid and PSBT stay as stored).
+      const interrupt = (intentId: string, values: Record<string, string | null> = {}) =>
+        current.db
+          .updateTable('spend_intents')
+          .set({ state: 'reserved', fee_msat: null, error_code: null, ...values })
+          .where('id', '=', intentId)
+          .execute();
+      const row = (intentId: string) =>
+        current.db.selectFrom('spend_intents').selectAll().where('id', '=', intentId).executeTakeFirstOrThrow();
+      const later = (ms: number) => {
+        s.h.clock.now = new Date(s.h.clock.now.getTime() + ms);
+      };
+      // Runs a spend whose node call is replaced by `call` (a "crash" is an error the spend module cannot classify).
+      const spend = async (kind: string, body: unknown, key: string) => {
+        const p = await s.token(kind, body);
+        const res = await s.execute(kind, p.confirmationToken, key, true);
+        expect(res.status, await res.clone().text()).toBe(200);
+        return (await res.json()) as { intentId: string; state: string; txid?: string; channelId?: string };
+      };
+      return { ...s, restart, interrupt, row, later, spend };
+    }
+    const crash = () => {
+      throw new Error('process killed');
+    };
+
+    it('settles an on-chain send the node broadcast, with the fee from the sealed PSBT', async () => {
+      const s = await interrupted();
+      const real = s.payer.onchain.send;
+      s.payer.onchain.send = async (txid) => {
+        await real(txid);
+        return crash();
+      };
+      const { intentId, state } = await s.spend(
+        'onchain',
+        { address: await s.address(), amount: '100000000', feeRate: '2' },
+        'wp10-onchain-after',
+      );
+      expect(state).toBe('unknown');
+      s.payer.onchain.send = real;
+      await s.interrupt(intentId);
+      const server = await s.restart();
+      expect((await s.row(intentId)).error_code).toBe('interrupted');
+      expect(await server.recovery.resolvePass()).toBe(0);
+      const settled = await s.row(intentId);
+      expect(settled).toMatchObject({ state: 'succeeded', error_code: null, psbt_ciphertext: null, psbt_key_id: null });
+      expect(BigInt(settled.fee_msat ?? '0')).toBeGreaterThan(0n);
+      expect(s.h.lines.some((l) => l.includes('"spend settled"') && l.includes('"type":"onchain"'))).toBe(true);
+    });
+
+    it('fails an on-chain send the node never broadcast after the retry window, and releases its inputs', async () => {
+      const s = await interrupted();
+      const real = s.payer.onchain.send;
+      s.payer.onchain.send = async () => crash();
+      const { intentId } = await s.spend(
+        'onchain',
+        { address: await s.address(), amount: '100000000', feeRate: '2' },
+        'wp10-onchain-before',
+      );
+      s.payer.onchain.send = real;
+      expect(await reservedUtxos(s.payer)).toBeGreaterThan(0);
+      await s.interrupt(intentId);
+      let server = await s.restart();
+      // The node may still be broadcasting: not yet.
+      expect(await server.recovery.resolvePass()).toBe(1);
+      s.later(121_000);
+      server = await s.restart();
+      // After a node restart `txdiscard` no longer knows the transaction: the PSBT releases the inputs.
+      const discard = vi
+        .spyOn(s.payer.onchain, 'discard')
+        .mockRejectedValueOnce(new AdapterError({ code: 'node_error', sent: true, definitive: true }));
+      const unreserve = vi.spyOn(s.payer.onchain, 'unreserve');
+      expect(await server.recovery.resolvePass()).toBe(0);
+      expect(await s.row(intentId)).toMatchObject({ state: 'failed', error_code: 'not_sent', psbt_ciphertext: null });
+      expect(discard).toHaveBeenCalledTimes(1);
+      expect(unreserve).toHaveBeenCalledTimes(1);
+      expect(await reservedUtxos(s.payer)).toBe(0);
+    });
+
+    it('fails an unsent on-chain send even when the node cannot release its inputs', async () => {
+      const s = await interrupted();
+      s.payer.onchain.send = async () => crash();
+      const { intentId } = await s.spend(
+        'onchain',
+        { address: await s.address(), amount: '100000000', feeRate: '2' },
+        'wp10-onchain-release-fails',
+      );
+      await s.interrupt(intentId);
+      await s.restart();
+      s.later(121_000);
+      const server = await s.restart();
+      vi.spyOn(s.payer.onchain, 'discard').mockRejectedValue(new Error('gone'));
+      vi.spyOn(s.payer.onchain, 'unreserve').mockRejectedValue(
+        new AdapterError({ code: 'node_error', sent: true, definitive: true }),
+      );
+      expect(await server.recovery.resolvePass()).toBe(0);
+      expect((await s.row(intentId)).state).toBe('failed');
+      expect(s.h.lines.some((l) => l.includes('spend inputs not released') && l.includes('node_error'))).toBe(true);
+    });
+
+    it('keeps an on-chain send unknown when an input is spent, or when the answer was unclear at run time', async () => {
+      const s = await interrupted();
+      const real = s.payer.onchain.send;
+      s.payer.onchain.send = async () => crash();
+      const first = await s.spend(
+        'onchain',
+        { address: await s.address(), amount: '100000000', feeRate: '2' },
+        'wp10-onchain-spent',
+      );
+      await s.interrupt(first.intentId);
+      await s.restart();
+      s.later(121_000);
+      let server = await s.restart();
+      // The wallet does not list the transaction, but its coins are gone: something spent them.
+      const coins = vi.spyOn(s.payer.onchain, 'listUtxos').mockResolvedValue([]);
+      const discard = vi.spyOn(s.payer.onchain, 'discard');
+      expect(await server.recovery.resolvePass()).toBe(1);
+      expect((await s.row(first.intentId)).state).toBe('unknown');
+      expect(discard).not.toHaveBeenCalled();
+      coins.mockRestore();
+      // An unknown left by an unclear answer at run time (not interrupted) is never failed for lack of a record.
+      await server.db
+        .updateTable('spend_intents')
+        .set({ error_code: 'internal' })
+        .where('id', '=', first.intentId)
+        .execute();
+      server = await s.restart();
+      expect(await server.recovery.resolvePass()).toBe(1);
+      expect((await s.row(first.intentId)).state).toBe('unknown');
+      s.payer.onchain.send = real;
+    });
+
+    it('fails at once an interrupted on-chain send that has no txid: nothing was sent', async () => {
+      const s = await interrupted();
+      s.payer.onchain.send = async () => crash();
+      const { intentId } = await s.spend(
+        'onchain',
+        { address: await s.address(), amount: '100000000', feeRate: '2' },
+        'wp10-onchain-no-txid',
+      );
+      await s.interrupt(intentId, { txid: null, psbt_key_id: null, psbt_nonce: null, psbt_ciphertext: null });
+      const server = await s.restart();
+      expect(await server.recovery.resolvePass()).toBe(0);
+      expect(await s.row(intentId)).toMatchObject({ state: 'failed', error_code: 'not_sent' });
+    });
+
+    it('finds an interrupted channel open by peer and capacity, and fails one with no channel', async () => {
+      const s = await interrupted();
+      const peer = (await s.other.node.getInfo()).pubkey;
+      await s.h.request('POST', `${s.path}/peers`, { ...s.auth, body: { uri: `${peer}@127.0.0.1:9735` } });
+      const real = s.payer.channel.openChannel;
+      s.payer.channel.openChannel = async (request) => {
+        await real(request);
+        return crash();
+      };
+      const opened = await s.spend(
+        'channels/open',
+        { peer, amount: '123000000', feeRate: '2' },
+        'wp10-channel-open-after',
+      );
+      expect(opened.state).toBe('unknown');
+      s.payer.channel.openChannel = async () => crash();
+      // Same peer and amount, but the node never got it: the one channel belongs to the first intent.
+      const lost = await s.spend(
+        'channels/open',
+        { peer, amount: '123000000', feeRate: '2' },
+        'wp10-channel-open-before',
+      );
+      s.payer.channel.openChannel = real;
+      await s.interrupt(opened.intentId);
+      await s.interrupt(lost.intentId);
+      let server = await s.restart();
+      expect(await server.recovery.resolvePass()).toBe(1);
+      const found = await s.row(opened.intentId);
+      const channel = (await s.payer.channel.listChannels()).items.find((c) => c.id === found.channel_id);
+      expect(found).toMatchObject({ state: 'succeeded', error_code: null });
+      expect(channel?.capacity).toBe(123_000_000n);
+      expect(found.txid).toBe(channel?.fundingOutpoint.split(':')[0]);
+      // A channel negotiation may take a while: only after ten minutes is "no channel" final.
+      s.later(121_000);
+      server = await s.restart();
+      expect(await server.recovery.resolvePass()).toBe(1);
+      s.later(480_000);
+      server = await s.restart();
+      expect(await server.recovery.resolvePass()).toBe(0);
+      expect(await s.row(lost.intentId)).toMatchObject({ state: 'failed', error_code: 'not_on_node' });
+    });
+
+    it('takes a closed channel as an interrupted open that happened', async () => {
+      const s = await interrupted();
+      const peer = (await s.other.node.getInfo()).pubkey;
+      await s.h.request('POST', `${s.path}/peers`, { ...s.auth, body: { uri: `${peer}@127.0.0.1:9735` } });
+      const real = s.payer.channel.openChannel;
+      s.payer.channel.openChannel = async (request) => {
+        const result = await real(request);
+        await s.payer.channel.closeChannel({ channel: result.channelId, force: false });
+        return crash();
+      };
+      const opened = await s.spend('channels/open', { peer, amount: '124000000', feeRate: '2' }, 'wp10-open-closed');
+      s.payer.channel.openChannel = real;
+      await s.interrupt(opened.intentId);
+      const server = await s.restart();
+      expect(await server.recovery.resolvePass()).toBe(0);
+      expect((await s.row(opened.intentId)).state).toBe('succeeded');
+    });
+
+    it('settles an interrupted close from the channel state', async () => {
+      const s = await interrupted();
+      const [first] = (await s.payer.channel.listChannels()).items;
+      if (!first) throw new Error('need a channel');
+      const peer = (await s.other.node.getInfo()).pubkey;
+      await s.h.request('POST', `${s.path}/peers`, { ...s.auth, body: { uri: `${peer}@127.0.0.1:9735` } });
+      const second = await s.payer.channel.openChannel({ peer, amount: msat(100_000_000n) });
+      const real = s.payer.channel.closeChannel;
+      s.payer.channel.closeChannel = async (request) => {
+        await real(request);
+        return crash();
+      };
+      // Still opening: the node forgets it at once, so it is gone from the list.
+      const closed = await s.spend('channels/close', { channel: second.channelId }, 'wp10-channel-close-after');
+      s.payer.channel.closeChannel = async () => crash();
+      const kept = await s.spend('channels/close', { channel: first.id }, 'wp10-channel-close-before');
+      s.payer.channel.closeChannel = real;
+      await s.interrupt(closed.intentId);
+      await s.interrupt(kept.intentId);
+      let server = await s.restart();
+      expect(await server.recovery.resolvePass()).toBe(1);
+      expect((await s.row(closed.intentId)).state).toBe('succeeded');
+      s.later(121_000);
+      server = await s.restart();
+      expect(await server.recovery.resolvePass()).toBe(0);
+      expect(await s.row(kept.intentId)).toMatchObject({ state: 'failed', error_code: 'not_on_node' });
+    });
+
+    it('keeps chain spends unknown when the node cannot be read', async () => {
+      const s = await interrupted();
+      s.payer.onchain.send = async () => crash();
+      const { intentId } = await s.spend(
+        'onchain',
+        { address: await s.address(), amount: '100000000', feeRate: '2' },
+        'wp10-onchain-unreadable',
+      );
+      await s.interrupt(intentId);
+      const server = await s.restart();
+      vi.spyOn(s.payer.onchain, 'listTransactions').mockRejectedValue(
+        new AdapterError({ code: 'node_unreachable', sent: true, definitive: false }),
+      );
+      expect(await server.recovery.resolvePass()).toBe(1);
+      expect((await s.row(intentId)).state).toBe('unknown');
+      expect(s.h.lines.some((l) => l.includes('spend status not readable') && l.includes('node_unreachable'))).toBe(
+        true,
+      );
+    });
+
+    it('recognises a sent transaction without its PSBT, but releases nothing it cannot read', async () => {
+      const s = await interrupted();
+      const real = s.payer.onchain.send;
+      s.payer.onchain.send = async (txid) => {
+        await real(txid);
+        return crash();
+      };
+      const sent = await s.spend(
+        'onchain',
+        { address: await s.address(), amount: '100000000', feeRate: '2' },
+        'wp10-onchain-sealed-elsewhere',
+      );
+      s.payer.onchain.send = async () => crash();
+      const held = await s.spend(
+        'onchain',
+        { address: await s.address(), amount: '20000000', feeRate: '2' },
+        'wp10-onchain-unreadable-psbt',
+      );
+      s.payer.onchain.send = real;
+      // As if sealed under a vault key that has since been replaced.
+      for (const id of [sent.intentId, held.intentId]) await s.interrupt(id, { psbt_key_id: 'old-key' });
+      await s.restart();
+      s.later(121_000);
+      const server = await s.restart();
+      expect(await server.recovery.resolvePass()).toBe(1);
+      expect(await s.row(sent.intentId)).toMatchObject({ state: 'succeeded', fee_msat: null, psbt_key_id: null });
+      expect((await s.row(held.intentId)).state).toBe('unknown');
+      expect(s.h.lines.some((l) => l.includes('spend PSBT not readable'))).toBe(true);
+    });
+
+    it('settles odd chain intents safely: resolved meanwhile, missing ids, unclear states, nothing to release', async () => {
+      const s = await interrupted();
+      const { settleChainSpend } = await import('./modules/spend/recovery/chain.ts');
+      const logger = createLogger({ level: 'debug', sink: (l) => s.h.lines.push(l) });
+      s.payer.onchain.send = async () => crash();
+      const { intentId } = await s.spend(
+        'onchain',
+        { address: await s.address(), amount: '100000000', feeRate: '2' },
+        'wp10-onchain-odd-intents',
+      );
+      const row = await s.row(intentId);
+      const vault = { openSecret: () => '' } as never;
+      const at = new Date(s.h.clock.now.getTime() + 600_000);
+      const base = {
+        ...row,
+        type: 'onchain' as 'onchain' | 'channel-open' | 'channel-close',
+        error_code: 'interrupted',
+      };
+      const settle = (intent: Partial<typeof base>) =>
+        settleChainSpend(s.h.server.db, s.payer, vault, { ...base, ...intent }, at, logger);
+      // A run-time unknown without a txid, an open without a peer, a close without a channel id: nothing to read.
+      expect(await settle({ txid: null, error_code: 'internal' })).toBe('unknown');
+      expect(await settle({ type: 'channel-open', peer: null })).toBe('unknown');
+      expect(await settle({ type: 'channel-close', channel_id: null })).toBe('unknown');
+      // A close of a channel that is still opening proves nothing; nor does a run-time unknown close of a normal one.
+      const peer = (await s.other.node.getInfo()).pubkey;
+      await s.h.request('POST', `${s.path}/peers`, { ...s.auth, body: { uri: `${peer}@127.0.0.1:9735` } });
+      const opening = await s.payer.channel.openChannel({ peer, amount: msat(100_000_000n) });
+      expect(await settle({ type: 'channel-close', channel_id: opening.channelId })).toBe('unknown');
+      const [normal] = (await s.payer.channel.listChannels()).items;
+      expect(await settle({ type: 'channel-close', channel_id: normal?.id ?? null, error_code: 'internal' })).toBe(
+        'unknown',
+      );
+      // The row resolved meanwhile by another path: its stored state is reported.
+      await s.h.server.db.updateTable('spend_intents').set({ state: 'failed' }).where('id', '=', intentId).execute();
+      expect(await settle({ txid: null })).toBe('failed');
+      await s.h.server.db.updateTable('spend_intents').set({ state: 'reserved' }).where('id', '=', intentId).execute();
+      expect(await settle({ txid: null })).toBe('unknown');
+    });
+
+    it('lists unresolved spends and lets the owner resolve one with security step-up', async () => {
+      const s = await interrupted();
+      s.payer.onchain.send = async () => crash();
+      const { intentId } = await s.spend(
+        'onchain',
+        { address: await s.address(), amount: '100000000', feeRate: '2' },
+        'wp10-owner-resolves',
+      );
+      const listed = await s.h.request('GET', `${s.path}/spends/unresolved`, s.auth);
+      expect(listed.status).toBe(200);
+      const body = (await listed.json()) as { items: { intentId: string; cost: string }[]; warning: string };
+      expect(body.items).toEqual([
+        expect.objectContaining({ intentId, type: 'onchain', cost: '105000000', reason: 'internal' }),
+      ]);
+      expect(body.warning).toMatch(/paid a second time/);
+      expect(
+        await errorCode(await s.h.request('GET', `/api/v1/nodes/${randomUUIDv4()}/spends/unresolved`, s.auth)),
+      ).toBe('not_found');
+
+      const resolve = (id: string, outcome: string, credentials: { cookie: string; csrf: string } = s.auth) =>
+        s.h.request('POST', `${s.path}/spends/${id}/resolve`, { ...credentials, body: { outcome } });
+      // A password step-up is not enough: the owner's choice may free budget.
+      s.h.server.auth.sessions.clearGrants(s.handle);
+      const password = await s.passwordStepUp();
+      expect(await errorCode(await resolve(intentId, 'failed', password))).toBe('step_up_required');
+      expect((await resolve(intentId, 'unknown', password)).status).toBe(400);
+      s.later(90_000);
+      const step = await s.h.request('POST', '/api/v1/auth/step-up', {
+        ...password,
+        body: {
+          password: PASSWORD,
+          strength: 'security',
+          totpCode: totp(s.h.secret ?? '', s.h.clock.now),
+        },
+      });
+      expect(step.status, await step.clone().text()).toBe(200);
+      const security = {
+        cookie: (step.headers.get('set-cookie') ?? '').split(';')[0] ?? '',
+        csrf: ((await step.json()) as { csrfToken: string }).csrfToken,
+      };
+      expect(await errorCode(await resolve(randomUUIDv4(), 'failed', security))).toBe('not_found');
+      const res = await resolve(intentId, 'failed', security);
+      expect(res.status, await res.clone().text()).toBe(200);
+      expect(await res.json()).toEqual({ intentId, state: 'failed' });
+      expect(await s.row(intentId)).toMatchObject({ state: 'failed', error_code: 'owner_resolved', psbt_key_id: null });
+      // Its inputs are released, and its budget is free again.
+      expect(await reservedUtxos(s.payer)).toBe(0);
+      const used = (await (await s.h.request('GET', `${s.path}/spend-policy`, security)).json()) as {
+        usedMsat: string;
+      };
+      expect(used.usedMsat).toBe('0');
+      expect(await errorCode(await resolve(intentId, 'succeeded', security))).toBe('validation_failed');
+      expect(
+        s.h.lines.some(
+          (l) => l.includes('"spend resolved by owner"') && l.includes('"security":true') && l.includes(intentId),
+        ),
+      ).toBe(true);
+      const empty = (await (await s.h.request('GET', `${s.path}/spends/unresolved`, security)).json()) as {
+        items: unknown[];
+      };
+      expect(empty.items).toEqual([]);
+    });
+
+    it('lists every kind of unresolved spend, and resolves one without a node to ask', async () => {
+      const s = await interrupted();
+      const [channel] = (await s.payer.channel.listChannels()).items;
+      if (!channel) throw new Error('need a channel');
+      s.payer.channel.closeChannel = async () => crash();
+      const close = await s.spend('channels/close', { channel: channel.id }, 'wp10-list-channel-close');
+      const bolt11 = (
+        await s.other.receive.createInvoice({ amount: msat(5000n), description: 'x', label: 'wp10-list-payment' })
+      ).bolt11;
+      const p = await s.h.request('POST', `${s.path}/payments/preview`, { ...s.auth, body: { request: bolt11 } });
+      const { confirmationToken } = (await p.json()) as { confirmationToken: string };
+      s.payer.pay.pay = async () => crash();
+      const pay = await s.h.request('POST', `${s.path}/payments/execute`, {
+        ...s.auth,
+        headers: { 'idempotency-key': 'wp10-list-payment-key' },
+        body: { confirmationToken, acknowledgeDuplicate: true },
+      });
+      const { intentId: payment } = (await pay.json()) as { intentId: string };
+      // A legacy row without an immutable cost counts as amount plus maximum fee.
+      await s.h.server.db.updateTable('spend_intents').set({ cost_msat: null }).where('id', '=', payment).execute();
+      const listed = (await (await s.h.request('GET', `${s.path}/spends/unresolved`, s.auth)).json()) as {
+        items: Record<string, unknown>[];
+      };
+      const byId = new Map(listed.items.map((i) => [i['intentId'], i]));
+      expect(byId.get(close.intentId)).toMatchObject({ type: 'channel-close', channelId: channel.id, cost: '0' });
+      expect(byId.get(close.intentId)).not.toHaveProperty('paymentHash');
+      const row = await s.row(payment);
+      expect(byId.get(payment)).toMatchObject({
+        type: 'bolt11',
+        paymentHash: row.payment_hash,
+        cost: (BigInt(row.amount_msat) + BigInt(row.max_fee_msat)).toString(),
+      });
+      expect(byId.get(payment)).not.toHaveProperty('txid');
+      // Resolving needs no node: a payment releases nothing, and a node that cannot be loaded changes nothing.
+      const resolve = (id: string, outcome: string) =>
+        s.h.request('POST', `${s.path}/spends/${id}/resolve`, { ...s.auth, body: { outcome } });
+      expect((await resolve(payment, 'succeeded')).status).toBe(200);
+      s.h.fakes.delete('https://a.blake2b.test');
+      expect((await resolve(close.intentId, 'failed')).status).toBe(200);
+      expect((await s.row(close.intentId)).state).toBe('failed');
+    });
+
+    it("stores the owner's choice when the sealed PSBT cannot be opened", async () => {
+      const s = await interrupted();
+      s.payer.onchain.send = async () => crash();
+      const { intentId } = await s.spend(
+        'onchain',
+        { address: await s.address(), amount: '100000000', feeRate: '2' },
+        'wp10-owner-resolves-old-key',
+      );
+      await s.h.server.db
+        .updateTable('spend_intents')
+        .set({ psbt_key_id: 'old-key' })
+        .where('id', '=', intentId)
+        .execute();
+      const res = await s.h.request('POST', `${s.path}/spends/${intentId}/resolve`, {
+        ...s.auth,
+        body: { outcome: 'failed' },
+      });
+      expect(res.status, await res.clone().text()).toBe(200);
+      expect((await s.row(intentId)).state).toBe('failed');
+      expect(s.h.lines.some((l) => l.includes('spend inputs not released') && l.includes(intentId))).toBe(true);
+    });
+
+    it('resolves an on-chain send on a node without a spend credential, releasing nothing', async () => {
+      const s = await interrupted();
+      s.payer.onchain.send = async () => crash();
+      const { intentId } = await s.spend(
+        'onchain',
+        { address: await s.address(), amount: '100000000', feeRate: '2' },
+        'wp10-owner-resolves-view-only',
+      );
+      await s.h.server.db.deleteFrom('credentials').where('node_id', '=', s.id).where('kind', '=', 'spend').execute();
+      const discard = vi.spyOn(s.payer.onchain, 'discard');
+      const res = await s.h.request('POST', `${s.path}/spends/${intentId}/resolve`, {
+        ...s.auth,
+        body: { outcome: 'failed' },
+      });
+      expect(res.status, await res.clone().text()).toBe(200);
+      expect(discard).not.toHaveBeenCalled();
+    });
+
+    it("keeps the owner's choice when the node cannot release the inputs", async () => {
+      const s = await interrupted();
+      s.payer.onchain.send = async () => crash();
+      const { intentId } = await s.spend(
+        'onchain',
+        { address: await s.address(), amount: '100000000', feeRate: '2' },
+        'wp10-owner-resolves-offline',
+      );
+      vi.spyOn(s.payer.onchain, 'discard').mockRejectedValue(new Error('down'));
+      vi.spyOn(s.payer.onchain, 'unreserve').mockRejectedValue(
+        new AdapterError({ code: 'node_unreachable', sent: false, definitive: false }),
+      );
+      const res = await s.h.request('POST', `${s.path}/spends/${intentId}/resolve`, {
+        ...s.auth,
+        body: { outcome: 'failed' },
+      });
+      expect(res.status, await res.clone().text()).toBe(200);
+      expect((await s.row(intentId)).state).toBe('failed');
+      expect(s.h.lines.some((l) => l.includes('spend inputs not released') && l.includes('node_unreachable'))).toBe(
+        true,
+      );
+      // Succeeded keeps counting and releases nothing.
+      vi.restoreAllMocks();
+      await s.payer.onchain.discard(parseTxid((await s.row(intentId)).txid ?? ''));
+      s.payer.onchain.send = async () => crash();
+      const other = await s.spend(
+        'onchain',
+        { address: await s.address(), amount: '20000000', feeRate: '2' },
+        'wp10-owner-resolves-paid',
+      );
+      const paid = await s.h.request('POST', `${s.path}/spends/${other.intentId}/resolve`, {
+        ...s.auth,
+        body: { outcome: 'succeeded' },
+      });
+      expect(await paid.json()).toEqual({ intentId: other.intentId, state: 'succeeded' });
+    });
   });
 });
