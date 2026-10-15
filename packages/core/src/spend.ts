@@ -141,3 +141,39 @@ export const PeerDisconnectRequest = z
   .strictObject({ force: z.boolean().default(false) })
   .meta({ id: 'PeerDisconnectRequest' });
 export const PeerParam = z.strictObject({ nodeId: z.uuid(), pubkey: PubkeySchema });
+
+// Spends whose outcome is not known (state `unknown`): recovery could not settle them from the node yet. The owner
+// may resolve one by hand, with security step-up (spend policy §13). A wrong "failed" frees the budget it holds and,
+// for a payment, lets the same invoice be paid again; `warning` is the text to show before that choice.
+const Hex64 = z.string().regex(/^[0-9a-f]{64}$/);
+export const UnresolvedSpend = z
+  .strictObject({
+    intentId: z.uuid(),
+    type: z.enum(['bolt11', 'onchain', 'channel-open', 'channel-close']),
+    amount: MsatString,
+    // What the spend counts against the limits while it is unresolved.
+    cost: MsatString,
+    destination: z.string().optional(),
+    paymentHash: Hex64.optional(),
+    txid: Hex64.optional(),
+    channelId: Hex64.optional(),
+    peer: PubkeySchema.optional(),
+    // `interrupted`: the server stopped during the node call; otherwise the node's answer was unclear.
+    reason: z.string().nullable(),
+    createdAt: z.iso.datetime(),
+    updatedAt: z.iso.datetime(),
+  })
+  .meta({ id: 'UnresolvedSpend' });
+export const UnresolvedSpendsResponse = z
+  .strictObject({ items: z.array(UnresolvedSpend), warning: z.string() })
+  .meta({ id: 'UnresolvedSpends' });
+export const SpendIntentParam = z.strictObject({ nodeId: z.uuid(), intentId: z.uuid() });
+export const SpendResolveRequest = z
+  .strictObject({
+    // `succeeded`: the funds left (keeps counting); `failed`: nothing left (frees the budget and the invoice).
+    outcome: z.enum(['succeeded', 'failed']),
+  })
+  .meta({ id: 'SpendResolveRequest' });
+export const SpendResolveResponse = z
+  .strictObject({ intentId: z.uuid(), state: z.enum(['succeeded', 'failed']) })
+  .meta({ id: 'SpendResolved' });

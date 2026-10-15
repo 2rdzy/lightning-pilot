@@ -50,3 +50,18 @@ it('checks on-chain and channel spend requests strictly', async () => {
   expect(PeerConnectRequest.safeParse({ uri: `${peer}@127.0.0.1:9735` }).success).toBe(true);
   expect(PeerConnectRequest.safeParse({ uri: 'short' }).success).toBe(false);
 });
+
+it('accepts only a settled outcome when the owner resolves a spend', async () => {
+  const { SpendResolveRequest, SpendIntentParam, UnresolvedSpend } = await import('./spend.ts');
+  expect(SpendResolveRequest.safeParse({ outcome: 'succeeded' }).success).toBe(true);
+  expect(SpendResolveRequest.safeParse({ outcome: 'failed' }).success).toBe(true);
+  for (const outcome of ['unknown', 'reserved', 'paid', undefined])
+    expect(SpendResolveRequest.safeParse({ outcome }).success).toBe(false);
+  expect(SpendResolveRequest.safeParse({ outcome: 'failed', force: true }).success).toBe(false);
+  expect(SpendIntentParam.safeParse({ nodeId: 'x', intentId: crypto.randomUUID() }).success).toBe(false);
+  const at = new Date(0).toISOString();
+  const spend = { intentId: crypto.randomUUID(), type: 'onchain', amount: '1000', cost: '2000', reason: null };
+  expect(UnresolvedSpend.safeParse({ ...spend, createdAt: at, updatedAt: at }).success).toBe(true);
+  expect(UnresolvedSpend.safeParse({ ...spend, type: 'keysend', createdAt: at, updatedAt: at }).success).toBe(false);
+  expect(UnresolvedSpend.safeParse({ ...spend, txid: 'AB', createdAt: at, updatedAt: at }).success).toBe(false);
+});
