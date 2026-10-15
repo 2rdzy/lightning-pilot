@@ -74,6 +74,12 @@ export const SetupProgress = z
     csrfToken: z.string(),
     expiresAt: z.iso.datetime(),
     vaultKeyId: z.string(),
+    tlsCertificate: z
+      .strictObject({
+        fingerprintSha256: z.string().regex(/^(?:[0-9A-F]{2}:){31}[0-9A-F]{2}$/),
+        expiresAt: z.iso.datetime(),
+      })
+      .optional(),
     secret: z.string().optional(),
     uri: z.string().optional(),
     recoveryCodes: z.array(z.string()).optional(),
