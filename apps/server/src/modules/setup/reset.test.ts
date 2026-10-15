@@ -250,19 +250,6 @@ describe('offline authentication reset', () => {
         updated_at: timestamp,
       })
       .execute();
-    const session = await db.selectFrom('sessions').selectAll().executeTakeFirstOrThrow();
-    await db
-      .insertInto('spend_confirmations')
-      .values({
-        token_hash: 'confirmation',
-        session_handle: session.handle,
-        node_id: 'node',
-        digest: 'digest',
-        payload: '{}',
-        expires_at: timestamp,
-        used_at: null,
-      })
-      .execute();
     const before = {
       nodes: await db.selectFrom('nodes').selectAll().execute(),
       credentials: await db.selectFrom('credentials').selectAll().execute(),
@@ -289,7 +276,6 @@ describe('offline authentication reset', () => {
       'known_devices',
       'login_throttles',
       'sessions',
-      'spend_confirmations',
     ] as const)
       expect(await db.selectFrom(table).selectAll().execute()).toEqual([]);
     expect(await db.selectFrom('nodes').selectAll().execute()).toEqual(before.nodes);

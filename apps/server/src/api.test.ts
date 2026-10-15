@@ -2,13 +2,14 @@
 // nodes, invoices and the spend flow, the error format, and that no secret reaches the log.
 import { totp } from './modules/auth/totp/totp.ts';
 import { createHash, randomBytes } from 'node:crypto';
-import { copyFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { sql } from 'kysely';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { FakeAdapter, FakeNetwork } from '@lightning-pilot/adapter-kit';
 import {
   AdapterError,
+  SetupProgress,
   msat,
   parsePaymentHash,
   parseTxid,
@@ -53,7 +54,14 @@ interface RequestOptions {
   headers?: Record<string, string>;
 }
 
-async function harness(options: { dev?: boolean; webRoot?: string; maxNodes?: number } = {}): Promise<Harness> {
+async function harness(
+  options: {
+    dev?: boolean;
+    webRoot?: string;
+    maxNodes?: number;
+    tlsCertificate?: { fingerprintSha256: string; expiresAt: string };
+  } = {},
+): Promise<Harness> {
   const { dir, cleanup } = tempDir();
   const vaultKey = writeVaultKey(dir);
   const { config } = loadConfig({
@@ -65,7 +73,20 @@ async function harness(options: { dev?: boolean; webRoot?: string; maxNodes?: nu
       }),
   });
   const lines: string[] = [];
-  const logger = createLogger({ level: 'debug', sink: (l) => lines.push(l) });
+  const secretCanaries = new Set([PASSWORD, VIEW_RUNE, SPEND_RUNE, readFileSync(vaultKey, 'utf8').trim()]);
+  const collectSecrets = (value: unknown, name = ''): void => {
+    if (
+      typeof value === 'string' &&
+      /password|secret|rune|macaroon|preimage|csrf|cookie|token|recoverycode/i.test(name) &&
+      value.length >= 6
+    )
+      secretCanaries.add(value);
+    else if (Array.isArray(value)) for (const item of value) collectSecrets(item, name);
+    else if (value !== null && typeof value === 'object')
+      for (const [key, item] of Object.entries(value)) collectSecrets(item, key);
+  };
+  const logDir = join(dir, 'logs');
+  const logger = createLogger({ level: 'debug', destination: 'both', directory: logDir, stdout: (l) => lines.push(l) });
   const world = new FakeNetwork();
   const fakes = new Map<string, FakeAdapter>();
   const fake = (url: string, chain: Chain, network: Network = 'regtest') => {
@@ -79,6 +100,7 @@ async function harness(options: { dev?: boolean; webRoot?: string; maxNodes?: nu
   const clock = { now: new Date() };
   const server = await buildServer({
     config,
+    ...(options.tlsCertificate ? { tlsCertificate: options.tlsCertificate } : {}),
     now: () => clock.now,
     vaultKeyPath: vaultKey,
     dev: options.dev ?? true,
@@ -94,11 +116,25 @@ async function harness(options: { dev?: boolean; webRoot?: string; maxNodes?: nu
   });
   cleanups.push(async () => {
     await server.close();
+    if (self.secret) secretCanaries.add(self.secret);
+    const stdout = lines.filter((line) => !line.includes('"setupToken"')).join('\n');
+    const files = readdirSync(logDir, { recursive: true, withFileTypes: true }).filter(
+      (entry) => entry.isFile() && entry.name.endsWith('.jsonl'),
+    );
+    expect(files.length).toBeGreaterThan(0);
+    const output = stdout + files.map((file) => readFileSync(join(file.parentPath, file.name), 'utf8')).join('\n');
+    for (const secret of secretCanaries)
+      for (const encoding of [secret, Buffer.from(secret).toString('hex'), Buffer.from(secret).toString('base64')])
+        expect(output).not.toContain(encoding);
     cleanup();
   });
   // Through h.server, so a test that reopens the server (reopen) keeps using the same helper.
-  const request = (method: string, path: string, o: RequestOptions = {}) =>
-    Promise.resolve(
+  const request = async (method: string, path: string, o: RequestOptions = {}) => {
+    collectSecrets(o.body);
+    if (o.csrf) secretCanaries.add(o.csrf);
+    for (const match of (o.cookie ?? '').matchAll(/(?:^|;\s*)[^=]+=([^;]+)/g))
+      if ((match[1]?.length ?? 0) >= 6) secretCanaries.add(match[1] ?? '');
+    const response = await Promise.resolve(
       self.server.app.request(path, {
         method,
         headers: {
@@ -112,6 +148,12 @@ async function harness(options: { dev?: boolean; webRoot?: string; maxNodes?: nu
         ...(o.body === undefined ? {} : { body: typeof o.body === 'string' ? o.body : JSON.stringify(o.body) }),
       }),
     );
+    for (const match of (response.headers.get('set-cookie') ?? '').matchAll(/__Host-lp_[a-z_]+=([^;,]+)/g))
+      if ((match[1]?.length ?? 0) >= 6) secretCanaries.add(match[1] ?? '');
+    if (response.headers.get('content-type')?.includes('application/json'))
+      collectSecrets(await response.clone().json());
+    return response;
+  };
   const setupToken = () => {
     const line = [...lines].reverse().find((l) => l.includes('"setupToken"'));
     return (JSON.parse(line ?? '{}') as { setupToken: string }).setupToken;
@@ -312,6 +354,28 @@ describe(`API (${testDriver()})`, () => {
     ).toBe(404);
     expect(await (await h.request('GET', '/api/v1/setup')).json()).toEqual({ setupRequired: false });
   });
+
+  it.each([true, false])(
+    'serves optional TLS certificate metadata through setup without granting application access (%s)',
+    async (withCertificate) => {
+      const tlsCertificate = {
+        fingerprintSha256: Array<string>(32).fill('AB').join(':'),
+        expiresAt: '2027-10-15T00:00:00.000Z',
+      };
+      const h = await harness(withCertificate ? { tlsCertificate } : {});
+      const response = await h.request('POST', '/api/v1/setup', { body: { action: 'start', token: h.setupToken() } });
+      expect(response.status).toBe(200);
+      const wire = await response.json();
+      const progress = SetupProgress.parse(wire);
+      expect(progress.step).toBe('password');
+      if (withCertificate) expect(progress.tlsCertificate).toEqual(tlsCertificate);
+      else expect(wire).not.toHaveProperty('tlsCertificate');
+      expect(h.server.auth.setupMode).toBe(true);
+      const cookie = (response.headers.get('set-cookie') ?? '').split(';')[0] ?? '';
+      expect(cookie).toContain('__Host-lp_setup=');
+      expect(await errorCode(await h.request('GET', '/api/v1/nodes', { cookie }))).toBe('setup_required');
+    },
+  );
 
   it('logs in with a __Host- session cookie and requires the CSRF token', async () => {
     const h = await harness();
@@ -1279,7 +1343,6 @@ describe(`WP09 spending policy (${testDriver()})`, () => {
     expect(first.status).toBe(200);
     const result = (await first.json()) as { intentId: string };
     s.h.clock.now = new Date(s.h.clock.now.getTime() + 120001);
-    await s.h.server.db.deleteFrom('spend_confirmations').execute();
     const { SpendService } = await import('./modules/spend/service.ts');
     const restarted = new SpendService({
       db: s.h.server.db,
@@ -1465,16 +1528,15 @@ describe(`WP09 spending policy (${testDriver()})`, () => {
       nodes: s.h.server.nodes,
       auth: s.h.server.auth,
       now: () => s.h.clock.now,
-      logger: createLogger({
-        sink: (line) => {
-          if (
-            ['spend intent', 'payment not completed', 'spend result'].includes(
-              (JSON.parse(line) as { msg: string }).msg,
-            )
-          )
-            throw new Error('injected intent-log failure');
-        },
-      }),
+      logger: {
+        ...createLogger({ sink: () => undefined }),
+        child: () => ({
+          ...createLogger({ sink: () => undefined }),
+          info: (msg) => {
+            if (msg === 'spend intent' || msg === 'spend result') throw new Error('injected failure before node call');
+          },
+        }),
+      },
     });
     cleanups.push(() => service.close());
     const p = await service.preview(s.handle, s.id, await s.invoice(), 'test');

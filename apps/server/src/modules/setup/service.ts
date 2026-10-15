@@ -61,6 +61,7 @@ export interface SetupOptions {
   auth: AuthService;
   nodes: NodesService;
   logger: Logger;
+  tlsCertificate?: SetupProgress['tlsCertificate'];
   scryptCost?: ScryptCost;
   now?: () => Date;
 }
@@ -85,6 +86,7 @@ export class SetupService {
       csrfToken: d.csrfToken,
       expiresAt: new Date(Math.min(d.expiresAt, d.touched + IDLE_MS)).toISOString(),
       vaultKeyId: this.#options.vault.keyId,
+      ...(this.#options.tlsCertificate ? { tlsCertificate: this.#options.tlsCertificate } : {}),
       ...extra,
     };
   }

@@ -3,6 +3,7 @@
 // typos fail loudly. No secret ever lives in configuration: the vault key comes from its own file, node credentials
 // from the vault, passwords from setup. This is the minimal subset of keys the walking skeleton needs.
 import { readFileSync } from 'node:fs';
+import { assertProtectedFile } from './ownership.ts';
 import { isIP } from 'node:net';
 import { z } from 'zod';
 
@@ -18,6 +19,7 @@ const Schema = z.strictObject({
         .string()
         .refine((a) => isIP(a) !== 0, 'an IP address')
         .default('127.0.0.1'),
+      torPort: z.int().min(1).max(65535).optional(),
       port: z.int().min(1).max(65535).default(8443),
       hosts: z.array(z.string().min(1).max(253)).min(1).default(['localhost', '127.0.0.1', '::1']),
       // isIP accepts IPv6 zone IDs (fe80::1%eth0), which login source matching never trusts: refuse them here.
@@ -36,13 +38,24 @@ const Schema = z.strictObject({
   paths: z
     .strictObject({
       dataDir: z.string().default('/var/lib/lightning-pilot'),
-      vaultKey: z.string().optional(),
+      vaultKey: z.string().min(1).optional(),
+      logDir: z.string().min(1).default('/var/log/lightning-pilot'),
     })
     .prefault({}),
   log: z
     .strictObject({
       level: level.default('info'),
+      destination: z.enum(['files', 'stdout', 'both']).default('files'),
+      retentionDays: z.int().min(1).max(365).default(365),
+      maxTotalMB: z.int().positive().max(1048576).default(1024),
       modules: z.record(z.string(), level).default({}),
+    })
+    .prefault({}),
+  tor: z.strictObject({ hostnameFile: z.string().min(1).optional() }).prefault({}),
+  outbound: z
+    .strictObject({
+      timeoutMs: z.int().min(1).max(300000).default(10000),
+      maxResponseBytes: z.int().min(1).max(1073741824).default(1048576),
     })
     .prefault({}),
   limits: z.strictObject({ maxNodes: z.int().min(1).max(100).default(10) }).prefault({}),
@@ -62,7 +75,7 @@ export interface LoadedConfig {
 const FORBIDDEN = new Set(['password', 'secret', 'token', 'rune', 'macaroon', 'key']);
 
 function findForbidden(value: unknown, path: string): string | undefined {
-  if (value === null || typeof value !== 'object' || Array.isArray(value)) return undefined;
+  if (value === null || typeof value !== 'object') return undefined;
   for (const [k, v] of Object.entries(value)) {
     const here = path ? `${path}.${k}` : k;
     if (FORBIDDEN.has(k.toLowerCase())) return here;
@@ -104,7 +117,7 @@ function parseArgs(argv: readonly string[]): { configPath?: string; dev: boolean
     const arg = argv[i];
     if (arg === '--config') {
       configPath = argv[++i];
-      if (!configPath) throw new ConfigError('--config needs a path');
+      if (!configPath || configPath.startsWith('--')) throw new ConfigError('--config needs a path');
     } else if (arg === '--dev') {
       dev = true;
     } else {
@@ -120,9 +133,11 @@ export function loadConfig(options: {
   argv?: readonly string[];
   env?: Record<string, string | undefined>;
   readFile?: (path: string) => string;
+  checkOnly?: boolean;
 }): LoadedConfig {
   const env = options.env ?? {};
   const args = parseArgs(options.argv ?? []);
+  if (!args.dev) assertDiagnostics(env.NODE_OPTIONS ?? '', process.execArgv);
   const path = args.configPath ?? env.LP_CONFIG ?? DEFAULT_PATH;
   const explicit = args.configPath !== undefined || env.LP_CONFIG !== undefined;
 
@@ -137,6 +152,7 @@ export function loadConfig(options: {
     }
   }
   if (text !== undefined) {
+    if (!args.dev && !options.readFile) assertProtectedFile(path);
     try {
       fileValue = JSON.parse(text);
     } catch {
@@ -174,12 +190,6 @@ export function loadConfig(options: {
   }
   const config = result.data;
 
-  if (config.tls.mode === 'self-signed') {
-    // A certificate cannot be generated with Node's built-in crypto alone; until that lands, say what to do.
-    throw new ConfigError(
-      'tls.mode "self-signed" is not available yet: use "files" with your own certificate, or "off" behind a local TLS proxy',
-    );
-  }
   if (config.tls.mode === 'files' && (!config.tls.certFile || !config.tls.keyFile)) {
     throw new ConfigError('tls.mode "files" needs tls.certFile and tls.keyFile');
   }
@@ -189,6 +199,16 @@ export function loadConfig(options: {
 
   const credentialsDir = env.CREDENTIALS_DIRECTORY;
   const vaultKeyPath = config.paths.vaultKey ?? (credentialsDir ? `${credentialsDir}/vault-key` : '');
-  if (vaultKeyPath === '') throw new ConfigError('vault key not provided: set paths.vaultKey or start under systemd');
+  if (vaultKeyPath === '' && !options.checkOnly)
+    throw new ConfigError('vault key not provided: set paths.vaultKey or start under systemd');
   return { config, vaultKeyPath, dev: args.dev };
+}
+
+export function assertDiagnostics(nodeOptions: string, execArgv: readonly string[]): void {
+  if (
+    /(?:^|[\s"'])--(?:inspect[^\s"']*|heapsnapshot-[^\s"']*|report-[^\s"']*|diagnostic-dir)(?=$|[=\s"'])/.test(
+      [nodeOptions, ...execArgv].join(' '),
+    )
+  )
+    throw new ConfigError('diagnostic Node options are not allowed in production');
 }

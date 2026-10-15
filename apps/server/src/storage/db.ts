@@ -10,7 +10,13 @@ export type Driver = 'node:sqlite' | 'better-sqlite3';
 export type Db = Kysely<DB>;
 
 // synchronous=FULL: a committed spend intent must survive power loss.
-const PRAGMAS = ['journal_mode = WAL', 'foreign_keys = ON', 'busy_timeout = 5000', 'synchronous = FULL'];
+const PRAGMAS = [
+  'journal_mode = WAL',
+  'secure_delete = ON',
+  'foreign_keys = ON',
+  'busy_timeout = 5000',
+  'synchronous = FULL',
+];
 
 // Kysely's SqliteDialect expects a better-sqlite3-like API; this maps node:sqlite onto it.
 function wrapNodeSqlite(db: DatabaseSync): RawDb {

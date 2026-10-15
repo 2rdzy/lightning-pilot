@@ -224,6 +224,15 @@ export function SetupScreen() {
           <>
             <p>{tr.t('setup.backupHint')}</p>
             <code>{progress?.vaultKeyId}</code>
+            {progress?.tlsCertificate ? (
+              <div>
+                <p>{tr.t('setup.tlsFingerprint')}</p>
+                <code className="break-all">{progress.tlsCertificate.fingerprintSha256}</code>
+                <p>
+                  {tr.t('setup.tlsExpiry')} {progress.tlsCertificate.expiresAt}
+                </p>
+              </div>
+            ) : null}
             <label className="flex gap-2">
               <input
                 type="checkbox"

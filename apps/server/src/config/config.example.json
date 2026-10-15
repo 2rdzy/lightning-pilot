@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "server": {
+    "listen": "127.0.0.1",
+    "port": 8443,
+    "hosts": ["localhost", "127.0.0.1", "::1"],
+    "trustedProxies": []
+  },
+  "tls": { "mode": "self-signed" },
+  "paths": {
+    "dataDir": "/var/lib/lightning-pilot",
+    "logDir": "/var/log/lightning-pilot"
+  },
+  "log": {
+    "level": "info",
+    "destination": "files",
+    "retentionDays": 365,
+    "maxTotalMB": 1024,
+    "modules": {}
+  },
+  "limits": { "maxNodes": 10 },
+  "outbound": { "timeoutMs": 10000, "maxResponseBytes": 1048576 }
+}
