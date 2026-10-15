@@ -595,6 +595,8 @@ describe('encrypted export lifecycle', () => {
       }).toEqual(before);
       expect(await h.db.selectFrom('nodes').selectAll().execute()).toHaveLength(1);
     },
+    // Two encrypted imports use four production-cost KDF calls, which can exceed 5s on shared CI runners.
+    30000,
   );
   it('preserves all resolved states and converts every uncertain in-flight state to unknown', async () => {
     const h = await harness();
