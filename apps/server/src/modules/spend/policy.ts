@@ -84,15 +84,22 @@ export function policyValues(policy: SpendPolicy) {
 }
 // After a restore (modules/restore), the node's own spends since the backup are unknown until counted: spending on
 // that identity is refused meanwhile (fail closed), except what costs nothing. Once counted, they add to the window.
+// "Not counted yet" is the default for every identity during the 24 hours after a restore, so a node added after the
+// restore (unknown to the restored database) is refused too until the recovery loop has counted it.
 export async function admissionBudget(db: Db, identity: NodeIdentity, now: Date, cost: bigint): Promise<bigint> {
   if (cost > 0n) {
     const pending = await db
-      .selectFrom('restore_counts')
-      .select('restore_id')
-      .where('chain', '=', identity.chain)
-      .where('pubkey', '=', identity.pubkey)
-      .where('state', '=', 'pending')
-      .where('until', '>', now.toISOString())
+      .selectFrom('restores')
+      .leftJoin('restore_counts', (join) =>
+        join
+          .onRef('restore_counts.restore_id', '=', 'restores.id')
+          .on('restore_counts.chain', '=', identity.chain)
+          .on('restore_counts.pubkey', '=', identity.pubkey)
+          .on('restore_counts.state', '=', 'counted'),
+      )
+      .select('restores.id')
+      .where('restores.recorded_at', '>', new Date(now.getTime() - 86_400_000).toISOString())
+      .where('restore_counts.restore_id', 'is', null)
       .executeTakeFirst();
     if (pending)
       throw new AppError(

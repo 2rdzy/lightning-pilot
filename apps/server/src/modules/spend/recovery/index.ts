@@ -96,6 +96,28 @@ export class SpendRecovery {
       .where('state', '=', 'unknown')
       .orderBy('created_at')
       .execute();
+    // Every node identity needs a count after a recent restore, also one added since (the restored database did not
+    // know it): its missing row is created here, pending.
+    const since = new Date(this.#now().getTime() - 86_400_000).toISOString();
+    for (const restore of await this.#db
+      .selectFrom('restores')
+      .select(['id', 'recorded_at'])
+      .where('recorded_at', '>', since)
+      .execute())
+      for (const identity of await this.#db.selectFrom('nodes').select(['chain', 'pubkey']).distinct().execute())
+        await this.#db
+          .insertInto('restore_counts')
+          .values({
+            restore_id: restore.id,
+            chain: identity.chain,
+            pubkey: identity.pubkey,
+            state: 'pending',
+            counted_msat: null,
+            counted_at: null,
+            until: new Date(Date.parse(restore.recorded_at) + 86_400_000).toISOString(),
+          })
+          .onConflict((conflict) => conflict.doNothing())
+          .execute();
     const counts = await this.#db
       .selectFrom('restore_counts')
       .innerJoin('restores', 'restores.id', 'restore_counts.restore_id')

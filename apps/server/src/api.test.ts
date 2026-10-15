@@ -3045,7 +3045,47 @@ describe(`restore from a backup (${testDriver()})`, () => {
       .set({ pubkey: '03' + 'ee'.repeat(32) })
       .execute();
     const fourth = await reopen(s.h, third);
-    expect(await fourth.recovery.resolvePass()).toBe(1);
+    // The new identity gets its own pending count (its node cannot be loaded); the old one has no node left.
+    expect(await fourth.recovery.resolvePass()).toBe(2);
     expect(listPayments).toHaveBeenCalledTimes(asked + 1);
+  });
+
+  it('pauses and counts a node added after the restore, which the restored database did not know', async () => {
+    const s = await restoring();
+    const file = await s.backup();
+    const server = await s.restore(file);
+    await s.login();
+    expect(await server.recovery.resolvePass()).toBe(0);
+    // Back to a security step-up to add a node (sessions were revoked by the restore).
+    s.h.clock.now = new Date(s.h.clock.now.getTime() + 90_000);
+    const step = await s.h.request('POST', '/api/v1/auth/step-up', {
+      ...s.auth,
+      body: { password: PASSWORD, strength: 'security', totpCode: totp(s.h.secret ?? '', s.h.clock.now) },
+    });
+    expect(step.status, await step.clone().text()).toBe(200);
+    const stepped = {
+      cookie: (step.headers.get('set-cookie') ?? '').split(';')[0] ?? '',
+      csrf: ((await step.json()) as { csrfToken: string }).csrfToken,
+    };
+    const added = await addNode(s.h, stepped, 'https://a.bitcoin.test', 'bitcoin');
+    expect(added.status, await added.clone().text()).toBe(201);
+    const { id } = (await added.json()) as { id: string };
+    const other = s.h.fakes.get('https://a.bitcoin.test');
+    if (!other) throw new Error('Missing fake');
+    const bolt11 = (await other.receive.createInvoice({ amount: msat(1000n), description: 'x', label: 'self' })).bolt11;
+    const preview = () =>
+      s.h.request('POST', `/api/v1/nodes/${id}/payments/preview`, { ...stepped, body: { request: bolt11 } });
+    const refused = await preview();
+    expect(await refused.json()).toMatchObject({
+      error: { code: 'setup_required', details: { reason: 'restore_reconciliation' } },
+    });
+    // The next pass creates its count and reads the node; spending on it resumes.
+    expect(await server.recovery.resolvePass()).toBe(0);
+    expect(await server.db.selectFrom('restore_counts').select(['chain', 'state']).orderBy('chain').execute()).toEqual([
+      { chain: 'bitcoin', state: 'counted' },
+      { chain: 'blake2b', state: 'counted' },
+    ]);
+    const resumed = await preview();
+    expect(resumed.status, await resumed.clone().text()).not.toBe(403);
   });
 });
