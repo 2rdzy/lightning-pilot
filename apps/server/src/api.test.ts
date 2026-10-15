@@ -2,7 +2,7 @@
 // nodes, invoices and the spend flow, the error format, and that no secret reaches the log.
 import { totp } from './modules/auth/totp/totp.ts';
 import { createHash, randomBytes } from 'node:crypto';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { sql } from 'kysely';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -96,9 +96,10 @@ async function harness(options: { dev?: boolean; webRoot?: string; maxNodes?: nu
     await server.close();
     cleanup();
   });
+  // Through h.server, so a test that reopens the server (reopen) keeps using the same helper.
   const request = (method: string, path: string, o: RequestOptions = {}) =>
     Promise.resolve(
-      server.app.request(path, {
+      self.server.app.request(path, {
         method,
         headers: {
           host: 'localhost',
@@ -115,7 +116,8 @@ async function harness(options: { dev?: boolean; webRoot?: string; maxNodes?: nu
     const line = [...lines].reverse().find((l) => l.includes('"setupToken"'));
     return (JSON.parse(line ?? '{}') as { setupToken: string }).setupToken;
   };
-  return { server, lines, fakes, world, setupToken, request, clock };
+  const self: Harness = { server, lines, fakes, world, setupToken, request, clock };
+  return self;
 }
 
 async function loggedIn(h: Harness) {
@@ -180,15 +182,21 @@ async function addNode(h: Harness, auth: { cookie: string; csrf: string }, url: 
 }
 
 // Stops the server and opens a new one on the same data directory, as a restart after a crash does.
-async function reopen(h: Harness, current: Server): Promise<Server> {
-  const databases = await sql<{ file: string }>`PRAGMA database_list`.execute(current.db);
-  const dir = dirname(databases.rows[0]?.file ?? '');
+// `current` may also be the data directory of a server that is already closed.
+async function reopen(h: Harness, current: Server | string, between?: (dir: string) => void): Promise<Server> {
+  const dir =
+    typeof current === 'string'
+      ? current
+      : dirname((await sql<{ file: string }>`PRAGMA database_list`.execute(current.db)).rows[0]?.file ?? '');
   const vaultKey = join(dir, 'vault-key');
   const { config } = loadConfig({
     readFile: () => JSON.stringify({ tls: { mode: 'off' }, paths: { dataDir: dir, vaultKey } }),
   });
-  await current.close();
-  current.close = async () => undefined;
+  if (typeof current !== 'string') {
+    await current.close();
+    current.close = async () => undefined;
+  }
+  between?.(dir);
   const server = await buildServer({
     config,
     vaultKeyPath: vaultKey,
@@ -2747,5 +2755,337 @@ describe(`WP09b on-chain and channel spends (${testDriver()})`, () => {
       });
       expect(await paid.json()).toEqual({ intentId: other.intentId, state: 'succeeded' });
     });
+  });
+});
+
+// WP10b: restoring the database from a backup (update and rollback spec §4, §6 "Rollback").
+describe(`restore from a backup (${testDriver()})`, () => {
+  async function restoring() {
+    const h = await harness();
+    let auth: { cookie: string; csrf: string } = await loggedIn(h);
+    const { id } = (await (await addNode(h, auth, 'https://a.blake2b.test', 'blake2b')).json()) as { id: string };
+    const path = `/api/v1/nodes/${id}`;
+    const payer = h.fakes.get('https://a.blake2b.test');
+    const recipient = h.fakes.get('https://b.blake2b.test');
+    if (!payer || !recipient) throw new Error('Missing fake');
+    const invoice = async (sats: bigint) =>
+      (
+        await recipient.receive.createInvoice({
+          amount: msat(sats * 1000n),
+          description: 'x',
+          label: randomBytes(8).toString('hex'),
+        })
+      ).bolt11;
+    const preview = (request: string) => h.request('POST', `${path}/payments/preview`, { ...auth, body: { request } });
+    const pay = async (sats: bigint) => {
+      const p = await preview(await invoice(sats));
+      expect(p.status, await p.clone().text()).toBe(200);
+      const { confirmationToken } = (await p.json()) as { confirmationToken: string };
+      const res = await h.request('POST', `${path}/payments/execute`, {
+        ...auth,
+        headers: { 'idempotency-key': randomBytes(16).toString('hex') },
+        body: { confirmationToken, acknowledgeDuplicate: true },
+      });
+      expect(res.status, await res.clone().text()).toBe(200);
+    };
+    const used = async () =>
+      BigInt(((await (await h.request('GET', `${path}/spend-policy`, auth)).json()) as { usedMsat: string }).usedMsat);
+    let current = h.server;
+    const dir = async () => {
+      const databases = await sql<{ file: string }>`PRAGMA database_list`.execute(current.db);
+      return dirname(databases.rows[0]?.file ?? '');
+    };
+    const backup = async () => {
+      const file = join(await dir(), 'backups', 'pre-test.sqlite');
+      mkdirSync(dirname(file), { recursive: true });
+      await sql.raw(`VACUUM INTO '${file}'`).execute(current.db);
+      return file;
+    };
+    const marker = (data: string) =>
+      JSON.stringify({ version: 1, restoredAt: new Date(0).toISOString(), backupFile: data });
+    // What the install script's restore mode does: stop, copy the backup over, drop the WAL, write the marker.
+    const restore = async (file: string, text = marker('pre-test.sqlite')) => {
+      current = await reopen(h, current, (data) => {
+        copyFileSync(file, join(data, 'lightning-pilot.db'));
+        for (const extra of ['-wal', '-shm']) rmSync(join(data, `lightning-pilot.db${extra}`), { force: true });
+        writeFileSync(join(data, 'restore.json'), text, { mode: 0o600 });
+      });
+      return current;
+    };
+    const login = async () => {
+      h.clock.now = new Date(h.clock.now.getTime() + 90_000);
+      const res = await h.request('POST', '/api/v1/auth/login', {
+        body: { password: PASSWORD, totpCode: totp(h.secret ?? '', h.clock.now) },
+      });
+      expect(res.status, await res.clone().text()).toBe(200);
+      auth = {
+        cookie: (res.headers.get('set-cookie') ?? '').split(';')[0] ?? '',
+        csrf: ((await res.json()) as { csrfToken: string }).csrfToken,
+      };
+      return auth;
+    };
+    return {
+      h,
+      id,
+      path,
+      payer,
+      pay,
+      preview,
+      invoice,
+      used,
+      backup,
+      restore,
+      marker,
+      login,
+      dir,
+      get auth() {
+        return auth;
+      },
+      get server() {
+        return current;
+      },
+    };
+  }
+
+  it("revokes sessions, pauses spending, then counts the node's payments the backup does not know", async () => {
+    const s = await restoring();
+    await s.pay(10_000n);
+    const before = await s.used();
+    expect(before).toBeGreaterThan(0n);
+    const file = await s.backup();
+    // Made after the backup: the restored database will not know it.
+    await s.pay(20_000n);
+    const old = s.auth;
+    const server = await s.restore(file);
+    expect(existsSync(join(await s.dir(), 'restore.json'))).toBe(false);
+    expect(
+      s.h.lines.some((l) => l.includes('"database restored from a backup"') && l.includes('"security":true')),
+    ).toBe(true);
+    // Every session (and known device) from the restored database is gone.
+    expect((await s.h.request('GET', '/api/v1/nodes', old)).status).toBe(401);
+    expect(await server.db.selectFrom('known_devices').selectAll().execute()).toEqual([]);
+    await s.login();
+    // The limits screen still works; spending waits for the node to be read again.
+    expect(await s.used()).toBe(before);
+    const refused = await s.preview(await s.invoice(1_000n));
+    expect(refused.status).toBe(403);
+    expect(await refused.json()).toMatchObject({
+      error: { code: 'setup_required', details: { reason: 'restore_reconciliation' } },
+    });
+    expect(await server.recovery.resolvePass()).toBe(0);
+    // The payment made after the backup is counted from the node at what it sent (the fake routes for free); the
+    // one the backup knows is not counted twice.
+    expect(await s.used()).toBe(before + 20_000_000n);
+    expect(s.h.lines.some((l) => l.includes('"spend restore counted"') && l.includes('"payments":1'))).toBe(true);
+    expect((await s.preview(await s.invoice(1_000n))).status).toBe(200);
+    // 24 hours after the restore the count no longer applies.
+    s.h.clock.now = new Date(s.h.clock.now.getTime() + 86_400_000);
+    await s.login();
+    expect(await s.used()).toBe(0n);
+  });
+
+  it('records a marker once even if the server stopped before removing it, and refuses an invalid one', async () => {
+    const s = await restoring();
+    const file = await s.backup();
+    const text = s.marker('pre-test.sqlite');
+    let server = await s.restore(file, text);
+    expect(await server.db.selectFrom('restores').selectAll().execute()).toHaveLength(1);
+    expect(await server.recovery.resolvePass()).toBe(0);
+    // The same marker again (a crash between the commit and its removal): recorded once, nothing paused again.
+    const dir = await s.dir();
+    server = await reopen(s.h, server, (data) => writeFileSync(join(data, 'restore.json'), text));
+    expect(await server.db.selectFrom('restores').selectAll().execute()).toHaveLength(1);
+    expect(await server.db.selectFrom('restore_counts').select('state').execute()).toEqual([{ state: 'counted' }]);
+    expect(existsSync(join(dir, 'restore.json'))).toBe(false);
+    // A marker that cannot be read stops the start: a restore whose spends cannot be reconciled must not serve.
+    await server.close();
+    for (const bad of ['{', JSON.stringify({ version: 2, restoredAt: new Date(0).toISOString(), backupFile: 'x' })])
+      await expect(reopen(s.h, dir, (data) => writeFileSync(join(data, 'restore.json'), bad))).rejects.toThrow(
+        /not a valid restore marker/,
+      );
+  });
+
+  it('keeps spending paused while the node cannot be read or cannot tell an amount, except what costs nothing', async () => {
+    const s = await restoring();
+    const file = await s.backup();
+    const server = await s.restore(file);
+    await s.login();
+    // An on-chain transaction of the last day without an amount: the count cannot be trusted.
+    const real = s.payer.onchain.listTransactions;
+    s.payer.onchain.listTransactions = async () => ({
+      items: [{ txid: parseTxid('ab'.repeat(32)), confirmations: 0, kind: 'other' }],
+    });
+    expect(await server.recovery.resolvePass()).toBe(1);
+    expect(s.h.lines.some((l) => l.includes('an on-chain transaction has no amount'))).toBe(true);
+    // A node error: still paused, asked again later.
+    s.payer.onchain.listTransactions = async () => {
+      throw new AdapterError({ code: 'node_unreachable', sent: true, definitive: false });
+    };
+    const again = await reopen(s.h, server);
+    expect(await again.recovery.resolvePass()).toBe(1);
+    expect(s.h.lines.some((l) => l.includes('node history not readable'))).toBe(true);
+    // A close to the node's own wallet costs nothing and is allowed.
+    const [channel] = (await s.payer.channel.listChannels()).items;
+    const close = await s.h.request('POST', `${s.path}/channels/close/preview`, {
+      ...s.auth,
+      body: { channel: channel?.id },
+    });
+    expect(close.status, await close.clone().text()).toBe(200);
+    s.payer.onchain.listTransactions = real;
+  });
+
+  it('counts only recent spends the database does not cover, and fails closed on what it cannot read', async () => {
+    const s = await restoring();
+    await s.pay(10_000n);
+    const known = await s.server.db.selectFrom('spend_intents').select('payment_hash').executeTakeFirstOrThrow();
+    const file = await s.backup();
+    const server = await s.restore(file);
+    await s.login();
+    const now = s.h.clock.now.getTime();
+    const at = (ms: number) => new Date(now + ms).toISOString();
+    const hash = (n: number) => parsePaymentHash(n.toString(16).padStart(64, '0'));
+    const listPayments = vi.spyOn(s.payer.pay, 'listPayments');
+    const listTransactions = vi.spyOn(s.payer.onchain, 'listTransactions');
+    const tip = (await s.payer.node.getInfo()).blockHeight;
+    // Two pages, to read them all.
+    listPayments.mockResolvedValueOnce({
+      items: [{ paymentHash: hash(7), status: 'succeeded', amountSent: msat(64n), createdAt: at(-1000) }],
+      nextCursor: 'next',
+    });
+    listPayments.mockResolvedValueOnce({
+      items: [
+        {
+          paymentHash: hash(1),
+          status: 'succeeded',
+          amount: msat(1000n),
+          amountSent: msat(1100n),
+          createdAt: at(-60_000),
+        },
+        // Only some parts sent so far: the full amount counts.
+        {
+          paymentHash: hash(2),
+          status: 'pending',
+          amount: msat(2000n),
+          amountSent: msat(500n),
+          createdAt: at(-60_000),
+        },
+        // No time: may be recent, so counted.
+        { paymentHash: hash(3), status: 'succeeded', amountSent: msat(4000n) },
+        { paymentHash: hash(4), status: 'failed', amountSent: msat(8000n), createdAt: at(-60_000) },
+        { paymentHash: hash(5), status: 'succeeded', amountSent: msat(16000n), createdAt: at(-90_000_000) },
+        // Known to the restored database: counted there already.
+        { paymentHash: parsePaymentHash(known.payment_hash ?? ''), status: 'succeeded', amountSent: msat(32000n) },
+      ],
+    });
+    const tx = (
+      n: number,
+      extra: { confirmations: number; blockHeight?: number; amount?: { direction: 'in' | 'out'; value: bigint } },
+    ) => ({
+      txid: parseTxid(n.toString(16).padStart(64, '0')),
+      kind: 'send' as const,
+      confirmations: extra.confirmations,
+      ...(extra.blockHeight === undefined ? {} : { blockHeight: extra.blockHeight }),
+      ...(extra.amount === undefined ? {} : { amount: { ...extra.amount, value: msat(extra.amount.value) } }),
+    });
+    listTransactions.mockResolvedValue({
+      items: [
+        tx(1, { confirmations: 0, amount: { direction: 'out' as const, value: msat(100_000n) } }),
+        tx(2, { confirmations: 3, blockHeight: tip - 2, amount: { direction: 'out' as const, value: msat(200_000n) } }),
+        tx(3, { confirmations: 1, blockHeight: tip, amount: { direction: 'in' as const, value: msat(400_000n) } }),
+        // Older than a day of blocks, or without a block: not counted.
+        tx(4, {
+          confirmations: 200,
+          blockHeight: tip - 200,
+          amount: { direction: 'out' as const, value: msat(800_000n) },
+        }),
+        tx(5, { confirmations: 10 }),
+      ],
+    });
+    // An on-chain intent the restored database has: its transaction is not counted again.
+    const row = await server.db.selectFrom('spend_intents').selectAll().executeTakeFirstOrThrow();
+    await server.db
+      .insertInto('spend_intents')
+      .values({
+        ...row,
+        id: crypto.randomUUID(),
+        type: 'onchain',
+        payment_hash: null,
+        idempotency_key: 'restore-onchain-known',
+        txid: tx(2, { confirmations: 0 }).txid,
+      })
+      .execute();
+    expect(await server.recovery.resolvePass()).toBe(0);
+    const counted = await server.db.selectFrom('restore_counts').select('counted_msat').executeTakeFirstOrThrow();
+    expect(counted.counted_msat).toBe((64n + 1100n + 2000n + 4000n + 100_000n).toString());
+    // Counting again finds the row counted already and changes nothing.
+    const { countRestore } = await import('./modules/spend/recovery/restore.ts');
+    const pending = await server.db
+      .selectFrom('restore_counts')
+      .innerJoin('restores', 'restores.id', 'restore_counts.restore_id')
+      .select(['restore_id', 'chain', 'pubkey', 'recorded_at'])
+      .executeTakeFirstOrThrow();
+    const quiet = createLogger({ sink: () => undefined });
+    expect(await countRestore(server.db, s.payer, pending, s.h.clock.now, quiet)).toBe('counted');
+
+    // A payment without an amount cannot be counted: spending stays paused.
+    const again = await s.restore(file);
+    listPayments.mockResolvedValue({ items: [{ paymentHash: hash(6), status: 'succeeded', createdAt: at(0) }] });
+    const asked = listPayments.mock.calls.length;
+    expect(await again.recovery.resolvePass()).toBe(1);
+    expect(s.h.lines.some((l) => l.includes('a payment has no amount'))).toBe(true);
+    // Not due yet: the next pass does not ask again.
+    expect(await again.recovery.resolvePass()).toBe(1);
+    expect(listPayments).toHaveBeenCalledTimes(asked + 1);
+    // A node that cannot be loaded, and an identity with no node left: still paused, nothing asked.
+    const third = await s.restore(file);
+    s.h.fakes.delete('https://a.blake2b.test');
+    expect(await third.recovery.resolvePass()).toBe(1);
+    await third.db
+      .updateTable('nodes')
+      .set({ pubkey: '03' + 'ee'.repeat(32) })
+      .execute();
+    const fourth = await reopen(s.h, third);
+    // The new identity gets its own pending count (its node cannot be loaded); the old one has no node left.
+    expect(await fourth.recovery.resolvePass()).toBe(2);
+    expect(listPayments).toHaveBeenCalledTimes(asked + 1);
+  });
+
+  it('pauses and counts a node added after the restore, which the restored database did not know', async () => {
+    const s = await restoring();
+    const file = await s.backup();
+    const server = await s.restore(file);
+    await s.login();
+    expect(await server.recovery.resolvePass()).toBe(0);
+    // Back to a security step-up to add a node (sessions were revoked by the restore).
+    s.h.clock.now = new Date(s.h.clock.now.getTime() + 90_000);
+    const step = await s.h.request('POST', '/api/v1/auth/step-up', {
+      ...s.auth,
+      body: { password: PASSWORD, strength: 'security', totpCode: totp(s.h.secret ?? '', s.h.clock.now) },
+    });
+    expect(step.status, await step.clone().text()).toBe(200);
+    const stepped = {
+      cookie: (step.headers.get('set-cookie') ?? '').split(';')[0] ?? '',
+      csrf: ((await step.json()) as { csrfToken: string }).csrfToken,
+    };
+    const added = await addNode(s.h, stepped, 'https://a.bitcoin.test', 'bitcoin');
+    expect(added.status, await added.clone().text()).toBe(201);
+    const { id } = (await added.json()) as { id: string };
+    const other = s.h.fakes.get('https://a.bitcoin.test');
+    if (!other) throw new Error('Missing fake');
+    const bolt11 = (await other.receive.createInvoice({ amount: msat(1000n), description: 'x', label: 'self' })).bolt11;
+    const preview = () =>
+      s.h.request('POST', `/api/v1/nodes/${id}/payments/preview`, { ...stepped, body: { request: bolt11 } });
+    const refused = await preview();
+    expect(await refused.json()).toMatchObject({
+      error: { code: 'setup_required', details: { reason: 'restore_reconciliation' } },
+    });
+    // The next pass creates its count and reads the node; spending on it resumes.
+    expect(await server.recovery.resolvePass()).toBe(0);
+    expect(await server.db.selectFrom('restore_counts').select(['chain', 'state']).orderBy('chain').execute()).toEqual([
+      { chain: 'bitcoin', state: 'counted' },
+      { chain: 'blake2b', state: 'counted' },
+    ]);
+    const resumed = await preview();
+    expect(resumed.status, await resumed.clone().text()).not.toBe(403);
   });
 });

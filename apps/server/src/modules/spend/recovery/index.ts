@@ -9,6 +9,7 @@ import type { NodesService } from '../../nodes/index.ts';
 import type { Vault } from '../../vault/index.ts';
 import { INTERRUPTED, settleBolt11 } from './bolt11.ts';
 import { settleChainSpend } from './chain.ts';
+import { countRestore, type PendingCount } from './restore.ts';
 
 export { settleBolt11, provenPreimage, RETRY_FOR_SECONDS, SETTLE_FAILED_AFTER_MS } from './bolt11.ts';
 
@@ -70,7 +71,8 @@ export class SpendRecovery {
     await this.#running;
   }
 
-  // One pass over every `unknown` intent that is due. Returns how many are still unknown.
+  // One pass over every `unknown` intent, and every node identity a restore left to count, that is due. Returns how
+  // many are still unresolved (intents plus restore counts).
   async resolvePass(): Promise<number> {
     const pending = await this.#db
       .selectFrom('spend_intents')
@@ -94,8 +96,38 @@ export class SpendRecovery {
       .where('state', '=', 'unknown')
       .orderBy('created_at')
       .execute();
+    // Every node identity needs a count after a recent restore, also one added since (the restored database did not
+    // know it): its missing row is created here, pending.
+    const since = new Date(this.#now().getTime() - 86_400_000).toISOString();
+    for (const restore of await this.#db
+      .selectFrom('restores')
+      .select(['id', 'recorded_at'])
+      .where('recorded_at', '>', since)
+      .execute())
+      for (const identity of await this.#db.selectFrom('nodes').select(['chain', 'pubkey']).distinct().execute())
+        await this.#db
+          .insertInto('restore_counts')
+          .values({
+            restore_id: restore.id,
+            chain: identity.chain,
+            pubkey: identity.pubkey,
+            state: 'pending',
+            counted_msat: null,
+            counted_at: null,
+            until: new Date(Date.parse(restore.recorded_at) + 86_400_000).toISOString(),
+          })
+          .onConflict((conflict) => conflict.doNothing())
+          .execute();
+    const counts = await this.#db
+      .selectFrom('restore_counts')
+      .innerJoin('restores', 'restores.id', 'restore_counts.restore_id')
+      .select(['restore_counts.restore_id', 'restore_counts.chain', 'restore_counts.pubkey', 'restores.recorded_at'])
+      .where('restore_counts.state', '=', 'pending')
+      .where('restore_counts.until', '>', this.#now().toISOString())
+      .execute();
+    const countKey = (c: PendingCount) => `restore:${c.restore_id}:${c.chain}:${c.pubkey}`;
     const wall = Date.now();
-    const known = new Set(pending.map((intent) => intent.id));
+    const known = new Set([...pending.map((intent) => intent.id), ...counts.map(countKey)]);
     for (const id of this.#backoff.keys()) if (!known.has(id)) this.#backoff.delete(id);
     let unresolved = 0;
     const byNode = new Map<string, typeof pending>();
@@ -107,8 +139,28 @@ export class SpendRecovery {
       }
       byNode.set(intent.node_id, [...(byNode.get(intent.node_id) ?? []), intent]);
     }
-    for (const [nodeId, intents] of byNode) {
+    // A restore count is read from any node record of that identity (one is enough).
+    const countsByNode = new Map<string, PendingCount[]>();
+    for (const count of counts) {
+      const due = this.#backoff.get(countKey(count));
+      const node = await this.#db
+        .selectFrom('nodes')
+        .select('id')
+        .where('chain', '=', count.chain)
+        .where('pubkey', '=', count.pubkey)
+        .orderBy('created_at')
+        .executeTakeFirst();
+      // No node of that identity any more: nothing can be spent there; the row expires with its window.
+      if ((due && due.next > wall) || !node) {
+        unresolved += 1;
+        continue;
+      }
+      countsByNode.set(node.id, [...(countsByNode.get(node.id) ?? []), count]);
+    }
+    for (const nodeId of new Set([...byNode.keys(), ...countsByNode.keys()])) {
       if (this.#stopped) break;
+      const intents = byNode.get(nodeId) ?? [];
+      const restores = countsByNode.get(nodeId) ?? [];
       let adapter;
       try {
         // Only a node confirmed on its chain is asked: a node record pointing at the same key on the other chain
@@ -133,7 +185,8 @@ export class SpendRecovery {
           code: err instanceof AdapterError || err instanceof AppError ? err.code : 'internal',
         });
         for (const intent of intents) this.#later(intent.id, wall);
-        unresolved += intents.length;
+        for (const count of restores) this.#later(countKey(count), wall);
+        unresolved += intents.length + restores.length;
         continue;
       }
       for (const intent of intents) {
@@ -163,6 +216,22 @@ export class SpendRecovery {
         } else {
           this.#backoff.delete(intent.id);
         }
+      }
+      // After the intents: an intent settled just now is in the window already and is not counted twice.
+      for (const count of restores) {
+        let state: 'counted' | 'unknown' = 'unknown';
+        try {
+          state = await countRestore(this.#db, adapter, count, this.#now(), this.#log);
+        } catch (err) {
+          this.#log.warn('spend restore: node history not readable', {
+            nodeId,
+            code: err instanceof AdapterError ? err.code : 'internal',
+          });
+        }
+        if (state === 'unknown') {
+          this.#later(countKey(count), wall);
+          unresolved += 1;
+        } else this.#backoff.delete(countKey(count));
       }
     }
     return unresolved;

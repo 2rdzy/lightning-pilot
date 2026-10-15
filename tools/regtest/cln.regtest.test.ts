@@ -2,6 +2,7 @@
 // jobs contract-blake2b and contract-sha256d. Run locally with: LP_REGTEST_CHAIN=blake2b pnpm test:regtest
 import { afterAll, describe, expect, it } from 'vitest';
 import { createClnAdapter } from '../../packages/adapter-cln/src/index.ts';
+import { ClnRestClient } from '../../packages/adapter-cln/src/client.ts';
 import { METHODS } from '../../packages/adapter-cln/src/methods.ts';
 import { adapterContract } from '../../packages/adapter-kit/src/contract.ts';
 import { checkChainIdentity, PROFILES } from '../../packages/chain/src/index.ts';
@@ -142,6 +143,39 @@ describe(`cln adapter on ${chain}: connection and credentials`, () => {
       definitive: true,
       nodeCode: 205,
     });
+  });
+});
+
+describe(`on-chain amounts without the bookkeeper on ${chain}`, () => {
+  it('works out the same amount from the wallet coins as the bookkeeper does', async () => {
+    // The same node, as if the bookkeeper plugin were disabled ("Unknown command").
+    const client = new ClnRestClient(connection);
+    const noBookkeeper = createClnAdapter({
+      ...connection,
+      viewRune: view.rune,
+      transport: {
+        call: async (command, params, options) => {
+          if (command === 'bkpr-listaccountevents')
+            throw new AdapterError({ code: 'node_error', sent: true, definitive: true, nodeCode: -32601 });
+          return client.call(command, params, options);
+        },
+      },
+    });
+    const all = async (a: typeof adapter) => {
+      const items = [];
+      let cursor: string | undefined;
+      do {
+        const page = await a.onchain.listTransactions({ limit: 100, ...(cursor === undefined ? {} : { cursor }) });
+        items.push(...page.items);
+        cursor = page.nextCursor;
+      } while (cursor !== undefined);
+      return items;
+    };
+    const booked = await all(adapter);
+    const counted = new Map((await all(noBookkeeper)).map((t) => [t.txid, t]));
+    const compared = booked.filter((t) => t.amount !== undefined);
+    expect(compared.length).toBeGreaterThan(0);
+    for (const tx of compared) expect(counted.get(tx.txid)?.amount, tx.txid).toEqual(tx.amount);
   });
 });
 

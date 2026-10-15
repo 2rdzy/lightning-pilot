@@ -4,6 +4,7 @@ import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { kyselyOf, openRaw, type Db, type Driver } from './storage/db.ts';
 import { migrate } from './storage/migrate.ts';
+import { consumeRestoreMarker } from './modules/restore/index.ts';
 import { createApp } from './http/app.ts';
 import type { Router } from './http/context.ts';
 import type { Logger } from './logging/logger.ts';
@@ -49,9 +50,14 @@ export async function buildServer(options: ServerOptions): Promise<Server> {
   const key = loadVaultKey(options.vaultKeyPath);
   mkdirSync(config.paths.dataDir, { recursive: true, mode: 0o700 });
   const raw = await openRaw(join(config.paths.dataDir, 'lightning-pilot.db'), options.driver);
-  const applied = migrate(raw);
+  const applied = migrate(raw, undefined, {
+    dir: join(config.paths.dataDir, 'backups'),
+    ...(options.now ? { now: options.now } : {}),
+  });
   if (applied.length > 0) logger.info('migrations applied', { count: applied.length });
   const db = kyselyOf(raw);
+  // Before any other module reads the database: a restore revokes sessions and pauses spending until reconciled.
+  await consumeRestoreMarker(db, config.paths.dataDir, logger, options.now);
   const vault = await Vault.start(db, key);
   key.fill(0);
 

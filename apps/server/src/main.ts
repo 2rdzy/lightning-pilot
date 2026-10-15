@@ -29,7 +29,7 @@ async function main(): Promise<void> {
   const logger = createLogger({ level: config.log.level, modules: config.log.modules });
   if (throttleReset) {
     const raw = await openRaw(join(config.paths.dataDir, 'lightning-pilot.db'));
-    migrate(raw);
+    migrate(raw, undefined, { dir: join(config.paths.dataDir, 'backups') });
     const db = kyselyOf(raw);
     try {
       await resetLoginThrottles(db, logger);

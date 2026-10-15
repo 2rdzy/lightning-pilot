@@ -1,7 +1,10 @@
 // On-chain history. `listtransactions` lists the wallet's transactions but has no amounts, fees or direction; the
 // bookkeeper plugin's account events have them (reference pass, B6). Per transaction: the wallet's deposits whose
 // outpoint is in it, minus the wallet's withdrawals it spends, give the net amount; `onchain_fee` events give the
-// fee; channel events tell opens and closes apart. Without the bookkeeper, the raw list comes back without amounts.
+// fee; channel events tell opens and closes apart. Without the bookkeeper, the wallet's own coins (listfunds with
+// spent ones) give the amount: our coins a transaction spends minus our coins it creates. That is exact for the wallet
+// (it is what left it, fee included); the fee itself is known only when every input is ours. Restore reconciliation
+// counts these amounts, so a missing one must never be guessed low.
 import {
   AdapterError,
   msat,
@@ -12,7 +15,7 @@ import {
   type PageRequest,
 } from '@lightning-pilot/core';
 import { checkOffsetPage, offsetPage, parse, type Call } from './context.ts';
-import { AccountEvents, GetInfo, ListTransactions } from './schemas.ts';
+import { AccountEvents, GetInfo, ListFunds, ListTransactions } from './schemas.ts';
 
 // "Unknown command": the bookkeeper plugin is not running.
 const UNKNOWN_COMMAND = -32601;
@@ -40,6 +43,8 @@ export async function listTransactions(call: Call, page: PageRequest | undefined
   } catch (err) {
     if (!(err instanceof AdapterError && err.nodeCode === UNKNOWN_COMMAND)) throw err;
   }
+
+  if (events === undefined) return offsetPage(fromCoins(transactions, tip, await coinsOf(call)), page);
 
   const facts = new Map<string, TxFacts>();
   const factsOf = (txid: string) => {
@@ -95,7 +100,59 @@ export async function listTransactions(call: Call, page: PageRequest | undefined
       kind,
     });
   }
+  // The bookkeeper books a transaction only once it is seen in a block: a just-broadcast send of ours has no events
+  // yet. Its amount comes from the wallet's coins instead, so a recent send is never without one.
+  const unbooked = transactions.filter((tx) => facts.get(tx.hash)?.booked === false);
+  if (unbooked.length > 0) {
+    const counted = new Map(fromCoins(unbooked, tip, await coinsOf(call)).map((t) => [t.txid as string, t]));
+    for (const [i, item] of items.entries()) {
+      const from = counted.get(item.txid);
+      if (from?.amount === undefined) continue;
+      items[i] = {
+        ...item,
+        amount: from.amount,
+        ...(item.fee === undefined && from.fee !== undefined ? { fee: from.fee } : {}),
+        ...(item.kind === 'other' ? { kind: from.kind } : {}),
+      };
+    }
+  }
   // Newest first: unconfirmed, then by height.
   items.sort((a, b) => (b.blockHeight ?? Infinity) - (a.blockHeight ?? Infinity) || a.txid.localeCompare(b.txid));
   return offsetPage(items, page);
+}
+
+// Every coin the wallet has had, spent ones included, by outpoint.
+async function coinsOf(call: Call): Promise<Map<string, bigint>> {
+  const { outputs } = parse(ListFunds, await call('listfunds', { spent: true }));
+  return new Map(outputs.map((o) => [`${o.txid}:${o.output}`, o.amount_msat]));
+}
+
+function fromCoins(
+  transactions: (typeof ListTransactions)['_output']['transactions'],
+  tip: number,
+  coins: Map<string, bigint>,
+): OnchainTx[] {
+  const items = transactions.map((tx): OnchainTx => {
+    const base = {
+      txid: parseTxid(tx.hash),
+      ...(tx.blockheight > 0 ? { blockHeight: tx.blockheight } : {}),
+      confirmations: tx.blockheight > 0 && tx.blockheight <= tip ? tip - tx.blockheight + 1 : 0,
+    };
+    // Without inputs and outputs (an older node) nothing can be said.
+    if (tx.inputs === undefined || tx.outputs === undefined) return { ...base, kind: 'other' };
+    const spent = tx.inputs.map((i) => coins.get(`${i.txid}:${i.index}`));
+    const debit = spent.reduce<bigint>((sum, v) => sum + (v ?? 0n), 0n);
+    const credit = tx.outputs.reduce<bigint>((sum, o) => sum + (coins.get(`${tx.hash}:${o.index}`) ?? 0n), 0n);
+    const net = credit - debit;
+    const allOurs = spent.length > 0 && spent.every((v) => v !== undefined);
+    const fee = allOurs ? debit - tx.outputs.reduce<bigint>((sum, o) => sum + o.amount_msat, 0n) : undefined;
+    return {
+      ...base,
+      amount: { direction: net >= 0n ? 'in' : 'out', value: msat(net >= 0n ? net : -net) },
+      ...(fee !== undefined && fee >= 0n ? { fee: msat(fee) } : {}),
+      kind: net > 0n ? 'receive' : net < 0n ? 'send' : 'other',
+    };
+  });
+  items.sort((a, b) => (b.blockHeight ?? Infinity) - (a.blockHeight ?? Infinity) || a.txid.localeCompare(b.txid));
+  return items;
 }

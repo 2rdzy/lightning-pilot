@@ -71,6 +71,22 @@ export interface DB {
     expires_at: string;
     used_at: string | null;
   };
+  restores: {
+    id: string;
+    marker_hash: string;
+    restored_at: string;
+    backup_file: string;
+    recorded_at: string;
+  };
+  restore_counts: {
+    restore_id: string;
+    chain: string;
+    pubkey: string;
+    state: string;
+    counted_msat: string | null;
+    counted_at: string | null;
+    until: string;
+  };
   spend_intents: {
     cost_msat: Generated<string | null>;
     destination: Generated<string | null>;

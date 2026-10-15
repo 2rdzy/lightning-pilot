@@ -218,11 +218,12 @@ export const METHODS = [
     feature: 'D3',
     capabilities: ['pay.keysend'],
   },
-  // The bookkeeper gives amounts and kinds; listtransactions alone has neither (raw list as a fallback).
+  // The bookkeeper gives amounts and kinds; without it the amount is worked out from the wallet's own coins
+  // (listfunds, spent ones included) against each transaction's inputs and outputs.
   {
     port: 'onchain',
     method: 'listTransactions',
-    nodeMethods: ['getinfo', 'listtransactions', 'bkpr-listaccountevents'],
+    nodeMethods: ['getinfo', 'listtransactions', 'bkpr-listaccountevents', 'listfunds'],
     credential: 'read',
     feature: 'B6',
   },

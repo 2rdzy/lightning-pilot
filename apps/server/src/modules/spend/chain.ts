@@ -42,13 +42,13 @@ import {
   sha256,
 } from './common.ts';
 import {
+  admissionBudget,
   checkBudget,
   loadPolicy,
   onchainFee,
   operationNeedsStepUp,
   reserveSpend,
   spendCost,
-  usedBudget,
   SPEND_SCOPE,
   type SpendOperation,
 } from './policy.ts';
@@ -237,7 +237,7 @@ export class ChainSpends {
     const maxFee = onchainMaxFee(amount, policy);
     const feeOverride = onchainFee(amount, maxFee, feeRate, policy);
     const cost = spendCost({ type: 'onchain', amount, maxFee });
-    const stepUp = checkBudget(policy, await usedBudget(this.#db, row, this.#now()), cost);
+    const stepUp = checkBudget(policy, await admissionBudget(this.#db, row, this.#now(), cost), cost);
     const payload: Payload = {
       type: 'onchain',
       chain: row.chain,
@@ -280,7 +280,7 @@ export class ChainSpends {
     const maxFee = onchainMaxFee(amount, policy);
     const feeOverride = onchainFee(amount, maxFee, feeRate, policy);
     const cost = spendCost({ type: 'channel-open', amount, push, maxFee });
-    const stepUp = checkBudget(policy, await usedBudget(this.#db, row, this.#now()), cost);
+    const stepUp = checkBudget(policy, await admissionBudget(this.#db, row, this.#now(), cost), cost);
     const payload: Payload = {
       type: 'channel-open',
       chain: row.chain,
@@ -337,7 +337,7 @@ export class ChainSpends {
       force: request.force,
     };
     const cost = spendCost(operation);
-    const stepUp = operationNeedsStepUp(operation, policy, await usedBudget(this.#db, row, this.#now()));
+    const stepUp = operationNeedsStepUp(operation, policy, await admissionBudget(this.#db, row, this.#now(), cost));
     const destination = closeTo?.address ?? `close:${channel.id}`;
     const payload: Payload = {
       type: 'channel-close',
