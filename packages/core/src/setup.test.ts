@@ -1,7 +1,7 @@
 import { bech32 } from '@scure/base';
 import { describe, expect, it } from 'vitest';
 import { LoginRequest, Password } from './api.ts';
-import { SetupAction, SetupAlerts, SetupLimits } from './setup.ts';
+import { SetupAction, SetupAlerts, SetupLimits, SetupProgress } from './setup.ts';
 
 describe('setup security input contracts', () => {
   it('accepts password length boundaries and rejects each missing character class', () => {
@@ -123,5 +123,51 @@ describe('setup security input contracts', () => {
     ])
       expect(LoginRequest.safeParse({ password: 'password', ...fields }).success).toBe(false);
     expect(LoginRequest.safeParse({ password: '' }).success).toBe(false);
+  });
+});
+
+describe('setup TLS certificate contract', () => {
+  const progress = {
+    step: 'password',
+    csrfToken: 'csrf',
+    expiresAt: '2026-10-15T01:00:00.000Z',
+    vaultKeyId: 'vault-key-id',
+  };
+  const certificate = {
+    fingerprintSha256: Array<string>(32).fill('AB').join(':'),
+    expiresAt: '2027-10-15T00:00:00.000Z',
+  };
+  it('accepts a TLS fingerprint and expiry without exposing private key material', () => {
+    expect(SetupProgress.parse({ ...progress, tlsCertificate: certificate }).tlsCertificate).toEqual(certificate);
+  });
+  it('preserves compatibility when TLS metadata is absent', () => {
+    expect(SetupProgress.parse(progress).tlsCertificate).toBeUndefined();
+  });
+  it('rejects malformed fingerprints and expiry values', () => {
+    for (const fingerprintSha256 of [
+      'AB',
+      'ab:'.repeat(31) + 'ab',
+      'AB'.repeat(32),
+      Array<string>(31).fill('AB').join(':'),
+      Array<string>(33).fill('AB').join(':'),
+      Array<string>(32).fill('GG').join(':'),
+    ])
+      expect(
+        SetupProgress.safeParse({ ...progress, tlsCertificate: { ...certificate, fingerprintSha256 } }).success,
+      ).toBe(false);
+    for (const expiresAt of ['tomorrow', '2027-13-15T00:00:00Z', '2027-10-15', '2027-10-15T00:00:00'])
+      expect(SetupProgress.safeParse({ ...progress, tlsCertificate: { ...certificate, expiresAt } }).success).toBe(
+        false,
+      );
+  });
+  it('rejects unknown nested secret fields and incomplete metadata', () => {
+    for (const tlsCertificate of [
+      { ...certificate, privateKey: 'secret' },
+      { ...certificate, token: 'secret' },
+      { fingerprintSha256: certificate.fingerprintSha256 },
+      { expiresAt: certificate.expiresAt },
+      null,
+    ])
+      expect(SetupProgress.safeParse({ ...progress, tlsCertificate }).success).toBe(false);
   });
 });
