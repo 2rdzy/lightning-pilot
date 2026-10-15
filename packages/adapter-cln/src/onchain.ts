@@ -100,6 +100,22 @@ export async function listTransactions(call: Call, page: PageRequest | undefined
       kind,
     });
   }
+  // The bookkeeper books a transaction only once it is seen in a block: a just-broadcast send of ours has no events
+  // yet. Its amount comes from the wallet's coins instead, so a recent send is never without one.
+  const unbooked = transactions.filter((tx) => facts.get(tx.hash)?.booked === false);
+  if (unbooked.length > 0) {
+    const counted = new Map(fromCoins(unbooked, tip, await coinsOf(call)).map((t) => [t.txid as string, t]));
+    for (const [i, item] of items.entries()) {
+      const from = counted.get(item.txid);
+      if (from?.amount === undefined) continue;
+      items[i] = {
+        ...item,
+        amount: from.amount,
+        ...(item.fee === undefined && from.fee !== undefined ? { fee: from.fee } : {}),
+        ...(item.kind === 'other' ? { kind: from.kind } : {}),
+      };
+    }
+  }
   // Newest first: unconfirmed, then by height.
   items.sort((a, b) => (b.blockHeight ?? Infinity) - (a.blockHeight ?? Infinity) || a.txid.localeCompare(b.txid));
   return offsetPage(items, page);

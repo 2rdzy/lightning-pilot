@@ -139,15 +139,23 @@ describe('on-chain history', () => {
   it('builds amounts, fees and kinds from the bookkeeper, newest first', async () => {
     const { adapter: a } = adapter({
       getinfo: getinfo({ blockheight: 125 }),
-      listtransactions: transactions,
+      listtransactions: {
+        transactions: transactions.transactions.map((t) =>
+          t.hash === UNCONFIRMED
+            ? { ...t, inputs: [{ txid: FOREIGN, index: 7 }], outputs: [{ index: 0, amount_msat: 1n }] }
+            : t,
+        ),
+      },
       'bkpr-listaccountevents': events,
+      // Asked only for the transaction the bookkeeper has not booked yet (unconfirmed).
+      listfunds: { outputs: [{ txid: FOREIGN, output: 7, amount_msat: 7000n, status: 'spent' }] },
     });
     const page = await a.onchain.listTransactions();
     expect(
       page.items.map((t) => [t.txid, t.kind, t.amount?.direction, t.amount?.value, t.fee, t.confirmations]),
     ).toEqual([
       [CLOSE, 'channel-close', 'in', 199000000n, undefined, 0],
-      [UNCONFIRMED, 'other', undefined, undefined, undefined, 0],
+      [UNCONFIRMED, 'send', 'out', 7000n, 6999n, 0],
       [SEND, 'send', 'out', 101000000n, 1000000n, 6],
       [OPEN, 'channel-open', 'out', 201000000n, 1000000n, 16],
       [DEPOSIT, 'receive', 'in', 500000000n, undefined, 26],
