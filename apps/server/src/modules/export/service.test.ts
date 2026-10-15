@@ -180,7 +180,8 @@ async function envelope(data: unknown) {
 }
 const exportRequest = { passphrase: PASS, passphraseConfirmation: PASS };
 
-describe('encrypted export lifecycle', () => {
+// Production-cost KDF work must tolerate shared CI CPU contention on either SQLite driver.
+describe('encrypted export lifecycle', { timeout: 30000 }, () => {
   it('imports public settings, reloads session deadlines and accepts semantically equal settings', async () => {
     const h = await harness();
     await h.db.deleteFrom('settings').where('key', 'in', ['session_policy', 'setup_alerts']).execute();
@@ -595,8 +596,6 @@ describe('encrypted export lifecycle', () => {
       }).toEqual(before);
       expect(await h.db.selectFrom('nodes').selectAll().execute()).toHaveLength(1);
     },
-    // Two encrypted imports use four production-cost KDF calls, which can exceed 5s on shared CI runners.
-    30000,
   );
   it('preserves all resolved states and converts every uncertain in-flight state to unknown', async () => {
     const h = await harness();
