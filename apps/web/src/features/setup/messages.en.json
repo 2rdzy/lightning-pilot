@@ -16,6 +16,8 @@
   "setup.recoveryHint": "Save these ten one-time codes. They are shown only once.",
   "setup.recoveryCode": "Type one recovery code you saved",
   "setup.download": "Download recovery codes",
+  "setup.tlsFingerprint": "Server certificate SHA-256 fingerprint",
+  "setup.tlsExpiry": "Certificate expires:",
   "setup.backupHint": "Back up the vault key file separately from your database. The key itself is never displayed.",
   "setup.backup": "I have backed up the vault key file",
   "setup.backupRequired": "Confirm that you backed up the key file.",

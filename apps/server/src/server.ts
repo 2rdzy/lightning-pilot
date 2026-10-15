@@ -1,5 +1,7 @@
 // Wiring: open the database, run migrations, check the vault key, build the services and the app. Used by main.ts
 // and by the end-to-end tests, so both start the server the same way.
+import type { SetupProgress } from '@lightning-pilot/core';
+import { Housekeeping } from './modules/jobs/index.ts';
 import { EventBus, EventStreams, EventWorkers } from './modules/events/index.ts';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
@@ -30,6 +32,7 @@ export interface ServerOptions {
   // Chain identity polling interval (ms); tests set it short.
   identityIntervalMs?: number;
   issueSetupToken?: boolean;
+  tlsCertificate?: SetupProgress['tlsCertificate'];
   eventIntervalMs?: number;
   eventHeartbeatMs?: number;
   eventRetryMs?: number;
@@ -45,6 +48,7 @@ export interface Server {
   setup: SetupService;
   // Resolves interrupted spends against their nodes; start it once the listener is open (main.ts).
   recovery: SpendRecovery;
+  jobs: Housekeeping;
   events: { bus: EventBus; streams: EventStreams; workers: EventWorkers };
   close(): Promise<void>;
 }
@@ -63,8 +67,15 @@ export async function buildServer(options: ServerOptions): Promise<Server> {
   const db = kyselyOf(raw);
   // Before any other module reads the database: a restore revokes sessions and pauses spending until reconciled.
   await consumeRestoreMarker(db, config.paths.dataDir, logger, options.now);
-  const vault = await Vault.start(db, key);
-  key.fill(0);
+  let vault: Vault;
+  try {
+    vault = await Vault.start(db, key);
+  } catch (err) {
+    await db.destroy();
+    throw err;
+  } finally {
+    key.fill(0);
+  }
 
   const port = config.server.port === 443 ? '' : `:${config.server.port}`;
   const scheme = config.tls.mode === 'off' ? 'http' : 'https';
@@ -79,6 +90,9 @@ export async function buildServer(options: ServerOptions): Promise<Server> {
     ...(options.scryptCost ? { scryptCost: options.scryptCost } : {}),
     ...(options.now ? { now: options.now } : {}),
   });
+  const jobs = new Housekeeping({ db, auth, logger, ...(options.now ? { now: options.now } : {}) });
+  await jobs.run();
+  jobs.start();
   const bus = new EventBus(options.now);
   const nodes = new NodesService({
     onIdentityUpdate: (update) => {
@@ -125,6 +139,7 @@ export async function buildServer(options: ServerOptions): Promise<Server> {
   });
   const events = { bus, streams, workers };
   const setup = new SetupService({
+    ...(options.tlsCertificate ? { tlsCertificate: options.tlsCertificate } : {}),
     db,
     vault,
     auth,
@@ -149,6 +164,7 @@ export async function buildServer(options: ServerOptions): Promise<Server> {
   logger.info('vault opened', { keyId: vault.keyId, initialised: vault.initialised });
   if (options.issueSetupToken !== false) await auth.issueSetupToken();
   const close = async () => {
+    await jobs.stop();
     await streams.stop();
     await workers.stop();
     await recovery.stop();
@@ -160,5 +176,5 @@ export async function buildServer(options: ServerOptions): Promise<Server> {
     await db.destroy();
     vault.close();
   };
-  return { app, db, auth, nodes, setup, recovery, events, close };
+  return { app, db, auth, nodes, setup, recovery, jobs, events, close };
 }

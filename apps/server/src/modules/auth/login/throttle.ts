@@ -118,6 +118,18 @@ export class LoginThrottle {
     await db.deleteFrom('login_throttles').where('kind', '=', 'global').where('next_allowed_at', '<=', now).execute();
   }
 
+  async prune(db: Db): Promise<number> {
+    const before = await db
+      .selectFrom('login_throttles')
+      .select(db.fn.count<number>('counter').as('count'))
+      .executeTakeFirstOrThrow();
+    await this.#prune(db, this.#now().getTime());
+    const after = await db
+      .selectFrom('login_throttles')
+      .select(db.fn.count<number>('counter').as('count'))
+      .executeTakeFirstOrThrow();
+    return before.count - after.count;
+  }
   // One failure on one counter: the doubling delay, decayed after a day without failures.
   async #record(db: Db, counter: string, kind: string, now: number): Promise<void> {
     const row = await db.selectFrom('login_throttles').selectAll().where('counter', '=', counter).executeTakeFirst();

@@ -142,6 +142,10 @@ export class AuthService {
     return service;
   }
 
+  pruneThrottles(db: Db): Promise<number> {
+    return this.#login.prune(db);
+  }
+
   get setupMode(): boolean {
     return !this.#ownerExists;
   }

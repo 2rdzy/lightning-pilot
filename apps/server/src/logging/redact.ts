@@ -9,6 +9,15 @@ export const REDACTED = '[redacted]';
 
 const DENY = [
   'password',
+  'totp',
+  'sessionid',
+  'session_id',
+  'confirmation',
+  'recoverycode',
+  'recovery_code',
+  'csrf',
+  'body',
+  'query',
   'secret',
   'token',
   'rune',
@@ -49,13 +58,14 @@ const denied = (name: string) => !ALLOWED_NAMES.has(name) && DENY.some((d) => na
 export function redact(value: unknown, name = '', depth = 0): unknown {
   if (depth > 8) return REDACTED;
   const typed = TYPED[name];
-  if (typed !== undefined) return typeof value === 'string' && typed.test(value) ? value : REDACTED;
+  if (typed !== undefined && depth === 1) return typeof value === 'string' && typed.test(value) ? value : REDACTED;
   if (name !== '' && denied(name)) return REDACTED;
   if (typeof value === 'string') return redactString(value);
   if (typeof value === 'bigint') return value.toString();
   if (value instanceof Error) {
     return { name: value.name, message: redactString(value.message), stack: redactString(value.stack ?? '') };
   }
+  if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer) return REDACTED;
   if (Array.isArray(value)) return value.map((v) => redact(v, '', depth + 1));
   if (value !== null && typeof value === 'object') {
     return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, redact(v, k, depth + 1)]));

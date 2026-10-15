@@ -63,15 +63,6 @@ export interface DB {
     created_at: string;
   };
   credentials: { node_id: string; kind: string; key_id: string; nonce: Uint8Array; ciphertext: Uint8Array };
-  spend_confirmations: {
-    token_hash: string;
-    session_handle: string;
-    node_id: string;
-    digest: string;
-    payload: string;
-    expires_at: string;
-    used_at: string | null;
-  };
   restores: {
     id: string;
     marker_hash: string;
