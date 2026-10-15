@@ -175,6 +175,7 @@ const listener = listen(app, config, logger);
 server.nodes.monitor.start();
 // Interrupted spends are read from their nodes in the background.
 server.recovery.start();
+server.events.workers.start();
 logger.info('development server ready', {
   url: `http://localhost:${await listener.port}`,
   nodes: values.nodes,
@@ -182,11 +183,15 @@ logger.info('development server ready', {
 });
 
 const stop = () => {
-  void Promise.all([listener.close(), server.close()]).finally(() => {
-    release();
-    if (temporary) rmSync(dataDir, { recursive: true, force: true });
-    process.exit(0);
-  });
+  void server.events.streams
+    .stop()
+    .then(() => listener.close())
+    .then(() => server.close())
+    .finally(() => {
+      release();
+      if (temporary) rmSync(dataDir, { recursive: true, force: true });
+      process.exit(0);
+    });
 };
 process.on('SIGTERM', stop);
 process.on('SIGINT', stop);

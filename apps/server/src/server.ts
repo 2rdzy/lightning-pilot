@@ -1,5 +1,6 @@
 // Wiring: open the database, run migrations, check the vault key, build the services and the app. Used by main.ts
 // and by the end-to-end tests, so both start the server the same way.
+import { EventBus, EventStreams, EventWorkers } from './modules/events/index.ts';
 import { mkdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { kyselyOf, openRaw, type Db, type Driver } from './storage/db.ts';
@@ -29,6 +30,9 @@ export interface ServerOptions {
   // Chain identity polling interval (ms); tests set it short.
   identityIntervalMs?: number;
   issueSetupToken?: boolean;
+  eventIntervalMs?: number;
+  eventHeartbeatMs?: number;
+  eventRetryMs?: number;
   // Trusted listener property for the future separate onion listener, never read from a client header.
   loginTransport?: 'direct' | 'tor';
 }
@@ -41,6 +45,7 @@ export interface Server {
   setup: SetupService;
   // Resolves interrupted spends against their nodes; start it once the listener is open (main.ts).
   recovery: SpendRecovery;
+  events: { bus: EventBus; streams: EventStreams; workers: EventWorkers };
   close(): Promise<void>;
 }
 
@@ -74,7 +79,11 @@ export async function buildServer(options: ServerOptions): Promise<Server> {
     ...(options.scryptCost ? { scryptCost: options.scryptCost } : {}),
     ...(options.now ? { now: options.now } : {}),
   });
+  const bus = new EventBus(options.now);
   const nodes = new NodesService({
+    onIdentityUpdate: (update) => {
+      bus.publish('chain_identity.updated', update.state, update.node);
+    },
     db,
     vault,
     logger,
@@ -104,6 +113,17 @@ export async function buildServer(options: ServerOptions): Promise<Server> {
   // Before any request: intents a stopped process left reserved may have reached the node (spend policy §4).
   const recovery = new SpendRecovery({ db, nodes, vault, logger, ...(options.now ? { now: options.now } : {}) });
   await recovery.markUnresolved();
+  const streams = new EventStreams(auth, bus, options.eventHeartbeatMs);
+  const workers = new EventWorkers({
+    db,
+    nodes,
+    bus,
+    logger: logger.child('events'),
+    wakeRecovery: (id, hash) => recovery.wake(id, hash),
+    ...(options.eventIntervalMs === undefined ? {} : { intervalMs: options.eventIntervalMs }),
+    ...(options.eventRetryMs === undefined ? {} : { retryMs: options.eventRetryMs }),
+  });
+  const events = { bus, streams, workers };
   const setup = new SetupService({
     db,
     vault,
@@ -114,6 +134,7 @@ export async function buildServer(options: ServerOptions): Promise<Server> {
     ...(options.now ? { now: options.now } : {}),
   });
   const app = createApp({
+    streams,
     setup,
     auth,
     nodes,
@@ -128,6 +149,8 @@ export async function buildServer(options: ServerOptions): Promise<Server> {
   logger.info('vault opened', { keyId: vault.keyId, initialised: vault.initialised });
   if (options.issueSetupToken !== false) await auth.issueSetupToken();
   const close = async () => {
+    await streams.stop();
+    await workers.stop();
     await recovery.stop();
     spend.close();
     chainSpends.close();
@@ -137,5 +160,5 @@ export async function buildServer(options: ServerOptions): Promise<Server> {
     await db.destroy();
     vault.close();
   };
-  return { app, db, auth, nodes, setup, recovery, close };
+  return { app, db, auth, nodes, setup, recovery, events, close };
 }

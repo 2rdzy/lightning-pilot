@@ -3,6 +3,7 @@
 // CSRF token for live sessions) → validation.
 // Errors always have one format: { error: { code, message, details?, requestId } }. With a web root, GET requests
 // outside /api are answered with the web app's files (and its index.html for app routes, which use history routing).
+import { eventsRoutes, type EventStreams } from '../modules/events/index.ts';
 import { randomBytes } from 'node:crypto';
 import { Http2ServerRequest } from 'node:http2';
 import { join } from 'node:path';
@@ -24,6 +25,7 @@ import type { AppEnv, Router } from './context.ts';
 import { declare } from './declare.ts';
 
 export interface AppDeps {
+  streams: EventStreams;
   setup: SetupService;
   auth: AuthService;
   nodes: NodesService;
@@ -211,6 +213,7 @@ export function createApp(deps: AppDeps): Router {
     }),
     (c) => c.json(HealthResponse.parse({ status: 'ok' }), 200),
   );
+  eventsRoutes(app, guard, deps.streams);
   authRoutes(app, guard, deps.auth, deps.loginTransport ?? 'direct');
   setupRoutes(app, guard, deps.setup, deps.loginTransport ?? 'direct');
   sessionsRoutes(app, guard, deps.auth);

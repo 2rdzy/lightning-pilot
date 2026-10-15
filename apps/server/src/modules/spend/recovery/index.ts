@@ -36,6 +36,8 @@ export class SpendRecovery {
   #timer: ReturnType<typeof setTimeout> | undefined;
   #running: Promise<void> | undefined;
   #stopped = false;
+  #pass: Promise<number> | undefined;
+  #wakes = new Map<string, Set<string> | null>();
 
   constructor(options: RecoveryOptions) {
     this.#db = options.db;
@@ -69,11 +71,34 @@ export class SpendRecovery {
     if (this.#timer !== undefined) clearTimeout(this.#timer);
     this.#timer = undefined;
     await this.#running;
+    await this.#pass;
   }
 
-  // One pass over every `unknown` intent, and every node identity a restore left to count, that is due. Returns how
-  // many are still unresolved (intents plus restore counts).
-  async resolvePass(): Promise<number> {
+  // Events only expedite authoritative reads. Multipart status never settles an intent here.
+  wake(nodeId: string, paymentHash?: string): void {
+    if (this.#stopped) return;
+    if (paymentHash === undefined) this.#wakes.set(nodeId, null);
+    else if (this.#wakes.get(nodeId) !== null) {
+      const hashes = this.#wakes.get(nodeId) ?? new Set<string>();
+      hashes.add(paymentHash);
+      this.#wakes.set(nodeId, hashes.size > 1000 ? null : hashes);
+    }
+    if (!this.#running && !this.#pass) this.#schedule(0);
+  }
+
+  // One pass over due unknown intents and pending restore counts; concurrent callers share its result.
+  resolvePass(): Promise<number> {
+    if (this.#pass) return this.#pass;
+    this.#pass = this.#resolvePass().finally(() => {
+      this.#pass = undefined;
+      if (this.#wakes.size > 0 && !this.#running && !this.#stopped) this.#schedule(0);
+    });
+    return this.#pass;
+  }
+
+  async #resolvePass(): Promise<number> {
+    const wakes = this.#wakes;
+    this.#wakes = new Map();
     const pending = await this.#db
       .selectFrom('spend_intents')
       .select([
@@ -133,7 +158,11 @@ export class SpendRecovery {
     const byNode = new Map<string, typeof pending>();
     for (const intent of pending) {
       const due = this.#backoff.get(intent.id);
-      if (due && due.next > wall) {
+      const wake = wakes.get(intent.node_id);
+      const expedited =
+        wakes.has(intent.node_id) &&
+        (wake === null || (intent.payment_hash !== null && wake?.has(intent.payment_hash)));
+      if (due && due.next > wall && !expedited) {
         unresolved += 1;
         continue;
       }
@@ -151,7 +180,7 @@ export class SpendRecovery {
         .orderBy('created_at')
         .executeTakeFirst();
       // No node of that identity any more: nothing can be spent there; the row expires with its window.
-      if ((due && due.next > wall) || !node) {
+      if (!node || (due && due.next > wall && wakes.get(node.id) !== null)) {
         unresolved += 1;
         continue;
       }
@@ -244,6 +273,7 @@ export class SpendRecovery {
 
   #schedule(ms: number): void {
     if (this.#stopped) return;
+    if (this.#timer !== undefined) clearTimeout(this.#timer);
     this.#timer = setTimeout(() => {
       this.#timer = undefined;
       this.#running = this.resolvePass()
@@ -254,7 +284,7 @@ export class SpendRecovery {
           this.#running = undefined;
           const next = Math.min(...[...this.#backoff.values()].map((b) => b.next), Date.now() + MAX_RETRY_MS);
           // Intents that become unknown at run time (an unclear node answer) are picked up by the next pass.
-          this.#schedule(Math.max(Math.min(next - Date.now(), FIRST_RETRY_MS), 1000));
+          this.#schedule(this.#wakes.size > 0 ? 0 : Math.max(Math.min(next - Date.now(), FIRST_RETRY_MS), 1000));
         });
     }, ms);
     this.#timer.unref();

@@ -1,0 +1,4 @@
+CREATE TABLE event_cursors (
+    node_id TEXT PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+    cursor TEXT NOT NULL
+) STRICT;
