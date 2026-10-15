@@ -1,3 +1,4 @@
+import { ExportScreen } from '../features/export/ExportScreen.tsx';
 // Routes (style guide §7): history routing, node-scoped paths /n/:node/..., search params validated, deep links
 // never act by themselves. WP02 has the walking-skeleton screens; the full route map comes with the screen WPs.
 import { QueryClient } from '@tanstack/react-query';
@@ -95,6 +96,8 @@ const authRoute = createRoute({
   component: Outlet,
 });
 
+const exportRoute = createRoute({ getParentRoute: () => authRoute, path: '/settings/export', component: ExportScreen });
+
 const indexRoute = createRoute({
   getParentRoute: () => authRoute,
   path: '/',
@@ -150,7 +153,7 @@ const routeTree = rootRoute.addChildren([
   setupRoute,
   loginRoute,
   recoveryRoute,
-  authRoute.addChildren([indexRoute, nodeRoute.addChildren([dashboardRoute, receiveRoute, payRoute])]),
+  authRoute.addChildren([exportRoute, indexRoute, nodeRoute.addChildren([dashboardRoute, receiveRoute, payRoute])]),
 ]);
 
 export function createAppRouter(context: RouterContext) {

@@ -72,6 +72,15 @@ export class SessionsService {
     if (setting) this.#applyPolicy(SessionPolicy.parse(JSON.parse(setting.value)));
   }
 
+  async reloadPolicy(): Promise<void> {
+    await this.loadPolicy();
+    const rows = await this.#db.selectFrom('sessions').selectAll().where('ended_at', 'is', null).execute();
+    for (const row of rows) {
+      if (this.#now().getTime() >= this.deadline(row)) await this.end(row.handle, 'expired');
+      else this.#schedule(row);
+    }
+  }
+
   #applyPolicy(policy: { idleSeconds: number; absoluteSeconds: number }): void {
     this.#idle = policy.idleSeconds * 1000;
     this.#absolute = policy.absoluteSeconds * 1000;

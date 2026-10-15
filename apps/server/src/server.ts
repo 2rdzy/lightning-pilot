@@ -1,3 +1,4 @@
+import { ExportService } from './modules/export/index.ts';
 // Wiring: open the database, run migrations, check the vault key, build the services and the app. Used by main.ts
 // and by the end-to-end tests, so both start the server the same way.
 import type { SetupProgress } from '@lightning-pilot/core';
@@ -41,6 +42,7 @@ export interface ServerOptions {
 }
 
 export interface Server {
+  exports: ExportService;
   app: Router;
   db: Db;
   auth: AuthService;
@@ -148,7 +150,20 @@ export async function buildServer(options: ServerOptions): Promise<Server> {
     ...(options.scryptCost ? { scryptCost: options.scryptCost } : {}),
     ...(options.now ? { now: options.now } : {}),
   });
+  const exports = new ExportService({
+    db,
+    vault,
+    auth,
+    logger,
+    dev: options.dev,
+    maxNodes: config.limits.maxNodes,
+    ...(options.now ? { now: options.now } : {}),
+    onImported: (ids) => {
+      for (const id of ids) recovery.wake(id);
+    },
+  });
   const app = createApp({
+    exports,
     streams,
     setup,
     auth,
@@ -164,6 +179,7 @@ export async function buildServer(options: ServerOptions): Promise<Server> {
   logger.info('vault opened', { keyId: vault.keyId, initialised: vault.initialised });
   if (options.issueSetupToken !== false) await auth.issueSetupToken();
   const close = async () => {
+    await exports.close();
     await jobs.stop();
     await streams.stop();
     await workers.stop();
@@ -176,5 +192,5 @@ export async function buildServer(options: ServerOptions): Promise<Server> {
     await db.destroy();
     vault.close();
   };
-  return { app, db, auth, nodes, setup, recovery, jobs, events, close };
+  return { app, db, auth, nodes, setup, recovery, jobs, events, exports, close };
 }

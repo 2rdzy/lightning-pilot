@@ -1,0 +1,23 @@
+{
+  "export.title": "Export and import",
+  "export.back": "Back to home",
+  "export.authorize": "Re-authenticate",
+  "export.password": "Account password",
+  "export.totp": "Authenticator code",
+  "export.cancel": "Cancel",
+  "export.grant": "Confirm identity",
+  "export.authorized": "Identity confirmed. You can export or import for five minutes.",
+  "export.passphrase": "Export passphrase",
+  "export.confirmation": "Confirm export passphrase",
+  "export.include": "Include verified view credentials",
+  "export.download": "Download encrypted export",
+  "export.file": "Encrypted export file",
+  "export.import": "Import new records",
+  "export.notice": "Use a strong passphrase of 12\u2013128 characters. Losing it loses access to the export; keep it separately. Import into a fully set-up account. Existing records or different settings cause the whole import to be refused.",
+  "export.safety": "Spend credentials and vault keys are never exported. Stop using the source instance before spending from its replacement. Imported nodes need credentials, fresh chain checks and spending reconciliation. Unresolved on-chain spends may need manual node inspection because PSBTs are excluded.",
+  "export.invalidFile": "Select a valid export file no larger than 6 MiB.",
+  "export.failed": "The operation could not be confirmed. Check the file, passphrase and destination conflicts. If the reply was lost, check destination data before retrying.",
+  "export.success": "Import completed. Imported nodes need fresh checks and spend credentials.",
+  "export.ready": "Encrypted export downloaded.",
+  "export.pending": "Working\u2026"
+}

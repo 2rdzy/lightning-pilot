@@ -1,3 +1,4 @@
+import { exportRequestGuard, exportRoutes, type ExportService } from '../modules/export/index.ts';
 // The HTTP app. Every response gets the security headers (and no-store under /api). Every request passes, in order:
 // Host allowlist (421) → Origin check on unsafe methods → body limit → the route's declared permission (with the
 // CSRF token for live sessions) → validation.
@@ -25,6 +26,7 @@ import type { AppEnv, Router } from './context.ts';
 import { declare } from './declare.ts';
 
 export interface AppDeps {
+  exports: ExportService;
   streams: EventStreams;
   setup: SetupService;
   auth: AuthService;
@@ -72,8 +74,10 @@ export function createApp(deps: AppDeps): Router {
   const allowed = new Set(deps.hosts.map(hostName));
   const app: Router = new OpenAPIHono<AppEnv>({
     // Validation errors: say which field and why (zod's messages hold no secrets), never echo the value.
-    defaultHook: (result) => {
+    defaultHook: (result, c) => {
       if (!result.success) {
+        if (['/api/v1/export', '/api/v1/export/import'].includes(c.req.path))
+          throw new AppError('validation_failed', 'The export request is not valid.');
         const details = result.error.issues.map((i) => ({ path: i.path.join('.'), message: i.message }));
         throw new AppError('validation_failed', 'The request is not valid.', details);
       }
@@ -151,14 +155,19 @@ export function createApp(deps: AppDeps): Router {
     await next();
   });
 
+  app.use(exportRequestGuard(deps.auth, deps.exports));
+
   // 3. Body limit.
-  app.use(
-    bodyLimit({
-      maxSize: deps.bodyLimitBytes ?? DEFAULT_BODY_LIMIT,
-      onError: () => {
-        throw new AppError('body_too_large', 'The request body is too large.');
-      },
-    }),
+  const ordinaryBodyLimit = bodyLimit({
+    maxSize: deps.bodyLimitBytes ?? DEFAULT_BODY_LIMIT,
+    onError: () => {
+      throw new AppError('body_too_large', 'The request body is too large.');
+    },
+  });
+  app.use((c, next) =>
+    c.req.method === 'POST' && ['/api/v1/export', '/api/v1/export/import'].includes(c.req.path)
+      ? next()
+      : ordinaryBodyLimit(c, next),
   );
 
   if (deps.webRoot) app.use(webApp(deps.webRoot));
@@ -213,6 +222,7 @@ export function createApp(deps: AppDeps): Router {
     }),
     (c) => c.json(HealthResponse.parse({ status: 'ok' }), 200),
   );
+  exportRoutes(app, guard, deps.exports);
   eventsRoutes(app, guard, deps.streams);
   authRoutes(app, guard, deps.auth, deps.loginTransport ?? 'direct');
   setupRoutes(app, guard, deps.setup, deps.loginTransport ?? 'direct');

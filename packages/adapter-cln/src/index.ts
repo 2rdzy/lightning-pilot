@@ -3,3 +3,4 @@ export { createClnAdapter, type ClnAdapter, type ClnAdapterOptions } from './ada
 export { METHODS } from './methods.ts';
 export { runeRestrictions } from './rune.ts';
 export type { Transport } from './context.ts';
+export { isExportableViewRune } from './export-rune.ts';

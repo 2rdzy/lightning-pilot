@@ -9,6 +9,10 @@ export const REDACTED = '[redacted]';
 
 const DENY = [
   'password',
+  'passphrase',
+  'envelope',
+  'payload',
+  'ciphertext',
   'totp',
   'sessionid',
   'session_id',
