@@ -1,3 +1,4 @@
+import { testRune } from '../../testing.ts';
 import { randomBytes } from 'node:crypto';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { FakeAdapter } from '@lightning-pilot/adapter-kit';
@@ -91,8 +92,8 @@ const nodeBody = {
   implementation: 'cln',
   url: 'https://localhost:9999',
   caCertificate: CA,
-  viewRune: 'session-api-view-canary',
-  spendRune: 'session-api-spend-canary',
+  viewRune: testRune('read'),
+  spendRune: testRune('spend'),
 };
 const securityRoutes = [
   ['GET', '/api/v1/auth/devices', undefined],
@@ -477,8 +478,8 @@ describe('session HTTP and security-settings boundaries', () => {
     const logs = h.logs.filter((line) => !line.includes('"setupToken"')).join('\n');
     for (const secret of [PASSWORD, h.enrolled.secret, h.auth.cookieValue, h.auth.csrf])
       expect(logs).not.toContain(secret);
-    expect(logs).not.toContain('session-api-view-canary');
-    expect(logs).not.toContain('session-api-spend-canary');
+    expect(logs).not.toContain(testRune('read'));
+    expect(logs).not.toContain(testRune('spend'));
   });
   it('uses an enrolled factor and live session during step-up; missing factor fails closed', async () => {
     const h = await harness();

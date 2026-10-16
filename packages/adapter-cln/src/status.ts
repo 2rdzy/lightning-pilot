@@ -36,7 +36,9 @@ export async function getStatus(context: StatusContext): Promise<NodeStatus> {
     return {
       reachable,
       ...(lastSeen.at === undefined ? {} : { lastSeenAt: lastSeen.at }),
-      credential: spendRune === undefined ? 'missing' : 'ok',
+      credential: spendRune === undefined ? 'missing' : 'unknown',
+      spendCredential: spendRune === undefined ? 'missing' : 'unknown',
+      viewCredential: err.code === 'node_credential_revoked' ? 'revoked' : 'unknown',
       accessLevel: 'read-only',
       capabilities: [],
     };
@@ -48,7 +50,7 @@ export async function getStatus(context: StatusContext): Promise<NodeStatus> {
     try {
       return parse(CheckRune, await call('checkrune', { rune, method, ...(params ? { params } : {}) })).valid;
     } catch (err) {
-      if (err instanceof AdapterError && err.nodeCode === RUNE_REFUSED) return false;
+      if (err instanceof AdapterError && [1501, RUNE_REFUSED, 1503].includes(err.nodeCode ?? 0)) return false;
       throw err;
     }
   };
@@ -80,7 +82,15 @@ export async function getStatus(context: StatusContext): Promise<NodeStatus> {
     else if (FULL_MANAGEMENT.every((m) => extra.get(m))) accessLevel = 'full';
     else accessLevel = 'standard';
   }
-  return { reachable: true, lastSeenAt: lastSeen.at, credential, accessLevel, capabilities };
+  return {
+    reachable: true,
+    lastSeenAt: lastSeen.at,
+    credential,
+    viewCredential: 'ok',
+    spendCredential: credential,
+    accessLevel,
+    capabilities,
+  };
 }
 
 async function bookkeeperActive(call: Call): Promise<boolean> {

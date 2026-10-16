@@ -82,6 +82,7 @@ import {
   type OfferRow as OfferRowType,
   type SendPayRow,
 } from './schemas.ts';
+import { CheckRune } from './schemas.ts';
 import { getStatus } from './status.ts';
 
 export interface ClnAdapterOptions {
@@ -336,6 +337,20 @@ export function createClnAdapter(options: ClnAdapterOptions) {
           numInactiveChannels: reply.num_inactive_channels,
           features: reply.our_features.init,
         };
+      },
+      checkRune: async (rune: string, method: string, params?: Record<string, string>) => {
+        try {
+          const result = await call('checkrune', { rune, method, ...(params ? { params } : {}) });
+          return parse(CheckRune, result).valid;
+        } catch (error) {
+          if (
+            error instanceof AdapterError &&
+            error.code === 'node_error' &&
+            [1501, 1502, 1503].includes(error.nodeCode ?? 0)
+          )
+            return false;
+          throw error;
+        }
       },
       getStatus: () => getStatus({ call, viewRune: options.viewRune, spendRune: options.spendRune, lastSeen }),
     },

@@ -1,3 +1,4 @@
+import { testRune } from '../../apps/server/src/testing.ts';
 // Development server: the real server (buildServer) in development mode over plain HTTP on loopback, with nodes
 // already added, so the web app can be worked on and tested end to end. Never part of a release: it lives in
 // tools/, which the server may not import, and the production entry (apps/server/src/main.ts) knows nothing of it.
@@ -81,8 +82,8 @@ const fakeNode = (name: string, chain: Chain): DevNode => ({
   url: `https://${name}.fake.invalid`,
   caCertificate: FAKE_CA,
   serverName: 'localhost',
-  viewRune: `fake-view-${name}`,
-  spendRune: `fake-spend-${name}`,
+  viewRune: testRune('read'),
+  spendRune: testRune('spend'),
 });
 
 let nodes: DevNode[];

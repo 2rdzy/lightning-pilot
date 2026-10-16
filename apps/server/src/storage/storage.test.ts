@@ -165,7 +165,7 @@ describe(`storage (${testDriver()})`, () => {
     unlinkSync(join(dir, name));
     const raw = await freshRaw();
     migrate(raw, dir);
-    raw.exec(`INSERT INTO nodes VALUES ('n1', 'node', 'blake2b', 'regtest', 'cln', 'https://n', 'ca', 'n', '02aa',
+    raw.exec(`INSERT INTO nodes (id, name, chain, network, implementation, url, ca_certificate, server_name, pubkey, identity_state, identity_failed_check, identity_detail, identity_checked_at, created_at) VALUES ('n1', 'node', 'blake2b', 'regtest', 'cln', 'https://n', 'ca', 'n', '02aa',
       'confirmed', NULL, NULL, 't', 't')`);
     const columns = `id, node_id, chain, pubkey, type, payment_hash, amount_msat, max_fee_msat, fee_msat, state,
       idempotency_key, digest, error_code, created_at, updated_at, cost_msat, destination, session_handle,
@@ -219,6 +219,7 @@ describe(`storage (${testDriver()})`, () => {
       '20261015T1000_spend_restores.sql',
       '20261015T1200_events_cursors.sql',
       '20261015T1400_jobs_confirmations.sql',
+      '20261016T0910_nodes_management.sql',
     ]);
     const held = join(dir, '..', 'held');
     mkdirSync(held);

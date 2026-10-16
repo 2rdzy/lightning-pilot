@@ -47,6 +47,13 @@ export interface DB {
     expires_at: string;
   };
   nodes: {
+    removed_at: Generated<string | null>;
+    revision: Generated<number>;
+    access_level: Generated<string>;
+    spend_state: Generated<string>;
+    credentials_checked_at: Generated<string | null>;
+    view_methods: Generated<string>;
+    spend_methods: Generated<string>;
     id: string;
     name: string;
     chain: string;

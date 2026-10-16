@@ -1,3 +1,4 @@
+import { testSpendPolicy } from '../../apps/server/src/testing.ts';
 // Walking-skeleton end-to-end test over the API, against the tools/regtest nodes of one chain (LP_REGTEST_CHAIN):
 // from a fresh database, setup → login → add cln-a → node info and balances → pay an invoice made on cln-c →
 // receive a payment from cln-c. Every log line of the run is kept and checked for secrets at the end.
@@ -137,6 +138,7 @@ describe(`end to end on ${chain} (profile ${profile})`, () => {
         serverName: view.serverName,
         viewRune: view.rune,
         spendRune: spend.rune,
+        limits: testSpendPolicy,
       }),
       201,
     );

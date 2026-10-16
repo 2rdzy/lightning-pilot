@@ -5,6 +5,7 @@
 import type { MethodTable } from '@lightning-pilot/core';
 
 export const METHODS = [
+  { port: 'node', method: 'checkRune', nodeMethods: ['checkrune'], credential: 'read', feature: 'A5' },
   {
     port: 'node',
     method: 'getInfo',

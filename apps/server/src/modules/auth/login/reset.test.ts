@@ -1,3 +1,4 @@
+import { testRune } from '../../../testing.ts';
 import { spawnSync } from 'node:child_process';
 import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -60,7 +61,7 @@ async function harness() {
       implementation: 'cln',
       url: 'https://localhost:1234',
       caCertificate: 'synthetic',
-      viewRune: 'synthetic-view',
+      viewRune: testRune('read'),
       serverName: 'localhost',
     },
     'reset',

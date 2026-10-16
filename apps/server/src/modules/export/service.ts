@@ -118,6 +118,7 @@ export class ExportService {
           serverName: row.server_name,
           pubkey: row.pubkey,
           createdAt: row.created_at,
+          ...(row.removed_at === null ? {} : { removedAt: row.removed_at }),
           ...(rune === undefined ? {} : { viewRune: rune }),
         });
       }
@@ -237,8 +238,9 @@ export class ExportService {
       plain.fill(0);
     }
     await this.#o.auth.sessions.authorized(idHash, 'security', async (db) => {
-      const existing = await db.selectFrom('nodes').select('id').execute();
-      if (existing.length + data.nodes.length > this.#o.maxNodes) throw conflict();
+      const existing = await db.selectFrom('nodes').where('removed_at', 'is', null).select('id').execute();
+      if (existing.length + data.nodes.filter((n) => n.removedAt === undefined).length > this.#o.maxNodes)
+        throw conflict();
       for (const node of data.nodes) {
         if (
           await db
@@ -302,6 +304,8 @@ export class ExportService {
           .insertInto('nodes')
           .values({
             id: n.id,
+            removed_at: n.removedAt ?? null,
+            access_level: 'read-only',
             name: n.name,
             chain: n.chain,
             network: n.network,

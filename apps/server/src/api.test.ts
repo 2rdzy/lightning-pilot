@@ -1,3 +1,6 @@
+import { Vault } from './modules/vault/index.ts';
+import { NodesService } from './modules/nodes/index.ts';
+import { testRune, testSpendPolicy } from './testing.ts';
 // API tests over HTTP (in memory) with the fake adapter: request checks, setup, login, every route's permission,
 // nodes, invoices and the spend flow, the error format, and that no secret reaches the log.
 import { totp } from './modules/auth/totp/totp.ts';
@@ -9,6 +12,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { FakeAdapter, FakeNetwork } from '@lightning-pilot/adapter-kit';
 import {
   AdapterError,
+  AppError,
   SetupProgress,
   msat,
   parsePaymentHash,
@@ -28,8 +32,8 @@ import fixtures from '../../../packages/core/src/decode/fixtures/regtest-invoice
 
 const PASSWORD = 'Correct-horse-9-battery';
 const CA = '-----BEGIN CERTIFICATE-----\nMIIBfake\n-----END CERTIFICATE-----\n';
-const VIEW_RUNE = 'view-' + randomBytes(24).toString('base64url');
-const SPEND_RUNE = 'spend-' + randomBytes(24).toString('base64url');
+const VIEW_RUNE = testRune('read');
+const SPEND_RUNE = testRune('spend');
 
 const cleanups: (() => Promise<void> | void)[] = [];
 afterEach(async () => {
@@ -39,6 +43,7 @@ afterEach(async () => {
 interface Harness {
   clock: { now: Date };
   server: Server;
+  vaultKeyPath: string;
   lines: string[];
   fakes: Map<string, FakeAdapter>;
   world: FakeNetwork;
@@ -158,7 +163,7 @@ async function harness(
     const line = [...lines].reverse().find((l) => l.includes('"setupToken"'));
     return (JSON.parse(line ?? '{}') as { setupToken: string }).setupToken;
   };
-  const self: Harness = { server, lines, fakes, world, setupToken, request, clock };
+  const self: Harness = { vaultKeyPath: vaultKey, server, lines, fakes, world, setupToken, request, clock };
   return self;
 }
 
@@ -201,6 +206,7 @@ async function addNode(h: Harness, auth: { cookie: string; csrf: string }, url: 
       caCertificate: CA,
       viewRune: VIEW_RUNE,
       spendRune: SPEND_RUNE,
+      limits: testSpendPolicy,
       ...extra,
     },
   });
@@ -1132,7 +1138,8 @@ describe('start-up', () => {
     });
     cleanups.push(() => second.close());
     await second.nodes.adapter(node.id);
-    expect(connections).toEqual([expect.objectContaining({ viewRune: VIEW_RUNE, spendRune: SPEND_RUNE })]);
+    expect(connections).toEqual([expect.objectContaining({ viewRune: VIEW_RUNE })]);
+    expect(connections[0]).not.toHaveProperty('spendRune');
   });
 });
 
@@ -1996,6 +2003,18 @@ describe(`WP09b on-chain and channel spends (${testDriver()})`, () => {
   const reservedUtxos = async (adapter: FakeAdapter) =>
     (await adapter.onchain.listUtxos()).filter((u) => u.reserved).length;
 
+  it('fails and releases an admitted intent when credential loading is refused before any node call', async () => {
+    const s = await chainSpending();
+    const p = await s.token('onchain', { address: await s.address(), amount: '100000000', feeRate: '2' });
+    const send = vi.spyOn(s.payer.onchain, 'prepare');
+    vi.spyOn(s.h.server.nodes, 'spendingAdapter').mockRejectedValue(new AppError('node_credential_revoked', 'Revoked'));
+    const response = await s.execute('onchain', p.confirmationToken);
+    const result = (await response.json()) as { error: { details: { intentId: string; reason: string } } };
+    expect(response.status).toBe(422);
+    expect(result.error.details.reason).toBe('node_credential_revoked');
+    expect((await s.intent(result.error.details.intentId)).state).toBe('failed');
+    expect(send).not.toHaveBeenCalled();
+  });
   it('sends on-chain: checks the address, caps the fee, checks the PSBT, then broadcasts', async () => {
     const s = await chainSpending();
     const to = await s.address();
@@ -3149,5 +3168,265 @@ describe(`restore from a backup (${testDriver()})`, () => {
     ]);
     const resumed = await preview();
     expect(resumed.status, await resumed.clone().text()).not.toBe(403);
+  });
+});
+
+describe('WP14 node lifecycle', () => {
+  it.each([
+    'https://user:secret@localhost',
+    'https://localhost/path',
+    'https://localhost/?query=1',
+    'https://localhost/#fragment',
+    'https://8.8.8.8',
+  ])('refuses an unintended node URL %s', async (url) => {
+    const h = await harness();
+    const auth = await loggedIn(h);
+    const response = await addNode(h, auth, url, 'blake2b');
+    expect(response.status).toBe(400);
+    expect(await h.server.nodes.list()).toEqual([]);
+  });
+  it('refuses unrestricted credentials locally and requires explicit admin acknowledgement', async () => {
+    const h = await harness();
+    const auth = await loggedIn(h);
+    const unrestricted = Buffer.concat([Buffer.alloc(32, 1), Buffer.from('=1')]).toString('base64url');
+    const rejected = await addNode(h, auth, 'https://a.blake2b.test', 'blake2b', { viewRune: unrestricted });
+    expect(rejected.status).toBe(403);
+    const refused = await addNode(h, auth, 'https://a.blake2b.test', 'blake2b', {
+      accessLevel: 'admin',
+      spendRune: unrestricted,
+    });
+    expect(refused.status).toBe(403);
+    const accepted = await addNode(h, auth, 'https://a.blake2b.test', 'blake2b', {
+      accessLevel: 'admin',
+      adminAcknowledged: true,
+      spendRune: unrestricted,
+    });
+    expect(accepted.status, await accepted.clone().text()).toBe(201);
+    expect(await accepted.json()).toMatchObject({ adminCredential: true, accessLevel: 'admin' });
+    expect(h.lines.some((line) => line.includes('"adminCredential":true') && line.includes('"security":true'))).toBe(
+      true,
+    );
+  });
+  it('requires limits with a pasted block and exposes narrow capabilities', async () => {
+    const h = await harness();
+    const auth = await loggedIn(h);
+    const narrow = Buffer.concat([Buffer.alloc(32, 1), Buffer.from('=3&id!&method=xpay')]).toString('base64url');
+    const response = await h.request('POST', '/api/v1/nodes', {
+      ...auth,
+      body: {
+        limits: testSpendPolicy,
+        name: 'narrow',
+        chain: 'blake2b',
+        network: 'regtest',
+        implementation: 'cln',
+        url: 'https://a.blake2b.test',
+        caCertificate: CA,
+        credentialBlock: JSON.stringify({
+          version: 1,
+          implementation: 'cln',
+          accessLevel: 'standard',
+          viewRune: VIEW_RUNE,
+          spendRune: narrow,
+        }),
+      },
+    });
+    expect(response.status, await response.clone().text()).toBe(201);
+    const summary = (await response.json()) as { id: string; limitsRequired: boolean };
+    expect(summary.limitsRequired).toBe(false);
+    const status = await h.request('GET', `/api/v1/nodes/${summary.id}/credentials`, auth);
+    const data = (await status.json()) as { capabilities: string[]; spendStatusSource: string };
+    expect(data.capabilities).toContain('pay.bolt11');
+    expect(data.capabilities).not.toContain('channels.open');
+    expect(data.spendStatusSource).toBe('last-verification');
+  });
+  it.each(['reserved', 'sent', 'unknown'] as const)('blocks removal for %s intents', async (state) => {
+    const h = await harness();
+    const auth = await loggedIn(h);
+    const response = await addNode(h, auth, 'https://a.blake2b.test', 'blake2b');
+    const node = (await response.json()) as { id: string; pubkey: string };
+    await h.server.db
+      .insertInto('spend_intents')
+      .values({
+        id: randomBytes(16).toString('hex'),
+        node_id: node.id,
+        chain: 'blake2b',
+        pubkey: node.pubkey,
+        type: 'onchain',
+        payment_hash: null,
+        amount_msat: '1000',
+        max_fee_msat: '0',
+        fee_msat: null,
+        state,
+        idempotency_key: randomBytes(16).toString('hex'),
+        digest: 'test',
+        error_code: null,
+        created_at: h.clock.now.toISOString(),
+        updated_at: h.clock.now.toISOString(),
+      })
+      .execute();
+    const removal = await h.request('DELETE', `/api/v1/nodes/${node.id}`, auth);
+    expect(removal.status).toBe(409);
+    expect(await h.server.nodes.list()).toHaveLength(1);
+  });
+  it('tombstones removal, preserves history and limits, removes secrets, and permits reattachment', async () => {
+    const h = await harness();
+    const auth = await loggedIn(h);
+    const response = await addNode(h, auth, 'https://a.blake2b.test', 'blake2b');
+    const node = (await response.json()) as { id: string; pubkey: string };
+    expect((await h.request('DELETE', `/api/v1/nodes/${node.id}`, { ...auth, csrf: 'wrong' })).status).toBe(403);
+    expect((await h.request('DELETE', `/api/v1/nodes/${node.id}`, auth)).status).toBe(204);
+    expect(await h.server.nodes.list()).toEqual([]);
+    expect(await h.server.db.selectFrom('credentials').selectAll().where('node_id', '=', node.id).execute()).toEqual(
+      [],
+    );
+    expect(
+      await h.server.db.selectFrom('spend_limits').selectAll().where('pubkey', '=', node.pubkey).execute(),
+    ).toHaveLength(1);
+    expect((await h.request('GET', `/api/v1/nodes/${node.id}`, auth)).status).toBe(404);
+    const reattached = await addNode(h, auth, 'https://a.blake2b.test', 'blake2b');
+    expect(reattached.status, await reattached.clone().text()).toBe(201);
+    expect(await reattached.json()).toMatchObject({ id: node.id, limitsRequired: false });
+  });
+  it('rolls back an add without limits and permits identity-preserving credential repair for unknown spends', async () => {
+    const h = await harness();
+    const auth = await loggedIn(h);
+    const denied = await addNode(h, auth, 'https://a.blake2b.test', 'blake2b', { limits: undefined });
+    expect(denied.status).toBe(403);
+    expect(await h.server.nodes.list()).toEqual([]);
+    expect(await h.server.db.selectFrom('credentials').selectAll().execute()).toEqual([]);
+    const response = await addNode(h, auth, 'https://a.blake2b.test', 'blake2b');
+    const node = (await response.json()) as { id: string; pubkey: string };
+    await h.server.db
+      .insertInto('spend_intents')
+      .values({
+        id: 'repair-intent',
+        node_id: node.id,
+        chain: 'blake2b',
+        pubkey: node.pubkey,
+        type: 'onchain',
+        payment_hash: null,
+        amount_msat: '1000',
+        max_fee_msat: '0',
+        fee_msat: null,
+        state: 'unknown',
+        idempotency_key: 'repair-key',
+        digest: 'test',
+        error_code: null,
+        created_at: h.clock.now.toISOString(),
+        updated_at: h.clock.now.toISOString(),
+      })
+      .execute();
+    const replacement = await h.request('PUT', `/api/v1/nodes/${node.id}`, {
+      ...auth,
+      body: {
+        name: 'repaired',
+        chain: 'blake2b',
+        network: 'regtest',
+        implementation: 'cln',
+        url: 'https://a.blake2b.test',
+        caCertificate: CA,
+        viewRune: VIEW_RUNE,
+        spendRune: SPEND_RUNE,
+      },
+    });
+    expect(replacement.status, await replacement.clone().text()).toBe(200);
+    expect((await h.request('DELETE', `/api/v1/nodes/${node.id}`, auth)).status).toBe(409);
+    await h.server.db
+      .updateTable('spend_intents')
+      .set({ state: 'succeeded' })
+      .where('id', '=', 'repair-intent')
+      .execute();
+    expect((await h.request('DELETE', `/api/v1/nodes/${node.id}`, auth)).status).toBe(204);
+    expect(
+      await h.server.db.selectFrom('spend_intents').select(['id', 'state']).where('node_id', '=', node.id).execute(),
+    ).toEqual([{ id: 'repair-intent', state: 'succeeded' }]);
+  });
+  it('refuses an unsafe legacy view rune before constructing or caching a read adapter', async () => {
+    const h = await harness();
+    const auth = await loggedIn(h);
+    const response = await addNode(h, auth, 'https://a.blake2b.test', 'blake2b');
+    const node = (await response.json()) as { id: string };
+    const unrestricted = Buffer.concat([Buffer.alloc(32, 1), Buffer.from('=1')]).toString('base64url');
+    const key = Buffer.from(readFileSync(h.vaultKeyPath, 'utf8').trim(), 'hex');
+    const vault = await Vault.start(h.server.db, key);
+    key.fill(0);
+    cleanups.push(() => vault.close());
+    await vault.put(h.server.db, node.id, 'read', unrestricted);
+    await h.server.db.updateTable('nodes').set({ credentials_checked_at: null }).where('id', '=', node.id).execute();
+    const factory = vi.fn(() => new FakeAdapter({ chain: 'blake2b' }));
+    const restarted = new NodesService({
+      db: h.server.db,
+      vault,
+      logger: createLogger({ sink: () => {} }),
+      dev: true,
+      maxNodes: 10,
+      adapterFactory: factory,
+    });
+    await expect(restarted.adapter(node.id)).rejects.toMatchObject({ code: 'permission_denied' });
+    expect(factory).not.toHaveBeenCalled();
+  });
+  it('requires limits when a replacement enables spending on a read-only node', async () => {
+    const h = await harness();
+    const auth = await loggedIn(h);
+    const added = await h.request('POST', '/api/v1/nodes', {
+      ...auth,
+      body: {
+        name: 'read',
+        chain: 'blake2b',
+        network: 'regtest',
+        implementation: 'cln',
+        url: 'https://a.blake2b.test',
+        caCertificate: CA,
+        viewRune: VIEW_RUNE,
+      },
+    });
+    const node = (await added.json()) as { id: string };
+    const body = {
+      name: 'standard',
+      chain: 'blake2b',
+      network: 'regtest',
+      implementation: 'cln',
+      url: 'https://a.blake2b.test',
+      caCertificate: CA,
+      viewRune: VIEW_RUNE,
+      spendRune: SPEND_RUNE,
+    };
+    expect((await h.request('PUT', `/api/v1/nodes/${node.id}`, { ...auth, body })).status).toBe(403);
+    expect(await h.server.nodes.summary(node.id)).toMatchObject({ accessLevel: 'read-only', canSpend: false });
+    expect(
+      (await h.request('PUT', `/api/v1/nodes/${node.id}`, { ...auth, body: { ...body, limits: testSpendPolicy } }))
+        .status,
+    ).toBe(200);
+  });
+  it('replaces a connection with step-up, refuses identity changes and clears cached adapters', async () => {
+    const h = await harness();
+    const auth = await loggedIn(h);
+    const response = await addNode(h, auth, 'https://a.blake2b.test', 'blake2b');
+    const node = (await response.json()) as { id: string };
+    const input = {
+      name: 'renamed',
+      chain: 'blake2b',
+      network: 'regtest',
+      implementation: 'cln',
+      url: 'https://a.blake2b.test',
+      caCertificate: CA,
+      viewRune: VIEW_RUNE,
+      spendRune: SPEND_RUNE,
+    };
+    expect(
+      (
+        await h.request('PUT', `/api/v1/nodes/${node.id}`, {
+          ...auth,
+          body: { ...input, url: 'https://b.blake2b.test' },
+        })
+      ).status,
+    ).toBe(400);
+    const updated = await h.request('PUT', `/api/v1/nodes/${node.id}`, { ...auth, body: input });
+    expect(updated.status, await updated.clone().text()).toBe(200);
+    expect(await updated.json()).toMatchObject({ name: 'renamed' });
+    expect((await h.request('POST', `/api/v1/nodes/${node.id}/credentials/check`, auth)).status).toBe(200);
+    expect(
+      (await h.request('POST', '/api/v1/nodes/setup-command', { ...auth, body: { accessLevel: 'full' } })).status,
+    ).toBe(200);
   });
 });

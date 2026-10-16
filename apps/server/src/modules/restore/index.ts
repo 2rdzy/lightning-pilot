@@ -61,7 +61,12 @@ export async function consumeRestoreMarker(
       .execute();
     await trx.deleteFrom('sessions').execute();
     await trx.deleteFrom('known_devices').execute();
-    const identities = await trx.selectFrom('nodes').select(['chain', 'pubkey']).distinct().execute();
+    const identities = await trx
+      .selectFrom('nodes')
+      .where('removed_at', 'is', null)
+      .select(['chain', 'pubkey'])
+      .distinct()
+      .execute();
     for (const identity of identities)
       await trx
         .insertInto('restore_counts')

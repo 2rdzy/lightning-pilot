@@ -449,14 +449,21 @@ export class ChainSpends {
     )
       throw new AppError('confirmation_invalid', 'The confirmation is missing, used, expired or not yours.');
     const payload = confirmation.payload;
-    const { row, adapter, canSpend } = await this.#nodes.adapter(nodeId);
+    const { row, canSpend } = await this.#nodes.adapter(nodeId);
     if (!canSpend) throw new AppError('capability_missing', 'This node has no spend credential.');
     await this.#nodes.monitor.ensureChecked(nodeId);
     refuseUnlessConfirmed(this.#nodes.identity(row));
 
     const claim = async (trx: Db, policy: SpendPolicy, overBudgetStepUp: boolean) => {
       const live = await liveSession(trx, this.#auth, sessionHandle);
-      const node = await trx.selectFrom('nodes').selectAll().where('id', '=', nodeId).executeTakeFirstOrThrow();
+      const node = await trx
+        .selectFrom('nodes')
+        .where('removed_at', 'is', null)
+        .selectAll()
+        .where('id', '=', nodeId)
+        .executeTakeFirstOrThrow();
+      if (node.revision !== row.revision)
+        throw new AppError('confirmation_invalid', 'The node changed; preview again.');
       refuseUnlessConfirmed(this.#nodes.identity(node));
       if (
         node.chain !== payload.chain ||
@@ -551,10 +558,21 @@ export class ChainSpends {
       amountMsat: payload.amount,
       maxFeeMsat: payload.maxFee,
     });
+    const loaded = await this.#nodes.spendingAdapter(nodeId).then(
+      (adapter) => ({ adapter }),
+      (error: unknown) => ({ error }),
+    );
     let outcome: Outcome;
-    if (payload.type === 'onchain') outcome = await this.#sendOnchain(adapter, intentId, payload);
-    else if (payload.type === 'channel-open') outcome = await this.#openChannel(adapter, payload);
-    else outcome = await this.#closeChannel(adapter, payload);
+    // Loading credentials performs no node call: a refusal here is a definitive failure, not a stranded reserve.
+    if ('error' in loaded)
+      outcome = {
+        state: 'failed',
+        errorCode: loaded.error instanceof AppError ? loaded.error.code : errorCode(loaded.error),
+        error: loaded.error,
+      };
+    else if (payload.type === 'onchain') outcome = await this.#sendOnchain(loaded.adapter, intentId, payload);
+    else if (payload.type === 'channel-open') outcome = await this.#openChannel(loaded.adapter, payload);
+    else outcome = await this.#closeChannel(loaded.adapter, payload);
     if (outcome.error) {
       try {
         this.#log.warn('spend not completed', {
@@ -725,7 +743,8 @@ export class ChainSpends {
   ): Promise<{ pubkey: string }> {
     spendCost({ type: 'action', cost: () => ZERO });
     await liveSession(this.#db, this.#auth, sessionHandle);
-    const { adapter } = await this.#spendingNode(nodeId);
+    await this.#spendingNode(nodeId);
+    const adapter = await this.#nodes.spendingAdapter(nodeId);
     let pubkey: string;
     if ('connect' in action) pubkey = (await adapter.peer.connect(action.connect)).pubkey;
     else {

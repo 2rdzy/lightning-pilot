@@ -1,3 +1,6 @@
+import { lookup } from 'node:dns';
+import { isIP } from 'node:net';
+import { isNodeAddress } from './address-policy.ts';
 // HTTPS client for clnrest: POST /v1/<command> with a JSON body and the rune in the `Rune` header. The node's own
 // certificate authority is pinned (and no other CA is trusted), the certificate must be issued for `serverName`,
 // responses are size-capped and parsed losslessly. Errors become AdapterError with `sent` telling whether the
@@ -44,7 +47,17 @@ export class ClnRestClient {
 
   constructor(options: ClnRestOptions) {
     this.#url = new URL(options.url);
-    if (this.#url.protocol !== 'https:') throw new Error('clnrest URL must use https');
+    if (
+      this.#url.protocol !== 'https:' ||
+      this.#url.username ||
+      this.#url.password ||
+      this.#url.search ||
+      this.#url.hash ||
+      !['', '/'].includes(this.#url.pathname)
+    )
+      throw new Error('clnrest URL must be an https origin without credentials');
+    const host = this.#url.hostname.replace(/^\[|\]$/g, '');
+    if (isIP(host) && !isNodeAddress(host)) throw new Error('clnrest address must be loopback or private');
     this.#ca = options.caCertificate;
     this.#serverName = options.serverName;
     this.#maxBytes = options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE;
@@ -53,6 +66,23 @@ export class ClnRestClient {
   call(command: string, params: Record<string, unknown>, options: CallOptions): Promise<unknown> {
     const body = serialise(params);
     const requestOptions: RequestOptions = {
+      lookup: (hostname, options, callback) => {
+        lookup(hostname, { ...options, all: true }, (error, addresses) => {
+          if (error) {
+            callback(error, []);
+            return;
+          }
+          if (!addresses.length || addresses.some(({ address }) => !isNodeAddress(address))) {
+            callback(new Error('clnrest address must be loopback or private'), []);
+            return;
+          }
+          if (options.all) callback(null, addresses);
+          else {
+            const first = addresses[0];
+            if (first) callback(null, first.address, first.family);
+          }
+        });
+      },
       method: 'POST',
       protocol: 'https:',
       hostname: this.#url.hostname.replace(/^\[|\]$/g, ''),

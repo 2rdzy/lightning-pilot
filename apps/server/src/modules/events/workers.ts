@@ -9,6 +9,7 @@ import {
   type Page,
   type PageRequest,
 } from '@lightning-pilot/core';
+import { writeTx } from '../../storage/db.ts';
 import type { Db } from '../../storage/db.ts';
 import type { Logger } from '../../logging/logger.ts';
 import type { NodesService, NodeRow } from '../nodes/index.ts';
@@ -184,11 +185,20 @@ class NodeWorker {
                 this.#publish('reload', { reason: 'snapshot_changed' });
                 logger.warn('node event not publishable', { nodeId: this.#row.id, type: event.type });
               }
-              await db
-                .insertInto('event_cursors')
-                .values({ node_id: this.#row.id, cursor })
-                .onConflict((oc) => oc.column('node_id').doUpdateSet({ cursor }))
-                .execute();
+              await writeTx(db, async (trx) => {
+                const current = await trx
+                  .selectFrom('nodes')
+                  .select('revision')
+                  .where('id', '=', this.#row.id)
+                  .where('removed_at', 'is', null)
+                  .executeTakeFirst();
+                if (signal.aborted || current?.revision !== this.#row.revision) return;
+                await trx
+                  .insertInto('event_cursors')
+                  .values({ node_id: this.#row.id, cursor })
+                  .onConflict((oc) => oc.column('node_id').doUpdateSet({ cursor }))
+                  .execute();
+              });
               retry = this.#options.retryMs ?? 1000;
               if (event.type === 'payment.updated') wakeRecovery(this.#row.id, event.data.paymentHash);
               if (event.type === 'block.new') {
@@ -237,6 +247,7 @@ const connectionSignature = (row: NodeRow | undefined, credentials: unknown) =>
       chain: row.chain,
       network: row.network,
       pubkey: row.pubkey,
+      revision: row.revision,
       url: row.url,
       ca: row.ca_certificate,
       serverName: row.server_name,
@@ -246,12 +257,17 @@ const connectionSignature = (row: NodeRow | undefined, credentials: unknown) =>
 
 export class EventWorkers {
   readonly #options: WorkerOptions;
+  readonly #unlisten: () => void;
   readonly #workers = new Map<string, { signature: string; worker: NodeWorker }>();
   #timer: ReturnType<typeof setInterval> | undefined;
   #sync: Promise<void> | undefined;
   #stopped = false;
   constructor(options: WorkerOptions) {
     this.#options = options;
+    this.#unlisten = options.nodes.onChange((id) => {
+      this.#workers.get(id)?.worker.stop();
+      if (this.#timer && !this.#stopped) void this.reconcile();
+    });
   }
   start(): void {
     if (this.#timer || this.#stopped) return;
@@ -274,7 +290,7 @@ export class EventWorkers {
     return this.#sync;
   }
   async #reconcile(): Promise<void> {
-    const rows = await this.#options.db.selectFrom('nodes').selectAll().execute();
+    const rows = await this.#options.db.selectFrom('nodes').where('removed_at', 'is', null).selectAll().execute();
     const credentials = await this.#options.db.selectFrom('credentials').selectAll().execute();
     for (const [id, entry] of this.#workers) {
       const row = rows.find((r) => r.id === id);
@@ -301,6 +317,7 @@ export class EventWorkers {
   }
   async stop(): Promise<void> {
     this.#stopped = true;
+    this.#unlisten();
     if (this.#timer) clearInterval(this.#timer);
     await this.#sync;
     for (const { worker } of this.#workers.values()) worker.stop();

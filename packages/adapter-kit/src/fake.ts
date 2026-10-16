@@ -407,6 +407,23 @@ export class FakeAdapter implements NodeAdapter {
         features: this.featuresOverride ?? fakeFeatures(this.#options.chain),
       };
     },
+    checkRune: async (rune: string, method: string, params?: Record<string, string>): Promise<boolean> => {
+      this.#enter('checkRune');
+      const clauses = Buffer.from(rune, 'base64url').subarray(32).toString().split('&').slice(1);
+      if (clauses.length === 0) return true;
+      return clauses.every((clause) =>
+        clause.split('|').some((a) => {
+          if (a === 'id!') return true;
+          if (a.startsWith('method=')) return method === a.slice(7);
+          if (a.startsWith('method/')) return method !== a.slice(7);
+          if (a.startsWith('pname')) {
+            const [key, value] = a.slice(5).split('=');
+            return params?.[key ?? ''] === value;
+          }
+          return false;
+        }),
+      );
+    },
     getStatus: async (): Promise<NodeStatus> => {
       this.#enter('getStatus');
       const spend = this.#options.canSpend;

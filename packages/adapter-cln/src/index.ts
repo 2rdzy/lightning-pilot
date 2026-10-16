@@ -4,3 +4,5 @@ export { METHODS } from './methods.ts';
 export { runeRestrictions } from './rune.ts';
 export type { Transport } from './context.ts';
 export { isExportableViewRune } from './export-rune.ts';
+
+export { isNodeAddress } from './address-policy.ts';

@@ -11,6 +11,12 @@ const methods = {
 function spending(symbol) {
   return symbol?.declarations?.some((d) => {
     const file = d.getSourceFile().fileName;
+    if (
+      ts.isMethodDeclaration(d) &&
+      file.endsWith('/apps/server/src/modules/nodes/service.ts') &&
+      d.name.getText() === 'spendingAdapter'
+    )
+      return true;
     if (ts.isMethodSignature(d) && ts.isInterfaceDeclaration(d.parent) && file.endsWith('/packages/core/src/ports.ts'))
       return methods[d.parent.name.text]?.includes(d.name.getText());
     // Inferred concrete adapter types retain their implementation declarations instead of the interface methods.

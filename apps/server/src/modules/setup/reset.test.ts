@@ -1,3 +1,4 @@
+import { testRune } from '../../testing.ts';
 import { createHash, randomBytes } from 'node:crypto';
 import { spawnSync } from 'node:child_process';
 import { writeFileSync } from 'node:fs';
@@ -91,7 +92,7 @@ describe('offline authentication reset', () => {
           implementation: 'cln',
           url: 'https://localhost:1234',
           caCertificate: 'synthetic',
-          viewRune: 'synthetic-view',
+          viewRune: testRune('read'),
           serverName: 'localhost',
         },
         'r-cli',
@@ -215,7 +216,7 @@ describe('offline authentication reset', () => {
         created_at: timestamp,
       })
       .execute();
-    await vault.put(db, 'node', 'read', 'synthetic-view');
+    await vault.put(db, 'node', 'read', testRune('read'));
     await db
       .insertInto('spend_limits')
       .values({
