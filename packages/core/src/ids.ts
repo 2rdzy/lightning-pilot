@@ -46,4 +46,11 @@ export const ID_PATTERNS = {
 
 export const PubkeySchema = z.string().regex(PUBKEY).meta({ description: 'Node public key (33 bytes, hex)' });
 export const PaymentHashSchema = z.string().regex(HEX32).meta({ description: 'Payment hash (32 bytes, hex)' });
+export const TxidSchema = z.string().regex(HEX32).meta({ description: 'Transaction id (32 bytes, hex)' });
+export const ChannelIdSchema = z.string().regex(HEX32).meta({ description: 'Channel id (32 bytes, hex)' });
+export const ShortChannelIdSchema = z
+  .string()
+  .regex(SCID)
+  .meta({ description: 'Short channel id (block x transaction x output)' });
+export const FundingOutpointSchema = z.string().regex(OUTPOINT).meta({ description: 'Outpoint as txid:vout' });
 export const UuidSchema = z.uuid();

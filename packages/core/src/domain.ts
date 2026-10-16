@@ -59,6 +59,9 @@ export interface NodeFacts {
   numInactiveChannels: number;
   // Node feature bits from the init message, hex, most significant byte first.
   features: string;
+  // Addresses the node announces to the network, as host:port ([host]:port for IPv6); absent when the adapter does
+  // not report them. Local listen addresses are not included: they are usually private.
+  addresses?: string[];
 }
 
 export interface Balances {
