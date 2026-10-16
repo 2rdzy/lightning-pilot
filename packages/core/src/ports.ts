@@ -31,6 +31,11 @@ import type {
 import type { ChannelId, PaymentHash, Pubkey, ShortChannelId, Txid } from './ids.ts';
 import type { Msat } from './money.ts';
 
+export interface RuneCheckPort {
+  // Tests another rune through the view credential; never executes the named method.
+  checkRune(rune: string, method: string, params?: Record<string, string>): Promise<boolean>;
+}
+
 export interface NodePort {
   getInfo(): Promise<NodeFacts>;
   // Reachability, the spend credential's state, the access level and the capabilities. Makes several node calls:

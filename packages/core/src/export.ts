@@ -51,6 +51,7 @@ export const ExportNode = AddNodeRequest.omit({ spendRune: true, viewRune: true 
   id: z.uuid(),
   pubkey: PubkeySchema,
   createdAt: timestamp,
+  removedAt: timestamp.optional(),
   viewRune: z.string().min(1).max(4096).optional(),
 });
 export const ExportIntent = z

@@ -16,3 +16,5 @@ export * from './sessions.ts';
 export * from './spend.ts';
 export * from './psbt.ts';
 export * from './export.ts';
+
+export * from './node-management.ts';

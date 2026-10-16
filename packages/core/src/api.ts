@@ -68,6 +68,36 @@ export const AddNodeRequest = z
   .meta({ id: 'AddNodeRequest' });
 export type AddNodeRequest = z.input<typeof AddNodeRequest>;
 
+// Node lifecycle contracts. A replacement carries a complete connection, avoiding ambiguous secret retention.
+export const NodeAccessLevel = z.enum(['read-only', 'standard', 'full', 'admin']);
+export const NodeCredentialBlock = z
+  .strictObject({
+    version: z.literal(1),
+    implementation: z.literal('cln'),
+    accessLevel: NodeAccessLevel,
+    viewRune: z.string().min(1).max(4096),
+    spendRune: z.string().min(1).max(4096).optional(),
+  })
+  .superRefine((value, ctx) => {
+    if ((value.accessLevel === 'read-only') !== (value.spendRune === undefined))
+      ctx.addIssue({ code: 'custom', message: 'The spend credential does not match the access level.' });
+  })
+  .meta({ id: 'NodeCredentialBlock' });
+export const NodeSetupCommandRequest = z.strictObject({ accessLevel: NodeAccessLevel.exclude(['admin']) });
+export const NodeSetupCommandResponse = z.strictObject({ command: z.string(), instructions: z.string() });
+export const NodeCredentialStatus = z.strictObject({
+  view: z.enum(['ok', 'revoked', 'missing', 'unknown']),
+  spend: z.enum(['ok', 'revoked', 'missing', 'unknown']),
+});
+export const NodeCredentialStatusResponse = z.strictObject({
+  credentials: NodeCredentialStatus,
+  accessLevel: NodeAccessLevel,
+  adminCredential: z.boolean(),
+  capabilities: z.array(z.string()),
+  checkedAt: z.iso.datetime().nullable(),
+  spendStatusSource: z.literal('last-verification'),
+});
+
 export const ChainIdentityResponse = z
   .strictObject({
     state: z.enum(IDENTITY_STATES),
@@ -87,6 +117,9 @@ export const NodeSummary = z
     implementation: Implementation,
     pubkey: PubkeySchema,
     canSpend: z.boolean(),
+    accessLevel: NodeAccessLevel.optional(),
+    adminCredential: z.boolean().optional(),
+    limitsRequired: z.boolean().optional(),
     chainIdentity: ChainIdentityResponse,
     createdAt: z.iso.datetime(),
   })
