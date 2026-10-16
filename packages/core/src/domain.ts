@@ -128,7 +128,7 @@ export interface Page<T> {
 // `missing` when none was given, `revoked` when the node no longer accepts it.
 export const ACCESS_LEVELS = ['read-only', 'standard', 'full', 'admin'] as const;
 export type AccessLevel = (typeof ACCESS_LEVELS)[number];
-export const CREDENTIAL_STATES = ['ok', 'revoked', 'missing'] as const;
+export const CREDENTIAL_STATES = ['ok', 'revoked', 'missing', 'unknown'] as const;
 export type CredentialState = (typeof CREDENTIAL_STATES)[number];
 
 // Named feature flags (domain and adapter §4). An adapter reports those its implementation, version, plugins and
@@ -178,6 +178,8 @@ export interface NodeStatus {
   // Last time the node answered this adapter (in this process).
   lastSeenAt?: string;
   credential: CredentialState;
+  viewCredential?: CredentialState;
+  spendCredential?: CredentialState;
   accessLevel: AccessLevel;
   capabilities: Capability[];
 }
