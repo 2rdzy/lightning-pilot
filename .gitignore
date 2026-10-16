@@ -11,3 +11,5 @@ test-results/
 *.log
 .DS_Store
 .regtest/
+# Vitest browser mode: screenshots of failed component tests
+.vitest/

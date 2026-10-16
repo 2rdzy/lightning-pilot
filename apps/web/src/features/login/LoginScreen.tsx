@@ -5,7 +5,8 @@ import { useState } from 'react';
 import { useForm } from 'react-hook-form';
 import { useApi } from '../../app/api-context.tsx';
 import { useT } from '../../app/i18n.tsx';
-import { ErrorNote, Field } from '../../app/parts.tsx';
+import { ErrorNote, Field } from '../../shell/parts.tsx';
+import { AuthFrame } from '../../shell/pages.tsx';
 import { loginRoute } from '../../app/router.tsx';
 
 export function LoginScreen() {
@@ -37,7 +38,7 @@ export function LoginScreen() {
   });
 
   return (
-    <main className="mx-auto flex max-w-[640px] flex-col gap-6 p-4 md:p-8">
+    <AuthFrame>
       <h1 className="text-2xl font-semibold">{tr.t('login.title')}</h1>
       <form
         className="rounded-card border-border bg-surface flex flex-col gap-4 border p-4"
@@ -86,6 +87,6 @@ export function LoginScreen() {
           {tr.t('login.submit')}
         </button>
       </form>
-    </main>
+    </AuthFrame>
   );
 }

@@ -15,8 +15,15 @@ const PASSWORD = `E2e-${Math.random().toString(36).slice(2, 10)}-Pw9!`;
 const UUID = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/;
 const AMOUNT_SAT = 1000;
 
-// Navigation: the left bar on a desktop, the bottom tab bar on a phone; the same accessible names.
+// Navigation: the left bar on a desktop, the bottom tab bar on a phone, where the dashboard is "Home" and logout is
+// under "More" (style guide §5).
 const nav = (page: Page) => page.getByRole('navigation', { name: 'Main' });
+const dashboardLink = (page: Page) => nav(page).getByRole('link', { name: /^(Dashboard|Home)$/ });
+async function logOut(page: Page) {
+  const more = nav(page).getByRole('button', { name: 'More' });
+  if (await more.isVisible()) await more.click();
+  await page.getByRole('button', { name: 'Log out' }).click();
+}
 
 // Runs in the browser; tools/ is type-checked without the DOM library, hence the cast.
 const historyLength = (page: Page) =>
@@ -113,7 +120,7 @@ test('setup, login, receive, pay and log out in the browser', async ({ page }, t
   expect(deviceCookie).toMatchObject({ httpOnly: true, secure: true, sameSite: 'Strict', path: '/' });
 
   // Setup authenticates automatically. Log out to exercise the ordinary password + TOTP login.
-  await page.getByRole('button', { name: 'Log out' }).click();
+  await logOut(page);
   await expect(page.getByRole('heading', { name: 'Log in' })).toBeVisible();
   expect((await page.context().cookies()).find((cookie) => cookie.name === '__Host-lp_device')?.value).toBe(
     deviceCookie?.value,
@@ -121,7 +128,7 @@ test('setup, login, receive, pay and log out in the browser', async ({ page }, t
   await page.getByLabel('Password').fill('Wrong-password-1!');
   await page.getByLabel('Authenticator code').fill(hotp(secret, lastCounter + 1n));
   await page.getByRole('button', { name: 'Log in' }).click();
-  await expect(page.getByText('The password is not correct.')).toBeVisible();
+  await expect(page.getByText('The password or the code is not correct.')).toBeVisible();
   const login = async () => {
     // Use current or next counter without replay. At most one 30-second boundary is needed for later logins.
     await expect
@@ -235,7 +242,7 @@ test('setup, login, receive, pay and log out in the browser', async ({ page }, t
   await expect(page.getByTestId('payment-outcome')).toHaveAttribute('data-state', 'succeeded');
 
   // The balance on the dashboard has changed.
-  await nav(page).getByRole('link', { name: 'Dashboard' }).click();
+  await dashboardLink(page).click();
   await expect(page).toHaveURL(new RegExp(`${aliceUrl}/?$`));
   await expect.poll(() => spendable(page), { timeout: 30_000 }).not.toBe(before);
 
@@ -251,7 +258,7 @@ test('setup, login, receive, pay and log out in the browser', async ({ page }, t
       body: JSON.stringify({ error: { code: 'internal', message: 'injected', requestId: 'r-e2e' } }),
     }),
   );
-  await page.getByRole('button', { name: 'Log out' }).click();
+  await logOut(page);
   await expect(page.getByText('You are still logged in')).toBeVisible();
   await expect(page).toHaveURL(new RegExp(`${aliceUrl}/?$`));
   await page.unroute('**/api/v1/auth/logout');
@@ -267,7 +274,7 @@ test('setup, login, receive, pay and log out in the browser', async ({ page }, t
 
   // A payment link opened while logged out goes through login; afterwards neither the link nor the login entry
   // with it in ?next= stays in the browser history.
-  await page.getByRole('button', { name: 'Log out' }).click();
+  await logOut(page);
   await expect(page).toHaveURL(/\/login$/);
   await page.goto(`${aliceUrl}/pay?request=${bolt11}`);
   await expect(page).toHaveURL(/\/login\?next=/);
@@ -287,7 +294,7 @@ test('setup, login, receive, pay and log out in the browser', async ({ page }, t
   // A recovery login can only enrol a replacement authenticator before the app becomes available.
   await page.goto(aliceUrl);
   await expect(page.getByTestId('balance-spendable')).toBeVisible();
-  await page.getByRole('button', { name: 'Log out' }).click();
+  await logOut(page);
   await expect(page.getByRole('heading', { name: 'Log in' })).toBeVisible();
   await page.getByLabel('Password').fill(PASSWORD);
   await page.getByLabel('Use a recovery code instead').check();

@@ -2,7 +2,7 @@
 import { useQuery } from '@tanstack/react-query';
 import { useApi } from '../../app/api-context.tsx';
 import { useT } from '../../app/i18n.tsx';
-import { Amount, Card, ErrorNote } from '../../app/parts.tsx';
+import { Amount, Card, ErrorNote } from '../../shell/parts.tsx';
 import { balancesQuery, nodeInfoQuery } from '../../app/queries.ts';
 import { nodeRoute } from '../../app/router.tsx';
 import { formatInteger, shortId } from '../../i18n/format.ts';

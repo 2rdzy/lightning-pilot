@@ -1,7 +1,7 @@
 import { expect, it } from 'vitest';
 import { ApiError } from '../api/client.ts';
 import { createTranslator } from '../i18n/messages.ts';
-import { MESSAGES_EN } from './i18n.tsx';
+import { MESSAGES_EN } from '../app/i18n.tsx';
 import { errorText } from './parts.tsx';
 
 const tr = createTranslator(MESSAGES_EN, 'en');

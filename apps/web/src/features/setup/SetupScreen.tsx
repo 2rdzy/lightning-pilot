@@ -10,8 +10,9 @@ import {
 } from '@lightning-pilot/core';
 import { useApi } from '../../app/api-context.tsx';
 import { useT } from '../../app/i18n.tsx';
-import { ErrorNote, Field } from '../../app/parts.tsx';
-import { QrCode } from '../../app/qr.tsx';
+import { ErrorNote, Field } from '../../shell/parts.tsx';
+import { AuthFrame } from '../../shell/pages.tsx';
+import { QrCode } from '@lightning-pilot/ui';
 import { generatePassword } from './password.ts';
 import { limitsInOrder } from './limits.ts';
 
@@ -167,7 +168,7 @@ export function SetupScreen() {
     setTimeout(() => URL.revokeObjectURL(url), 10_000);
   };
   return (
-    <main className="mx-auto flex max-w-[640px] flex-col gap-6 p-4 md:p-8">
+    <AuthFrame>
       <h1 className="text-2xl font-semibold">{tr.t('setup.title')}</h1>
       <p>{tr.t('setup.intro')}</p>
       <form
@@ -360,6 +361,6 @@ export function SetupScreen() {
           </button>
         ) : null}
       </form>
-    </main>
+    </AuthFrame>
   );
 }

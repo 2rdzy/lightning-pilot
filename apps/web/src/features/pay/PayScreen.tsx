@@ -11,7 +11,7 @@ import type { z } from 'zod';
 import { ApiError, newIdempotencyKey } from '../../api/client.ts';
 import { useApi } from '../../app/api-context.tsx';
 import { useT } from '../../app/i18n.tsx';
-import { Amount, Card, ChainBadge, ErrorNote, Field } from '../../app/parts.tsx';
+import { Amount, Card, ChainBadge, ErrorNote, Field } from '../../shell/parts.tsx';
 import { nodeRoute, payRoute } from '../../app/router.tsx';
 import { formatCost, formatDateTime, shortId, parseSatsInput } from '../../i18n/format.ts';
 

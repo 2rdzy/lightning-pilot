@@ -22,6 +22,10 @@ export const COLOR_TOKENS = [
   // Text and icons on a --danger fill (destructive buttons, the wrong-chain banner): white on the light theme's dark
   // red, near-black on the dark theme's light red (white would reach only 3.14:1 there).
   'on-danger',
+  // The fill of a primary button under the pointer, behind white text. Not --brand-strong: in the dark theme that is
+  // a light red for links (#EA8774), and white on it reaches only 2.56:1. Light: the same as --brand-strong; dark:
+  // the --bar red (2026-10-16, WP15).
+  'brand-hover',
 ] as const;
 export type ColorToken = (typeof COLOR_TOKENS)[number];
 
@@ -40,6 +44,7 @@ export const COLORS: Record<Theme, Record<ColorToken, string>> = {
     danger: '#D32535',
     info: '#0A7697',
     'on-danger': '#FFFFFF',
+    'brand-hover': '#9C3321',
   },
   dark: {
     brand: '#C4402A',
@@ -55,6 +60,7 @@ export const COLORS: Record<Theme, Record<ColorToken, string>> = {
     danger: '#F06272',
     info: '#0DCAF0',
     'on-danger': '#131416',
+    'brand-hover': '#822A1C',
   },
 };
 

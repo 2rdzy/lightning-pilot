@@ -1,0 +1,133 @@
+/* The design system's stylesheet: the tokens, their Tailwind names, the base styles and the few component classes.
+   Imported by the web app after `@import 'tailwindcss'`. No inline styles anywhere: the server's CSP allows
+   stylesheets from 'self' only. */
+@import './tokens.css';
+
+/* Tailwind scans only the importing app's own folder; the components of this package need scanning too. */
+@source '.';
+
+/* Tailwind names for the design tokens, so classes such as bg-surface or text-muted follow the theme. */
+@theme inline {
+  --color-brand: var(--brand);
+  --color-brand-strong: var(--brand-strong);
+  --color-bar: var(--bar);
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-border: var(--border);
+  --color-text: var(--text);
+  --color-muted: var(--muted);
+  --color-success: var(--success);
+  --color-warning: var(--warning);
+  --color-danger: var(--danger);
+  --color-info: var(--info);
+  --color-on-danger: var(--on-danger);
+  --color-brand-hover: var(--brand-hover);
+  --font-sans: var(--font-text);
+  --font-mono: var(--font-mono);
+  --radius-control: var(--radius-control);
+  --radius-card: var(--radius-card);
+  --shadow-float: var(--shadow-float);
+}
+
+@layer base {
+  html {
+    font-size: 16px;
+  }
+  @media (max-width: 767px) {
+    html {
+      font-size: 15px;
+    }
+  }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--font-text);
+  }
+  :focus-visible {
+    outline: 2px solid var(--brand);
+    outline-offset: 2px;
+  }
+  /* Amounts, heights, counts and times line up (style guide §3). */
+  .tabular-nums {
+    font-variant-numeric: tabular-nums;
+  }
+}
+
+@layer components {
+  .input {
+    border: 1px solid var(--border);
+    border-radius: var(--radius-control);
+    background: var(--surface);
+    color: var(--text);
+    padding: 0.5rem 0.75rem;
+    min-height: 44px;
+  }
+  .btn-primary {
+    background: var(--brand);
+    color: #fff;
+    border-radius: var(--radius-control);
+    padding: 0.5rem 1rem;
+    min-height: 44px;
+    font-weight: 500;
+  }
+  .btn-primary:hover {
+    background: var(--brand-hover);
+  }
+  .btn-secondary {
+    border: 1px solid var(--border);
+    background: var(--surface);
+    color: var(--text);
+    border-radius: var(--radius-control);
+    padding: 0.5rem 1rem;
+    min-height: 44px;
+  }
+  .btn-primary:disabled,
+  .btn-secondary:disabled {
+    opacity: 0.6;
+  }
+
+  /* Base UI's scroll-area and select would add this rule in an inline <style> element, which the CSP refuses; the
+     app turns those elements off (CSPProvider disableStyleElements) and the rule lives here instead. */
+  .base-ui-disable-scrollbar {
+    scrollbar-width: none;
+  }
+  .base-ui-disable-scrollbar::-webkit-scrollbar {
+    display: none;
+  }
+
+  /* Motion only to show change, 150–200 ms, and none with reduced motion (style guide §9). */
+  .fade-in {
+    animation: lp-fade-in 180ms ease-out;
+  }
+  .skeleton {
+    animation: lp-pulse 1.6s ease-in-out infinite;
+  }
+  .toast {
+    transition: opacity 180ms ease-out;
+  }
+  .toast[data-starting-style],
+  .toast[data-ending-style] {
+    opacity: 0;
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .fade-in,
+    .skeleton {
+      animation: none;
+    }
+    .toast {
+      transition: none;
+    }
+  }
+}
+
+@keyframes lp-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+@keyframes lp-pulse {
+  50% {
+    opacity: 0.5;
+  }
+}

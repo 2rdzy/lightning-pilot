@@ -8,9 +8,10 @@ import login from '../features/login/messages.en.json' with { type: 'json' };
 import pay from '../features/pay/messages.en.json' with { type: 'json' };
 import receive from '../features/receive/messages.en.json' with { type: 'json' };
 import setup from '../features/setup/messages.en.json' with { type: 'json' };
+import shell from '../shell/messages.en.json' with { type: 'json' };
 
 // English only in release 0.1; every feature adds its own file here.
-export const MESSAGES_EN = mergeMessages(app, setup, login, dashboard, receive, pay, exporting);
+export const MESSAGES_EN = mergeMessages(app, shell, setup, login, dashboard, receive, pay, exporting);
 
 const TranslatorContext = createContext<Translator | undefined>(undefined);
 

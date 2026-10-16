@@ -10,6 +10,8 @@ export const E2E_PORTS = { desktop: 8091, phone: 8092 } as const;
 export default defineConfig({
   testDir: 'tools/e2e',
   testMatch: '*.spec.ts',
+  // Visual baselines (visual.spec.ts) are made in one pinned image only, so no platform suffix.
+  snapshotPathTemplate: '{testDir}/__screenshots__/{projectName}/{arg}{ext}',
   globalSetup: './tools/e2e/global-setup.ts',
   // Regtest payments share the nodes' channels: one test at a time.
   workers: 1,

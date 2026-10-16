@@ -1,6 +1,8 @@
-// Browser entry: the API client, the query cache, the translator for the browser's region and the router.
+// Browser entry: the API client, the query cache, the translator for the browser's region, the display preferences,
+// the design system and the router.
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { RouterProvider } from '@tanstack/react-router';
+import { DesignSystemProvider } from '@lightning-pilot/ui';
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { ApiClient, ApiError } from './api/client.ts';
@@ -9,6 +11,8 @@ import { createTranslator, MESSAGES_EN, TranslatorProvider } from './app/i18n.ts
 import { createAppRouter } from './app/router.tsx';
 import { safeNext } from './app/session.ts';
 import { browserLocale } from './i18n/format.ts';
+import { PreferencesProvider, storage } from './shell/preferences-context.tsx';
+import { applyTheme, readPreferences } from './shell/preferences.ts';
 import './styles.css';
 
 const queryClient = new QueryClient({
@@ -32,6 +36,9 @@ const api: ApiClient = new ApiClient({
 const router = createAppRouter({ api, queryClient });
 const translator = createTranslator(MESSAGES_EN, browserLocale(navigator.languages));
 document.documentElement.lang = 'en';
+// The chosen theme before the first render, so the page does not flash in the other one. (Not an inline script in
+// index.html: the CSP allows scripts from 'self' only.)
+applyTheme(document.documentElement, readPreferences(storage()).theme);
 
 const root = document.getElementById('root');
 if (!root) throw new Error('missing #root');
@@ -40,7 +47,11 @@ createRoot(root).render(
     <TranslatorProvider translator={translator}>
       <ApiProvider api={api}>
         <QueryClientProvider client={queryClient}>
-          <RouterProvider router={router} />
+          <PreferencesProvider>
+            <DesignSystemProvider closeLabel={translator.t('common.close')}>
+              <RouterProvider router={router} />
+            </DesignSystemProvider>
+          </PreferencesProvider>
         </QueryClientProvider>
       </ApiProvider>
     </TranslatorProvider>

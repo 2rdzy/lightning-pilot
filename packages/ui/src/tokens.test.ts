@@ -50,6 +50,7 @@ describe('design tokens', () => {
         expect(contrast(c.brand, c[bg]), `${theme} brand on ${bg}`).toBeGreaterThanOrEqual(NON_TEXT);
       }
       expect(contrast('#FFFFFF', c.brand), `${theme} white on brand`).toBeGreaterThanOrEqual(TEXT);
+      expect(contrast('#FFFFFF', c['brand-hover']), `${theme} white on brand-hover`).toBeGreaterThanOrEqual(TEXT);
       expect(contrast('#FFFFFF', c.bar), `${theme} white on bar`).toBeGreaterThanOrEqual(TEXT);
       expect(contrast(c['on-danger'], c.danger), `${theme} on-danger on danger`).toBeGreaterThanOrEqual(TEXT);
     }
