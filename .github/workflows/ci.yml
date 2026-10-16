@@ -129,6 +129,10 @@ jobs:
         run: pnpm build:web
       - name: Browser for Playwright
         run: pnpm exec playwright install --with-deps chromium
+      - name: Component tests in Chromium
+        run: pnpm test:browser
+      - name: Visual snapshots in the pinned Playwright image
+        run: pnpm test:visual
       - name: Browser tests with fake nodes
         run: pnpm test:e2e
       - name: Libraries the Core Lightning release needs
