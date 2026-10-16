@@ -18,3 +18,4 @@ export * from './psbt.ts';
 export * from './export.ts';
 
 export * from './node-management.ts';
+export * from './read-api.ts';
