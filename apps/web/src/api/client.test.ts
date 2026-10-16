@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
-import { ApiClient, ApiError, buildPath, newIdempotencyKey } from './client.ts';
+import { PageQuery } from '@lightning-pilot/core';
+import { ApiClient, ApiError, buildPath, buildQuery, newIdempotencyKey } from './client.ts';
 
 const NODE = '0b6c4b8e-0000-4000-8000-000000000000';
 const json = (status: number, body: unknown) =>
@@ -24,6 +25,21 @@ describe('API client', () => {
     expect(buildPath('/api/v1/nodes/{nodeId}/balances', { nodeId: NODE })).toBe(`/api/v1/nodes/${NODE}/balances`);
     expect(buildPath('/x/{id}', { id: 'a/b' })).toBe('/x/a%2Fb');
     expect(() => buildPath('/x/{id}')).toThrow('missing path parameter id');
+  });
+
+  it('builds validated query strings for paged lists and refuses them elsewhere', async () => {
+    expect(buildQuery(PageQuery, { limit: 25, cursor: 'o50' })).toBe('?cursor=o50&limit=25');
+    expect(buildQuery(PageQuery, { cursor: undefined })).toBe('');
+    expect(buildQuery(undefined, undefined)).toBe('');
+    expect(() => buildQuery(PageQuery, { limit: 500 })).toThrow();
+    expect(() => buildQuery(PageQuery, { sort: 'desc' })).toThrow();
+    expect(() => buildQuery(undefined, { limit: 1 })).toThrow('this endpoint takes no query parameters');
+    const { api, calls } = client(() => json(200, { items: [], nextCursor: 'o20' }));
+    expect(await api.call('channels', { params: { nodeId: NODE }, query: { limit: 10, cursor: 'o10' } })).toEqual({
+      items: [],
+      nextCursor: 'o20',
+    });
+    expect(calls[0]?.url).toBe(`/api/v1/nodes/${NODE}/channels?cursor=o10&limit=10`);
   });
 
   it('makes idempotency keys the server accepts, new each time', () => {

@@ -11,6 +11,7 @@ import { buildServer } from '../apps/server/src/server.ts';
 import { tempDir, testDriver, writeVaultKey } from '../apps/server/src/testing.ts';
 
 interface Operation {
+  parameters?: { in?: string; name?: string }[];
   requestBody?: { content?: Record<string, { schema?: { $ref?: string } }> };
   responses?: Record<string, { content?: Record<string, { schema?: { $ref?: string } }> }>;
 }
@@ -45,6 +46,10 @@ describe('web API client against the OpenAPI document', () => {
         const success = Object.keys(operation?.responses ?? {}).filter((s) => s.startsWith('2'));
         expect(success, name).toEqual([String(endpoint.status)]);
         expect(operation?.requestBody?.content?.['application/json']?.schema?.$ref, name).toBe(refId(endpoint.body));
+        // Query parameters: the client sends exactly the names the server documents (paged lists).
+        const documented = (operation?.parameters ?? []).filter((p) => p.in === 'query').map((p) => p.name);
+        const query = 'query' in endpoint ? (endpoint.query as { shape?: Record<string, unknown> }).shape : undefined;
+        expect(documented.sort(), name).toEqual(Object.keys(query ?? {}).sort());
         expect(operation?.responses?.[String(endpoint.status)]?.content?.['application/json']?.schema?.$ref, name).toBe(
           refId(endpoint.response),
         );

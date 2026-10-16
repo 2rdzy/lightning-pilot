@@ -6,7 +6,8 @@ import { defineConfig } from 'vitest/config';
 //
 // Coverage gates (repository conventions §7): 95 % of lines and branches for money and the security modules
 // (vault, auth with its sessions, spend), the payment request decoders (threat T18) and the chain identity check
-// (chain profiles, header parsing and the identity monitor, threat T20), 80 % everywhere else. The entry point (main.ts) is left out: it only wires
+// (chain profiles, header parsing and the identity monitor, threat T20) and the wallet module (architecture §10),
+// 80 % everywhere else. The entry point (main.ts) is left out: it only wires
 // the parts together and is checked by starting it. The web app's React components (*.tsx) are left out too: there
 // is no DOM test environment in the agreed dependencies, so they are covered by the Playwright tests (pnpm test:e2e,
 // CI job e2e) instead; the web app's logic lives in plain .ts modules, which count.
@@ -42,6 +43,7 @@ export default defineConfig({
         'apps/server/src/modules/setup/**': GATED,
         'apps/server/src/modules/sessions/**': GATED,
         'apps/server/src/modules/spend/**': GATED,
+        'apps/server/src/modules/wallet/**': GATED,
       },
     },
   },

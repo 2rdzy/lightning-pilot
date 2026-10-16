@@ -27,6 +27,8 @@ type ResponseOf<E> =
 
 export interface CallOptions<N extends EndpointName> {
   params?: Record<string, string>;
+  // Query parameters (paged lists: cursor, limit); validated with the endpoint's query schema before sending.
+  query?: Record<string, string | number | undefined>;
   body?: BodyOf<(typeof ENDPOINTS)[N]>;
   idempotencyKey?: string;
   // Set only by a click/tap handler, never by background queries or session probes.
@@ -49,6 +51,23 @@ export function buildPath(path: string, params: Record<string, string> = {}): st
     if (value === undefined) throw new Error(`missing path parameter ${name}`);
     return encodeURIComponent(value);
   });
+}
+
+// The query string of a request: the values the endpoint's schema accepts, in a stable order; empty without any.
+export function buildQuery(
+  schema: z.ZodType | undefined,
+  query: Record<string, string | number | undefined> | undefined,
+): string {
+  if (query === undefined) return '';
+  if (!schema) throw new Error('this endpoint takes no query parameters');
+  const parsed = schema.parse(query) as Record<string, string | number | undefined>;
+  const search = new URLSearchParams();
+  for (const key of Object.keys(parsed).sort()) {
+    const value = parsed[key];
+    if (value !== undefined) search.set(key, String(value));
+  }
+  const text = search.toString();
+  return text ? `?${text}` : '';
 }
 
 // 16 to 128 characters of [A-Za-z0-9_-]: 24 random bytes in base64url give 32.
@@ -109,7 +128,7 @@ export class ApiClient {
     const generation = this.#generation;
     let res: Response;
     try {
-      res = await this.#fetch(buildPath(endpoint.path, options.params), {
+      res = await this.#fetch(buildPath(endpoint.path, options.params) + buildQuery(endpoint.query, options.query), {
         method: endpoint.method,
         headers,
         credentials: 'same-origin',

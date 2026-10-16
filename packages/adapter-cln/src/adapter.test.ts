@@ -28,6 +28,29 @@ describe('cln adapter with recorded replies', () => {
       features: '0200',
     });
     expect(calls[0]?.rune).toBe('VIEW');
+    expect(info.addresses).toEqual([]);
+  });
+
+  it('reports announced addresses only, as host:port', async () => {
+    const info = await adapter({
+      getinfo: getinfo({
+        address: [
+          { type: 'ipv4', address: '203.0.113.5', port: 9735 },
+          { type: 'ipv6', address: '2001:db8::1', port: 9735 },
+          { type: 'torv3', address: 'x'.repeat(56) + '.onion', port: 9735 },
+          { type: 'dns', address: 'node.example', port: 9736 },
+          { type: 'websocket', port: 9737 },
+          { type: 'future', address: 'z', port: 1 },
+        ],
+        binding: [{ type: 'ipv4', address: '127.0.0.1', port: 19110 }],
+      }),
+    }).adapter.node.getInfo();
+    expect(info.addresses).toEqual([
+      '203.0.113.5:9735',
+      '[2001:db8::1]:9735',
+      'x'.repeat(56) + '.onion:9735',
+      'node.example:9736',
+    ]);
   });
 
   it('maps mainnet and unknown networks, a missing alias and sync warnings', async () => {
