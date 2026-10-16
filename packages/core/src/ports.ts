@@ -36,7 +36,7 @@ export interface RuneCheckPort {
   checkRune(rune: string, method: string, params?: Record<string, string>): Promise<boolean>;
 }
 
-export interface NodePort extends RuneCheckPort {
+export interface NodePort {
   getInfo(): Promise<NodeFacts>;
   // Reachability, the spend credential's state, the access level and the capabilities. Makes several node calls:
   // for status screens and node checks, not for polling.
