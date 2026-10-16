@@ -20,6 +20,7 @@ import {
   type ChainIdentityState,
   type Network,
   type NodeAdapter,
+  type Capability,
 } from '@lightning-pilot/core';
 import { writeTx, type Db } from '../../storage/db.ts';
 import type { DB } from '../../storage/schema.ts';
@@ -569,6 +570,35 @@ export class NodesService {
     return guarded;
   }
 
+  // What the stored credentials allow, from their last admission or verification; no node call.
+  capabilities(row: NodeRow): Capability[] {
+    const read = new Set(JSON.parse(row.view_methods) as string[]);
+    const spend = new Set(JSON.parse(row.spend_methods) as string[]);
+    return capabilitiesAllowed(
+      METHODS,
+      (method) =>
+        method.nodeMethods.every((m) => (method.credential === 'read' ? read : spend).has(m)) &&
+        (method.credential === 'read' || row.spend_state === 'ok'),
+    );
+  }
+
+  // The read adapter for one read port method, refused with capability_missing when the stored view credential
+  // does not allow the method's node commands. Without this check a narrow but valid view rune makes the node
+  // answer 1502 over HTTP 401, which reads as a revoked credential. Rows admitted before scopes were stored
+  // (unchecked, no methods recorded) are left to the node to enforce.
+  async readAdapter(id: string, port: string, method: string): Promise<Awaited<ReturnType<NodesService['adapter']>>> {
+    const loaded = await this.adapter(id);
+    const row = METHODS.find((m) => m.port === port && m.method === method && m.credential === 'read');
+    if (!row) throw new Error(`not a read method: ${port}.${method}`);
+    const methods = JSON.parse(loaded.row.view_methods) as string[];
+    const unrecorded = methods.length === 0 && loaded.row.credentials_checked_at === null;
+    if (!unrecorded && !row.nodeMethods.every((m) => methods.includes(m)))
+      throw new AppError('capability_missing', 'The node credential does not allow this.', {
+        method: `${port}.${method}`,
+      });
+    return loaded;
+  }
+
   async credentialStatus(id: string) {
     const { row, adapter } = await this.adapter(id);
     let view: 'ok' | 'revoked' = 'ok';
@@ -578,17 +608,7 @@ export class NodesService {
       if (!(error instanceof AdapterError) || error.code !== 'node_credential_revoked') throw error;
       view = 'revoked';
     }
-    const read = new Set(JSON.parse(row.view_methods) as string[]);
-    const spend = new Set(JSON.parse(row.spend_methods) as string[]);
-    const capabilities =
-      view === 'ok'
-        ? capabilitiesAllowed(
-            METHODS,
-            (method) =>
-              method.nodeMethods.every((m) => (method.credential === 'read' ? read : spend).has(m)) &&
-              (method.credential === 'read' || row.spend_state === 'ok'),
-          )
-        : [];
+    const capabilities = view === 'ok' ? this.capabilities(row) : [];
     return {
       credentials: {
         view,

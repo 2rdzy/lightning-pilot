@@ -26,6 +26,11 @@ export const GetInfo = z.object({
   num_pending_channels: u32,
   num_inactive_channels: u32,
   our_features: z.object({ init: hex }),
+  // Announced addresses (`binding`, the local listen sockets, is deliberately not read).
+  address: z
+    .array(z.object({ type: z.string().max(20), address: z.string().max(300).optional(), port: u32 }))
+    .max(64)
+    .optional(),
   warning_bitcoind_sync: z.string().optional(),
   warning_lightningd_sync: z.string().optional(),
 });

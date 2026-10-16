@@ -139,6 +139,13 @@ const ALIAS_TTL_MS = 60 * 60_000;
 // Paging through listsendpays to find a label (crash recovery only).
 const LABEL_SCAN_BATCH = 1000;
 
+// Announced addresses as host:port. Types without a host (websocket) or of unknown kind are left out.
+const announced = (entries: { type: string; address?: string | undefined; port: number }[]): string[] =>
+  entries.flatMap((e) => {
+    if (e.address === undefined || !['ipv4', 'ipv6', 'torv2', 'torv3', 'dns'].includes(e.type)) return [];
+    return [e.type === 'ipv6' ? `[${e.address}]:${e.port}` : `${e.address}:${e.port}`];
+  });
+
 const preimageHash = (preimage: string) =>
   parsePaymentHash(createHash('sha256').update(Buffer.from(preimage, 'hex')).digest('hex'));
 
@@ -336,6 +343,7 @@ export function createClnAdapter(options: ClnAdapterOptions) {
           numPendingChannels: reply.num_pending_channels,
           numInactiveChannels: reply.num_inactive_channels,
           features: reply.our_features.init,
+          addresses: announced(reply.address ?? []),
         };
       },
       checkRune: async (rune: string, method: string, params?: Record<string, string>) => {

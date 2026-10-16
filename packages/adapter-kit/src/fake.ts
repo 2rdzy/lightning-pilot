@@ -405,6 +405,7 @@ export class FakeAdapter implements NodeAdapter {
         numPendingChannels: this.#channels.filter((c) => c.channel.state.group === 'opening').length,
         numInactiveChannels: this.#channels.filter((c) => c.channel.state.group === 'inactive').length,
         features: this.featuresOverride ?? fakeFeatures(this.#options.chain),
+        addresses: [],
       };
     },
     checkRune: async (rune: string, method: string, params?: Record<string, string>): Promise<boolean> => {

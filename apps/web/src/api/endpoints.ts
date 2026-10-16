@@ -2,6 +2,21 @@
 // (`@lightning-pilot/core` api.ts). A test in tools/ checks every entry against the server's OpenAPI document, so a
 // route that moves or changes its success status fails CI instead of the browser.
 import {
+  ChannelPage,
+  ChannelResponse,
+  ClosedChannelPage,
+  FeeEstimatesResponse,
+  InvoicePage,
+  InvoiceRecordResponse,
+  NewAddressRequest,
+  NewAddressResponse,
+  NodeDetailsResponse,
+  OnchainTxPage,
+  PageQuery,
+  PaymentPage,
+  PaymentRecordResponse,
+  PeerList,
+  UtxoList,
   ExportRequest,
   ExportEnvelope,
   ImportRequest,
@@ -43,6 +58,8 @@ export interface Endpoint<Body extends z.ZodType | undefined, Response extends z
   path: string;
   status: number;
   body: Body;
+  // Query parameters the route accepts (paged lists), checked against the server's document by a test in tools/.
+  query?: z.ZodType;
   // undefined: the route answers with an empty body.
   response: Response;
   // Spending routes need an Idempotency-Key header.
@@ -244,6 +261,102 @@ export const ENDPOINTS = {
     body: PaymentExecuteRequest,
     response: PaymentResultResponse,
     idempotent: true,
+  }),
+  nodeDetails: endpoint({
+    method: 'GET',
+    path: '/api/v1/nodes/{nodeId}/info',
+    status: 200,
+    body: undefined,
+    response: NodeDetailsResponse,
+  }),
+  feeEstimates: endpoint({
+    method: 'GET',
+    path: '/api/v1/nodes/{nodeId}/fees',
+    status: 200,
+    body: undefined,
+    response: FeeEstimatesResponse,
+  }),
+  channels: endpoint({
+    method: 'GET',
+    path: '/api/v1/nodes/{nodeId}/channels',
+    status: 200,
+    body: undefined,
+    query: PageQuery,
+    response: ChannelPage,
+  }),
+  closedChannels: endpoint({
+    method: 'GET',
+    path: '/api/v1/nodes/{nodeId}/channels/closed',
+    status: 200,
+    body: undefined,
+    query: PageQuery,
+    response: ClosedChannelPage,
+  }),
+  channel: endpoint({
+    method: 'GET',
+    path: '/api/v1/nodes/{nodeId}/channels/{channel}',
+    status: 200,
+    body: undefined,
+    response: ChannelResponse,
+  }),
+  peers: endpoint({
+    method: 'GET',
+    path: '/api/v1/nodes/{nodeId}/peers',
+    status: 200,
+    body: undefined,
+    response: PeerList,
+  }),
+  payments: endpoint({
+    method: 'GET',
+    path: '/api/v1/nodes/{nodeId}/payments',
+    status: 200,
+    body: undefined,
+    query: PageQuery,
+    response: PaymentPage,
+  }),
+  payment: endpoint({
+    method: 'GET',
+    path: '/api/v1/nodes/{nodeId}/payments/{paymentHash}',
+    status: 200,
+    body: undefined,
+    response: PaymentRecordResponse,
+  }),
+  invoices: endpoint({
+    method: 'GET',
+    path: '/api/v1/nodes/{nodeId}/invoices',
+    status: 200,
+    body: undefined,
+    query: PageQuery,
+    response: InvoicePage,
+  }),
+  invoice: endpoint({
+    method: 'GET',
+    path: '/api/v1/nodes/{nodeId}/invoices/{paymentHash}',
+    status: 200,
+    body: undefined,
+    response: InvoiceRecordResponse,
+  }),
+  onchainTransactions: endpoint({
+    method: 'GET',
+    path: '/api/v1/nodes/{nodeId}/onchain/transactions',
+    status: 200,
+    body: undefined,
+    query: PageQuery,
+    response: OnchainTxPage,
+  }),
+  utxos: endpoint({
+    method: 'GET',
+    path: '/api/v1/nodes/{nodeId}/onchain/utxos',
+    status: 200,
+    body: undefined,
+    response: UtxoList,
+  }),
+  newAddress: endpoint({
+    method: 'POST',
+    path: '/api/v1/nodes/{nodeId}/onchain/address',
+    status: 201,
+    body: NewAddressRequest,
+    response: NewAddressResponse,
   }),
 } as const;
 

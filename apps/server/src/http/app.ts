@@ -22,6 +22,10 @@ import { authRoutes, createGuard, type AuthService } from '../modules/auth/index
 import { sessionsRoutes } from '../modules/sessions/index.ts';
 import { nodesRoutes, type NodesService } from '../modules/nodes/index.ts';
 import { spendRoutes, type ChainSpends, type SpendResolution, type SpendService } from '../modules/spend/index.ts';
+import { channelsRoutes, ChannelsService } from '../modules/channels/index.ts';
+import { onchainRoutes, OnchainService } from '../modules/onchain/index.ts';
+import { peersRoutes, PeersService } from '../modules/peers/index.ts';
+import { walletRoutes, WalletService } from '../modules/wallet/index.ts';
 import type { AppEnv, Router } from './context.ts';
 import { declare } from './declare.ts';
 
@@ -229,6 +233,11 @@ export function createApp(deps: AppDeps): Router {
   sessionsRoutes(app, guard, deps.auth);
   nodesRoutes(app, guard, deps.nodes, deps.auth);
   spendRoutes(app, guard, deps.spend, deps.chainSpends, deps.spendResolution);
+  // Read modules hold no state of their own: each reads through the nodes module's view-only adapter.
+  channelsRoutes(app, guard, new ChannelsService(deps.nodes));
+  peersRoutes(app, guard, new PeersService(deps.nodes));
+  walletRoutes(app, guard, new WalletService(deps.nodes));
+  onchainRoutes(app, guard, new OnchainService(deps.nodes));
   return app;
 }
 

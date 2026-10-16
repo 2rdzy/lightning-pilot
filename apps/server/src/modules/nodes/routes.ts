@@ -14,6 +14,7 @@ import {
   msat,
   NodeIdParam,
   NodeInfoResponse,
+  NodeDetailsResponse,
   NodeListResponse,
   NodeSummary,
   parseMsat,
@@ -212,6 +213,47 @@ export function nodesRoutes(app: Router, guard: Guard, nodes: NodesService, auth
           numPendingChannels: facts.numPendingChannels,
           numInactiveChannels: facts.numInactiveChannels,
           chainIdentity: nodes.identity(row),
+        }),
+        200,
+      );
+    },
+  );
+
+  declare(
+    app,
+    guard,
+    'read',
+    createRoute({
+      method: 'get',
+      path: '/api/v1/nodes/{nodeId}/info',
+      summary: 'Node details: live information, announced addresses and what the credentials allow',
+      request: { params: NodeIdParam },
+      responses: { 200: { description: 'Node details', ...json(NodeDetailsResponse) }, ...errors },
+    }),
+    async (c) => {
+      const { row, adapter } = await nodes.readAdapter(c.req.valid('param').nodeId, 'node', 'getInfo');
+      const facts = await adapter.node.getInfo();
+      return c.json(
+        NodeDetailsResponse.parse({
+          id: row.id,
+          pubkey: facts.pubkey,
+          alias: facts.alias,
+          color: facts.color,
+          implementation: facts.implementation,
+          version: facts.version,
+          chain: row.chain,
+          network: row.network,
+          blockHeight: facts.blockHeight,
+          synced: facts.synced,
+          numPeers: facts.numPeers,
+          numActiveChannels: facts.numActiveChannels,
+          numPendingChannels: facts.numPendingChannels,
+          numInactiveChannels: facts.numInactiveChannels,
+          chainIdentity: nodes.identity(row),
+          features: facts.features,
+          addresses: facts.addresses ?? [],
+          accessLevel: row.access_level,
+          capabilities: nodes.capabilities(row),
         }),
         200,
       );
