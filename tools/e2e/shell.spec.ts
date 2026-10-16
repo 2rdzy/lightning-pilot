@@ -46,7 +46,7 @@ test('the shell: layout, live connection, view, theme and screens, accessible in
     // Phone: top bar in --bar, tab bar Home · Pay · Receive · More (Channels appears once WP17 builds it).
     const bar = page.locator('header');
     await expect(bar).toHaveCSS('background-color', 'rgb(130, 42, 28)');
-    await expect(nav.getByRole('link')).toHaveText(['Home', 'Pay', 'Receive']);
+    await expect(nav.getByRole('link')).toHaveText(['Home', 'Channels', 'Pay', 'Receive']);
     await expect(nav.getByRole('button', { name: 'More' })).toBeVisible();
     await nav.getByRole('button', { name: 'More' }).click();
     const panel = page.getByTestId('menu-panel');
@@ -63,7 +63,15 @@ test('the shell: layout, live connection, view, theme and screens, accessible in
   } else {
     await expect(page.getByTestId('live-indicator')).toHaveAttribute('data-state', 'live');
     await expect(page.getByTestId('block-height')).toHaveText(/^Height [0-9,]+$/);
-    await expect(nav.getByRole('link')).toHaveText(['Dashboard', 'Node', 'Pay', 'Receive', 'Settings']);
+    await expect(nav.getByRole('link')).toHaveText([
+      'Dashboard',
+      'Channels',
+      'Peers',
+      'Node',
+      'Pay',
+      'Receive',
+      'Settings',
+    ]);
     await expect(nav.getByRole('link', { name: 'Dashboard' })).toHaveAttribute('aria-current', 'page');
     // Advanced by default on a desktop; the choice is kept for this device.
     const toggle = page.getByTestId('view-toggle');

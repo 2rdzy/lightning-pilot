@@ -10,7 +10,7 @@ import { listen } from '../../apps/server/src/http/listen.ts';
 import { createLogger } from '../../apps/server/src/logging/logger.ts';
 import { totp } from '../../apps/server/src/modules/auth/totp/totp.ts';
 import { buildServer } from '../../apps/server/src/server.ts';
-import { setupForTest, tempDir, testRune, writeVaultKey } from '../../apps/server/src/testing.ts';
+import { setupForTest, tempDir, testRune, testSpendPolicy, writeVaultKey } from '../../apps/server/src/testing.ts';
 
 export const SHELL_PASSWORD = 'Shell-browser-account-9!';
 const FAKE_CA = '-----BEGIN CERTIFICATE-----\nZmFrZQ==\n-----END CERTIFICATE-----\n';
@@ -26,7 +26,7 @@ export interface ShellServer {
   close: () => Promise<void>;
 }
 
-export async function startShellServer(): Promise<ShellServer> {
+export async function startShellServer(options: { spending?: boolean; readOnly?: boolean } = {}): Promise<ShellServer> {
   const tmp = tempDir();
   const key = writeVaultKey(tmp.dir);
   let token = '';
@@ -70,7 +70,8 @@ export async function startShellServer(): Promise<ShellServer> {
         caCertificate: FAKE_CA,
         serverName: 'localhost',
         viewRune: testRune('read'),
-        spendRune: testRune('spend'),
+        ...(options.readOnly ? { accessLevel: 'read-only' as const } : { spendRune: testRune('spend') }),
+        ...(options.spending ? { limits: testSpendPolicy } : {}),
       },
       'r-shell',
     );

@@ -24,8 +24,16 @@ export const NODE_READ_EVENTS = [
 // of copying event payloads into a possibly different node's cache. Only active screens refetch.
 export async function refreshNodeReads(client: QueryClient): Promise<void> {
   await Promise.all(
-    ['node', 'balances', 'node-details', 'node-credentials'].map((key) =>
-      client.invalidateQueries({ queryKey: [key] }),
-    ),
+    [
+      'node',
+      'balances',
+      'node-details',
+      'node-credentials',
+      'channels',
+      'closed-channels',
+      'channel',
+      'peers',
+      'spend-policy',
+    ].map((key) => client.invalidateQueries({ queryKey: [key] })),
   );
 }

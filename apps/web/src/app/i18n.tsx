@@ -4,6 +4,8 @@ import { createContext, useContext, type ReactNode } from 'react';
 import { createTranslator, mergeMessages, type Translator } from '../i18n/messages.ts';
 import app from './messages.en.json' with { type: 'json' };
 import dashboard from '../features/dashboard/messages.en.json' with { type: 'json' };
+import channels from '../features/channels/messages.en.json' with { type: 'json' };
+import peers from '../features/peers/messages.en.json' with { type: 'json' };
 import node from '../features/node/messages.en.json' with { type: 'json' };
 import login from '../features/login/messages.en.json' with { type: 'json' };
 import pay from '../features/pay/messages.en.json' with { type: 'json' };
@@ -12,7 +14,19 @@ import setup from '../features/setup/messages.en.json' with { type: 'json' };
 import shell from '../shell/messages.en.json' with { type: 'json' };
 
 // English only in release 0.1; every feature adds its own file here.
-export const MESSAGES_EN = mergeMessages(app, shell, setup, login, dashboard, node, receive, pay, exporting);
+export const MESSAGES_EN = mergeMessages(
+  app,
+  shell,
+  setup,
+  login,
+  dashboard,
+  node,
+  channels,
+  peers,
+  receive,
+  pay,
+  exporting,
+);
 
 const TranslatorContext = createContext<Translator | undefined>(undefined);
 
