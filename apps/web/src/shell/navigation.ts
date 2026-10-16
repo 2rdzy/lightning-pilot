@@ -47,7 +47,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
     basic: true,
     tab: 1,
     section: 'main',
-    built: false,
+    built: true,
   },
   {
     id: 'peers',
@@ -57,7 +57,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
     icon: 'peers',
     basic: false,
     section: 'main',
-    built: false,
+    built: true,
   },
   {
     id: 'payments',

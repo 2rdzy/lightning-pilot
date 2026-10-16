@@ -13,6 +13,20 @@ import {
 import { z } from 'zod';
 import type { ApiClient } from '../api/client.ts';
 import { DashboardScreen } from '../features/dashboard/DashboardScreen.tsx';
+import { ChannelsScreen } from '../features/channels/ChannelsScreen.tsx';
+import { ChannelScreen } from '../features/channels/ChannelScreen.tsx';
+import { OpenChannelScreen, CloseChannelScreen } from '../features/channels/ChannelActionScreen.tsx';
+import { PeersScreen } from '../features/peers/PeersScreen.tsx';
+import { PeerScreen } from '../features/peers/PeerScreen.tsx';
+import { ConnectScreen } from '../features/peers/ConnectScreen.tsx';
+import {
+  ChannelRef,
+  PubkeySchema,
+  ListSearch,
+  DetailSearch,
+  OpenSearch,
+  CloseSearch,
+} from '../features/channels/data.ts';
 import { NodeScreen } from '../features/node/NodeScreen.tsx';
 import { RecoveryScreen } from '../features/login/RecoveryScreen.tsx';
 import { LoginScreen } from '../features/login/LoginScreen.tsx';
@@ -153,6 +167,58 @@ export const payRoute = createRoute({
   component: PayScreen,
 });
 
+export const channelsRoute = createRoute({
+  getParentRoute: () => nodeRoute,
+  path: 'channels',
+  validateSearch: (search) => ListSearch.parse(search),
+  component: ChannelsScreen,
+});
+export const channelRoute = createRoute({
+  getParentRoute: () => nodeRoute,
+  path: 'channels/$channel',
+  validateSearch: (search) => DetailSearch.parse(search),
+  beforeLoad: ({ params }) => {
+    if (!ChannelRef.safeParse(params.channel).success) throw notFound();
+  },
+  component: ChannelScreen,
+});
+export const openChannelRoute = createRoute({
+  getParentRoute: () => nodeRoute,
+  path: 'channels/open',
+  validateSearch: (search) => OpenSearch.parse(search),
+  component: OpenChannelScreen,
+});
+export const closeChannelRoute = createRoute({
+  getParentRoute: () => nodeRoute,
+  path: 'channels/$channel/close',
+  validateSearch: (search) => CloseSearch.parse(search),
+  beforeLoad: ({ params }) => {
+    if (!ChannelRef.safeParse(params.channel).success) throw notFound();
+  },
+  component: CloseChannelScreen,
+});
+export const peersRoute = createRoute({
+  getParentRoute: () => nodeRoute,
+  path: 'peers',
+  validateSearch: (search) => ListSearch.parse(search),
+  component: PeersScreen,
+});
+export const peerRoute = createRoute({
+  getParentRoute: () => nodeRoute,
+  path: 'peers/$pubkey',
+  validateSearch: (search) => ListSearch.parse(search),
+  beforeLoad: ({ params }) => {
+    if (!PubkeySchema.safeParse(params.pubkey).success) throw notFound();
+  },
+  component: PeerScreen,
+});
+export const connectPeerRoute = createRoute({
+  getParentRoute: () => nodeRoute,
+  path: 'peers/connect',
+  validateSearch: (search) => OpenSearch.parse(search),
+  component: ConnectScreen,
+});
+
 const routeTree = rootRoute.addChildren([
   setupRoute,
   loginRoute,
@@ -160,7 +226,19 @@ const routeTree = rootRoute.addChildren([
   authRoute.addChildren([
     exportRoute,
     indexRoute,
-    nodeRoute.addChildren([dashboardRoute, nodeInfoRoute, receiveRoute, payRoute]),
+    nodeRoute.addChildren([
+      dashboardRoute,
+      nodeInfoRoute,
+      receiveRoute,
+      payRoute,
+      channelsRoute,
+      channelRoute,
+      openChannelRoute,
+      closeChannelRoute,
+      peersRoute,
+      peerRoute,
+      connectPeerRoute,
+    ]),
   ]),
 ]);
 
