@@ -50,9 +50,25 @@ describe('web API client against the OpenAPI document', () => {
         const documented = (operation?.parameters ?? []).filter((p) => p.in === 'query').map((p) => p.name);
         const query = 'query' in endpoint ? (endpoint.query as { shape?: Record<string, unknown> }).shape : undefined;
         expect(documented.sort(), name).toEqual(Object.keys(query ?? {}).sort());
-        expect(operation?.responses?.[String(endpoint.status)]?.content?.['application/json']?.schema?.$ref, name).toBe(
-          refId(endpoint.response),
-        );
+        const response = operation?.responses?.[String(endpoint.status)]?.content?.['application/json']?.schema;
+        if (endpoint.response && !endpoint.response.meta()?.id) {
+          // Some existing read contracts are inline in OpenAPI. Compare their complete schema rather than
+          // requiring a component name or accepting two absent references as a match.
+          const path = `/__client-contract/${name}`;
+          server.app.openAPIRegistry.registerPath({
+            method: 'get',
+            path,
+            responses: {
+              200: { description: 'Client contract', content: { 'application/json': { schema: endpoint.response } } },
+            },
+          });
+          const expected = openApiDocument(server.app).paths?.[path]?.get?.responses?.['200'];
+          expect(response, name).toEqual(
+            expected && 'content' in expected ? expected.content?.['application/json']?.schema : undefined,
+          );
+        } else {
+          expect(response?.$ref, name).toBe(refId(endpoint.response));
+        }
       }
     } finally {
       cleanup();

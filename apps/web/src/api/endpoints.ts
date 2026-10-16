@@ -11,6 +11,7 @@ import {
   NewAddressRequest,
   NewAddressResponse,
   NodeDetailsResponse,
+  NodeCredentialStatusResponse,
   OnchainTxPage,
   PageQuery,
   PaymentPage,
@@ -268,6 +269,13 @@ export const ENDPOINTS = {
     status: 200,
     body: undefined,
     response: NodeDetailsResponse,
+  }),
+  nodeCredentials: endpoint({
+    method: 'GET',
+    path: '/api/v1/nodes/{nodeId}/credentials',
+    status: 200,
+    body: undefined,
+    response: NodeCredentialStatusResponse,
   }),
   feeEstimates: endpoint({
     method: 'GET',

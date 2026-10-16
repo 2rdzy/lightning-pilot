@@ -87,7 +87,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
     icon: 'node',
     basic: false,
     section: 'main',
-    built: false,
+    built: true,
   },
   {
     id: 'pay',

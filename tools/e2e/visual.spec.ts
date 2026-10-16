@@ -31,7 +31,12 @@ for (const scheme of ['light', 'dark'] as const) {
     await expect(page).toHaveScreenshot(`dashboard-${view}-${scheme}.png`, {
       fullPage: true,
       animations: 'disabled',
-      mask: [page.getByTestId('block-height'), page.getByTestId('live-indicator'), page.locator('dd.font-mono')],
+      mask: [
+        page.getByTestId('block-height'),
+        page.getByTestId('live-indicator'),
+        page.locator('main .font-mono'),
+        page.locator('main time'),
+      ],
     });
   });
 }

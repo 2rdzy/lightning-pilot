@@ -13,6 +13,7 @@ import {
 import { z } from 'zod';
 import type { ApiClient } from '../api/client.ts';
 import { DashboardScreen } from '../features/dashboard/DashboardScreen.tsx';
+import { NodeScreen } from '../features/node/NodeScreen.tsx';
 import { RecoveryScreen } from '../features/login/RecoveryScreen.tsx';
 import { LoginScreen } from '../features/login/LoginScreen.tsx';
 import { PayScreen } from '../features/pay/PayScreen.tsx';
@@ -141,6 +142,8 @@ export const receiveRoute = createRoute({
   component: ReceiveScreen,
 });
 
+export const nodeInfoRoute = createRoute({ getParentRoute: () => nodeRoute, path: 'node', component: NodeScreen });
+
 export const payRoute = createRoute({
   getParentRoute: () => nodeRoute,
   path: 'pay',
@@ -154,7 +157,11 @@ const routeTree = rootRoute.addChildren([
   setupRoute,
   loginRoute,
   recoveryRoute,
-  authRoute.addChildren([exportRoute, indexRoute, nodeRoute.addChildren([dashboardRoute, receiveRoute, payRoute])]),
+  authRoute.addChildren([
+    exportRoute,
+    indexRoute,
+    nodeRoute.addChildren([dashboardRoute, nodeInfoRoute, receiveRoute, payRoute]),
+  ]),
 ]);
 
 export function createAppRouter(context: RouterContext) {

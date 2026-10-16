@@ -14,5 +14,15 @@
   "dashboard.channels.one": "{count} active channel",
   "dashboard.channels.other": "{count} active channels",
   "dashboard.peers.one": "{count} peer",
-  "dashboard.peers.other": "{count} peers"
+  "dashboard.peers.other": "{count} peers",
+  "dashboard.remote": "Remote balance",
+  "dashboard.pendingClose": "Pending close",
+  "dashboard.reserved": "Reserved",
+  "dashboard.liquidity": "Local {local} sat; remote {remote} sat",
+  "dashboard.liquidityHelp": "Channel balances: local funds on this side, remote funds on the other. Spendable and receivable amounts account for channel constraints.",
+  "dashboard.pendingChannels.one": "{count} pending channel",
+  "dashboard.pendingChannels.other": "{count} pending channels",
+  "dashboard.inactiveChannels.one": "{count} inactive channel",
+  "dashboard.inactiveChannels.other": "{count} inactive channels",
+  "dashboard.nodeDetails": "View node details"
 }

@@ -66,7 +66,7 @@ describe('navigation', () => {
   const all = NAV_ITEMS.map((item) => ({ ...item, built: true }));
 
   it('shows only built screens, and hides Advanced-only ones in the Basic view', () => {
-    expect(ids(visibleItems('advanced'))).toEqual(['dashboard', 'pay', 'receive', 'settings']);
+    expect(ids(visibleItems('advanced'))).toEqual(['dashboard', 'node', 'pay', 'receive', 'settings']);
     expect(ids(visibleItems('basic', all))).toEqual([
       'dashboard',
       'channels',

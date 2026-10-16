@@ -25,6 +25,7 @@ import { useApi } from '../app/api-context.tsx';
 import { useT } from '../app/i18n.tsx';
 import { nodeInfoQuery } from '../app/queries.ts';
 import { nodeRoute } from '../app/router.tsx';
+import { NODE_READ_EVENTS, refreshNodeReads } from '../features/node/queries.ts';
 import { rememberNode } from '../app/session.ts';
 import { formatInteger } from '../i18n/format.ts';
 import { connectLive } from './live.ts';
@@ -136,11 +137,14 @@ export function Shell() {
   }, [node.id]);
 
   useEffect(() => {
-    // A new block or identity result changes the top bar: read the node again.
+    // Reopening the stream can miss updates, so refresh reads on open as well as on relevant events.
     const stop = connectLive({
-      onState: setLive,
-      eventTypes: ['block.new', 'chain_identity.updated'],
-      onEvent: () => void queryClient.invalidateQueries({ queryKey: ['node'] }),
+      onState: (state) => {
+        setLive(state);
+        if (state === 'live') void refreshNodeReads(queryClient);
+      },
+      eventTypes: NODE_READ_EVENTS,
+      onEvent: () => void refreshNodeReads(queryClient),
     });
     stopLive.current = stop;
     return stop;
