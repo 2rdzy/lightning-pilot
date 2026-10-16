@@ -129,7 +129,12 @@ export class SpendRecovery {
       .select(['id', 'recorded_at'])
       .where('recorded_at', '>', since)
       .execute())
-      for (const identity of await this.#db.selectFrom('nodes').select(['chain', 'pubkey']).distinct().execute())
+      for (const identity of await this.#db
+        .selectFrom('nodes')
+        .where('removed_at', 'is', null)
+        .select(['chain', 'pubkey'])
+        .distinct()
+        .execute())
         await this.#db
           .insertInto('restore_counts')
           .values({
@@ -174,6 +179,7 @@ export class SpendRecovery {
       const due = this.#backoff.get(countKey(count));
       const node = await this.#db
         .selectFrom('nodes')
+        .where('removed_at', 'is', null)
         .select('id')
         .where('chain', '=', count.chain)
         .where('pubkey', '=', count.pubkey)
@@ -198,6 +204,7 @@ export class SpendRecovery {
         await this.#nodes.monitor.ensureChecked(nodeId);
         const reloaded = await this.#db
           .selectFrom('nodes')
+          .where('removed_at', 'is', null)
           .selectAll()
           .where('id', '=', nodeId)
           .executeTakeFirstOrThrow();
@@ -207,7 +214,7 @@ export class SpendRecovery {
             identity.state === 'waiting' ? 'chain_waiting' : 'chain_refused',
             'Not confirmed on its chain.',
           );
-        adapter = loaded.adapter;
+        adapter = loaded.canSpend ? await this.#nodes.spendingAdapter(nodeId) : loaded.adapter;
       } catch (err) {
         this.#log.warn('spend recovery: node not available', {
           nodeId,

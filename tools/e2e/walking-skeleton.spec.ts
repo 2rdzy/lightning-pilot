@@ -1,3 +1,4 @@
+import { testRune } from '../../apps/server/src/testing.ts';
 // The walking skeleton in the browser (build plan WP02), at desktop and phone size, against the built web app served
 // by the real server: setup → login → dashboard balance → invoice on bob with QR → alice pays it through a link
 // (prefill only, removed from history, preview, confirm) → balance changes → reload keeps the session → logout →
@@ -89,8 +90,8 @@ test('setup, login, receive, pay and log out in the browser', async ({ page }, t
   await page
     .getByLabel('Node CA certificate (PEM)', { exact: true })
     .fill(view?.caCertificate ?? '-----BEGIN CERTIFICATE-----\nZmFrZQ==\n-----END CERTIFICATE-----\n');
-  await page.getByLabel('Restricted view rune', { exact: true }).fill(view?.rune ?? 'fake-view-alice');
-  await page.getByLabel('Restricted spend rune (optional)', { exact: true }).fill(spend?.rune ?? 'fake-spend-alice');
+  await page.getByLabel('Restricted view rune', { exact: true }).fill(view?.rune ?? testRune('read'));
+  await page.getByLabel('Restricted spend rune (optional)', { exact: true }).fill(spend?.rune ?? testRune('spend'));
   await page.getByLabel('Certificate server name (usually localhost)', { exact: true }).fill('localhost');
   await page.getByRole('button', { name: 'Continue', exact: true }).click();
   await page.getByLabel('Maximum cost per payment (sat)').fill('1000000');

@@ -119,7 +119,12 @@ export class SpendService {
     return liveSession(db, this.#auth, handle);
   }
   async policy(nodeId: string) {
-    const row = await this.#db.selectFrom('nodes').selectAll().where('id', '=', nodeId).executeTakeFirst();
+    const row = await this.#db
+      .selectFrom('nodes')
+      .where('removed_at', 'is', null)
+      .selectAll()
+      .where('id', '=', nodeId)
+      .executeTakeFirst();
     if (!row) throw new AppError('not_found', 'No such node.');
     const exists = await this.#db
       .selectFrom('spend_limits')
@@ -142,7 +147,12 @@ export class SpendService {
   async updatePolicy(handle: string, nodeId: string, policy: SpendPolicy, requestId: string): Promise<void> {
     await writeTx(this.#db, async (db) => {
       this.#auth.sessions.requireGrant(await this.#live(db, handle), 'security');
-      const node = await db.selectFrom('nodes').selectAll().where('id', '=', nodeId).executeTakeFirst();
+      const node = await db
+        .selectFrom('nodes')
+        .where('removed_at', 'is', null)
+        .selectAll()
+        .where('id', '=', nodeId)
+        .executeTakeFirst();
       if (!node) throw new AppError('not_found', 'No such node.');
       const values = policyValues(policy);
       await db
@@ -308,7 +318,14 @@ export class SpendService {
     await this.#guardInvoice(row, adapter, parsePaymentHash(payload.paymentHash), requestId, false);
     const claim = async (trx: Db, policy: SpendPolicy, stepUp: boolean) => {
       const live = await this.#live(trx, sessionHandle);
-      const node = await trx.selectFrom('nodes').selectAll().where('id', '=', nodeId).executeTakeFirstOrThrow();
+      const node = await trx
+        .selectFrom('nodes')
+        .where('removed_at', 'is', null)
+        .selectAll()
+        .where('id', '=', nodeId)
+        .executeTakeFirstOrThrow();
+      if (node.revision !== row.revision)
+        throw new AppError('confirmation_invalid', 'The node changed; preview again.');
       refuseUnlessConfirmed(this.#nodes.identity(node));
       if (
         node.chain !== payload.chain ||
@@ -411,8 +428,9 @@ export class SpendService {
         amountMsat: payload.amount,
         maxFeeMsat: payload.maxFee,
       });
+      const spending = await this.#nodes.spendingAdapter(nodeId);
       nodeCallStarted = true;
-      const paid = await adapter.pay.pay({
+      const paid = await spending.pay.pay({
         bolt11: payload.bolt11,
         ...(payload.amountless ? { amount: parseMsat(payload.amount) } : {}),
         maxFee: parseMsat(payload.maxFee),

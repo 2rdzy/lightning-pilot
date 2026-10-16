@@ -1,3 +1,4 @@
+import { testRune } from '../../testing.ts';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { FakeAdapter, FakeNetwork } from '@lightning-pilot/adapter-kit';
 import { msat, type EventCursor } from '@lightning-pilot/core';
@@ -78,8 +79,8 @@ async function harness() {
       url: 'https://fake.test',
       serverName: 'localhost',
       caCertificate: '-----BEGIN CERTIFICATE-----\nMIIBfake\n-----END CERTIFICATE-----\n',
-      viewRune: 'view',
-      spendRune: 'spend',
+      viewRune: testRune('read'),
+      spendRune: testRune('spend'),
     },
     'r-test',
   );

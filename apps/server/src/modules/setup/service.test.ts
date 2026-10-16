@@ -1,3 +1,4 @@
+import { testRune } from '../../testing.ts';
 import { randomBytes } from 'node:crypto';
 import { FakeAdapter } from '@lightning-pilot/adapter-kit';
 import { AdapterError, type SetupAction, type SetupLimits } from '@lightning-pilot/core';
@@ -25,8 +26,8 @@ const INPUT = {
   url: 'https://localhost:1234',
   caCertificate: 'synthetic certificate',
   serverName: 'localhost',
-  viewRune: 'synthetic-view',
-  spendRune: 'synthetic-spend',
+  viewRune: testRune('read'),
+  spendRune: testRune('spend'),
 };
 const ATTACKER = { peerAddress: '203.0.113.9' };
 const OWNER = { peerAddress: '192.0.2.5' };

@@ -139,7 +139,10 @@ export class SpendResolution {
   ): Promise<void> {
     try {
       const psbt = this.#vault.openSecret(sealed, `intent_psbt:${intentId}`);
-      const { adapter, canSpend } = await this.#nodes.adapter(nodeId);
+      const { canSpend } = await this.#nodes.adapter(nodeId);
+      const adapter = canSpend
+        ? await this.#nodes.spendingAdapter(nodeId)
+        : (await this.#nodes.adapter(nodeId)).adapter;
       if (!canSpend) return;
       try {
         await adapter.onchain.discard(txid);

@@ -2,7 +2,11 @@
 import { randomUUID } from 'node:crypto';
 import { createRoute } from '@hono/zod-openapi';
 import {
-  AddNodeRequest,
+  ManageNodeRequest,
+  ReplaceNodeRequest,
+  NodeSetupCommandRequest,
+  NodeSetupCommandResponse,
+  NodeCredentialStatusResponse,
   BalancesResponse,
   CreateInvoiceRequest,
   ErrorBody,
@@ -20,12 +24,15 @@ import type { AuthService } from '../auth/index.ts';
 import { sessionOf } from '../../http/context.ts';
 import type { Router } from '../../http/context.ts';
 import { declare, type Guard } from '../../http/declare.ts';
+import { setupCommand } from './credentials.ts';
 import type { NodesService } from './service.ts';
 
 const json = <T>(schema: T) => ({ content: { 'application/json': { schema } } });
 const errors = {
   400: { description: 'Invalid request', ...json(ErrorBody) },
   401: { description: 'Not authenticated', ...json(ErrorBody) },
+  403: { description: 'Permission, step-up or limits required', ...json(ErrorBody) },
+  503: { description: 'Node changed; retry', ...json(ErrorBody) },
   404: { description: 'No such node', ...json(ErrorBody) },
   409: { description: 'Chain identity or credential problem', ...json(ErrorBody) },
   502: { description: 'The node did not answer as expected', ...json(ErrorBody) },
@@ -53,15 +60,109 @@ export function nodesRoutes(app: Router, guard: Guard, nodes: NodesService, auth
     'manage',
     createRoute({
       method: 'post',
+      path: '/api/v1/nodes/{nodeId}/credentials/check',
+      request: { params: NodeIdParam },
+      responses: { 200: { description: 'Credentials rechecked', ...json(NodeCredentialStatusResponse) }, ...errors },
+    }),
+    async (c) => {
+      await auth.requireStepUp(sessionOf(c).idHash, 'security');
+      return c.json(
+        NodeCredentialStatusResponse.parse(
+          await nodes.recheckCredentials(c.req.valid('param').nodeId, c.get('requestId'), (db) =>
+            auth.requireStepUp(sessionOf(c).idHash, 'security', db),
+          ),
+        ),
+        200,
+      );
+    },
+  );
+  declare(
+    app,
+    guard,
+    'manage',
+    createRoute({
+      method: 'post',
+      path: '/api/v1/nodes/setup-command',
+      request: { body: { required: true, ...json(NodeSetupCommandRequest) } },
+      responses: { 200: { description: 'Local setup command', ...json(NodeSetupCommandResponse) }, ...errors },
+    }),
+    async (c) =>
+      c.json(
+        {
+          command: setupCommand(c.req.valid('json').accessLevel),
+          instructions:
+            'Requires lightning-cli and jq on the node host; qrencode optionally prints a terminal QR. Run locally, then paste the JSON block. Enter the clnrest HTTPS URL and pinned CA separately. Keep the block secret.',
+        },
+        200,
+      ),
+  );
+  declare(
+    app,
+    guard,
+    'manage',
+    createRoute({
+      method: 'put',
+      path: '/api/v1/nodes/{nodeId}',
+      request: { params: NodeIdParam, body: { required: true, ...json(ReplaceNodeRequest) } },
+      responses: { 200: { description: 'Node replaced', ...json(NodeSummary) }, ...errors },
+    }),
+    async (c) => {
+      await auth.requireStepUp(sessionOf(c).idHash, 'security');
+      const result = await nodes.replace(c.req.valid('param').nodeId, c.req.valid('json'), c.get('requestId'), (db) =>
+        auth.requireStepUp(sessionOf(c).idHash, 'security', db),
+      );
+      return c.json(NodeSummary.parse(result), 200);
+    },
+  );
+  declare(
+    app,
+    guard,
+    'manage',
+    createRoute({
+      method: 'delete',
+      path: '/api/v1/nodes/{nodeId}',
+      request: { params: NodeIdParam },
+      responses: { 204: { description: 'Node removed' }, ...errors },
+    }),
+    async (c) => {
+      await auth.requireStepUp(sessionOf(c).idHash, 'security');
+      await nodes.remove(c.req.valid('param').nodeId, c.get('requestId'), (db) =>
+        auth.requireStepUp(sessionOf(c).idHash, 'security', db),
+      );
+      return c.body(null, 204);
+    },
+  );
+  declare(
+    app,
+    guard,
+    'read',
+    createRoute({
+      method: 'get',
+      path: '/api/v1/nodes/{nodeId}/credentials',
+      request: { params: NodeIdParam },
+      responses: { 200: { description: 'Credential status', ...json(NodeCredentialStatusResponse) }, ...errors },
+    }),
+    async (c) =>
+      c.json(NodeCredentialStatusResponse.parse(await nodes.credentialStatus(c.req.valid('param').nodeId)), 200),
+  );
+  declare(
+    app,
+    guard,
+    'manage',
+    createRoute({
+      method: 'post',
       path: '/api/v1/nodes',
       summary: 'Add a Core Lightning node',
-      request: { body: { required: true, ...json(AddNodeRequest) } },
+      request: { body: { required: true, ...json(ManageNodeRequest) } },
       responses: { 201: { description: 'Node added', ...json(NodeSummary) }, ...errors },
     }),
     async (c) => {
       await auth.requireStepUp(sessionOf(c).idHash, 'security');
-      const summary = await nodes.add(c.req.valid('json'), c.get('requestId'), (db) =>
-        auth.requireStepUp(sessionOf(c).idHash, 'security', db),
+      const summary = await nodes.add(
+        c.req.valid('json'),
+        c.get('requestId'),
+        (db) => auth.requireStepUp(sessionOf(c).idHash, 'security', db),
+        true,
       );
       return c.json(NodeSummary.parse(summary), 201);
     },

@@ -128,7 +128,14 @@ describe('node status', () => {
     const down = await adapter({
       getinfo: new AdapterError({ code: 'node_unreachable', sent: false, definitive: false }),
     }).adapter.node.getStatus();
-    expect(down).toEqual({ reachable: false, credential: 'ok', accessLevel: 'read-only', capabilities: [] });
+    expect(down).toMatchObject({
+      reachable: false,
+      credential: 'unknown',
+      viewCredential: 'unknown',
+      spendCredential: 'unknown',
+      accessLevel: 'read-only',
+      capabilities: [],
+    });
     const refused = await adapter(
       { getinfo: new AdapterError({ code: 'node_credential_revoked', sent: true, definitive: true }) },
       null,

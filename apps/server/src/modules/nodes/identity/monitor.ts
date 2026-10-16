@@ -22,7 +22,7 @@ import type { DB } from '../../../storage/schema.ts';
 import type { Logger } from '../../../logging/logger.ts';
 import { runIdentityCheck } from './check.ts';
 
-type NodeRow = DB['nodes'];
+type NodeRow = import('kysely').Selectable<DB['nodes']>;
 
 export const DEFAULT_IDENTITY_INTERVAL_MS = 30_000;
 
@@ -140,7 +140,7 @@ export class IdentityMonitor {
   }
 
   async #ids(): Promise<string[]> {
-    const rows = await this.#db.selectFrom('nodes').select('id').execute();
+    const rows = await this.#db.selectFrom('nodes').where('removed_at', 'is', null).select('id').execute();
     return rows.map((r) => r.id);
   }
 
@@ -198,7 +198,14 @@ export class IdentityMonitor {
     if (reason) await this.fullCheck(nodeId, reason);
     // Read after any check that ran meanwhile: the row loaded above may be older than it.
     return this.#inTurn(nodeId, async () =>
-      identityOfRow(await this.#db.selectFrom('nodes').selectAll().where('id', '=', nodeId).executeTakeFirstOrThrow()),
+      identityOfRow(
+        await this.#db
+          .selectFrom('nodes')
+          .where('removed_at', 'is', null)
+          .selectAll()
+          .where('id', '=', nodeId)
+          .executeTakeFirstOrThrow(),
+      ),
     );
   }
 

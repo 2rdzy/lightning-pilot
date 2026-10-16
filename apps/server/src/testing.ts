@@ -1,3 +1,4 @@
+import { runeRestrictions } from '@lightning-pilot/adapter-cln';
 // Test helpers shared by the server's tests (not used at run time).
 import { randomBytes } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -61,3 +62,21 @@ export async function setupForTest(
   await act({ action: 'alerts', alerts: { kind: 'none' } });
   return { secret, reply: await act({ action: 'complete' }) };
 }
+
+export function testRune(kind: 'read' | 'spend'): string {
+  const clauses = JSON.parse(runeRestrictions(kind)) as string[][];
+  return Buffer.concat([
+    Buffer.alloc(32, kind === 'read' ? 1 : 2),
+    Buffer.from('=1&' + clauses.map((c) => c.join('|')).join('&')),
+  ]).toString('base64url');
+}
+
+export const testSpendPolicy = {
+  maxPerPayment: null,
+  max24h: null,
+  stepUpAbove: null,
+  maxFeeRate: '10',
+  maxFeeSharePercent: 5,
+  maxRoutingFeeSharePercent: 1,
+  routingFeeAllowance: '10',
+};

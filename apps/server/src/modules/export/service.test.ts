@@ -728,3 +728,21 @@ describe('encrypted export lifecycle', { timeout: 30000 }, () => {
     expect(await usedBudget(h.db, { chain: 'blake2b', pubkey: PUB }, h.clock.now)).toBeGreaterThanOrEqual(1100n);
   });
 });
+
+it('exports and imports removed node tombstones with their retained spend history', async () => {
+  const h = await harness();
+  const data = payload();
+  const n = first(data.nodes);
+  n.removedAt = NOW;
+  first(data.intents).state = 'succeeded';
+  await h.service.import(h.idHash, { passphrase: PASS, envelope: await envelope(data) });
+  const row = await h.db.selectFrom('nodes').selectAll().where('id', '=', n.id).executeTakeFirstOrThrow();
+  expect(row.removed_at).toBe(NOW);
+  expect(row.access_level).toBe('read-only');
+  const exported = await h.service.export(h.idHash, exportRequest);
+  const plain = await decryptExport(exported, PASS);
+  const restored = ExportPayload.parse(JSON.parse(plain.toString('utf8')) as unknown);
+  plain.fill(0);
+  expect(first(restored.nodes).removedAt).toBe(NOW);
+  expect(first(restored.intents).node_id).toBe(n.id);
+});

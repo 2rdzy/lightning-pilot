@@ -15,6 +15,7 @@ import type { Logger } from '../../logging/logger.ts';
 import { hashPassword, type AuthService, type LoginOrigin, type ScryptCost } from '../auth/index.ts';
 import { generateTotpSecret, matchTotp, otpauthUri } from '../auth/totp/totp.ts';
 import { generateRecoveryCodes, hashRecoveryCode, verifyRecoveryCode } from '../auth/totp/recovery.ts';
+import { verifyRunes } from '../nodes/credentials.ts';
 import type { NodesService, PreparedNode } from '../nodes/service.ts';
 import type { Vault } from '../vault/index.ts';
 
@@ -374,7 +375,13 @@ export class SetupService {
   }
   async #checkCredential(node: PreparedNode): Promise<void> {
     const status = await node.adapter.node.getStatus();
-    if (!status.reachable || (node.input.spendRune && status.credential !== 'ok'))
+    await verifyRunes(
+      node.adapter,
+      node.input.viewRune ?? '',
+      node.input.spendRune,
+      node.input.spendRune === undefined ? 'read-only' : 'standard',
+    );
+    if (!status.reachable || (node.input.spendRune && status.credential === 'revoked'))
       throw new AppError('node_credential_revoked', 'The node credential did not pass its check.');
     if (status.accessLevel === 'admin' || status.accessLevel === 'full')
       throw new AppError('permission_denied', 'Setup accepts restricted read-only or standard credentials.');

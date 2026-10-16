@@ -1,3 +1,4 @@
+import { testSpendPolicy } from '../../apps/server/src/testing.ts';
 // A server on a fresh database with a completed setup, a logged-in owner with a security step-up, and cln-a added
 // with view and spend runes and an unlimited spending policy. Shared by the regtest API tests that need a spend path.
 import { totp } from '../../apps/server/src/modules/auth/totp/totp.ts';
@@ -117,6 +118,7 @@ export async function apiSession(chain: RegtestChain): Promise<ApiSession> {
       serverName: view.serverName,
       viewRune: view.rune,
       spendRune: spend.rune,
+      limits: testSpendPolicy,
     }),
     201,
   );
