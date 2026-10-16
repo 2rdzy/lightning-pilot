@@ -3,8 +3,9 @@ import { useNavigate } from '@tanstack/react-router';
 import { useState } from 'react';
 import { useApi } from '../../app/api-context.tsx';
 import { useT } from '../../app/i18n.tsx';
-import { ErrorNote, Field } from '../../app/parts.tsx';
-import { QrCode } from '../../app/qr.tsx';
+import { ErrorNote, Field } from '../../shell/parts.tsx';
+import { AuthFrame } from '../../shell/pages.tsx';
+import { QrCode } from '@lightning-pilot/ui';
 
 export function RecoveryScreen() {
   const api = useApi();
@@ -23,7 +24,7 @@ export function RecoveryScreen() {
     },
   });
   return (
-    <main className="mx-auto flex max-w-[640px] flex-col gap-6 p-4 md:p-8">
+    <AuthFrame>
       <h1 className="text-2xl font-semibold">{tr.t('login.recoverTitle')}</h1>
       <p>{tr.t('login.recoverNote')}</p>
       {enrol.data ? (
@@ -72,6 +73,6 @@ export function RecoveryScreen() {
         </button>
       ) : null}
       {enrol.error || confirm.error ? <ErrorNote error={enrol.error ?? confirm.error} /> : null}
-    </main>
+    </AuthFrame>
   );
 }

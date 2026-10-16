@@ -20,7 +20,8 @@ import { ReceiveScreen } from '../features/receive/ReceiveScreen.tsx';
 import { SetupScreen } from '../features/setup/SetupScreen.tsx';
 import { nodesQuery } from './queries.ts';
 import { pickNode, safeNext, sessionState } from './session.ts';
-import { NoNodes, NotFound, Shell } from './shell.tsx';
+import { NoNodes, NotFound } from '../shell/pages.tsx';
+import { Shell } from '../shell/Shell.tsx';
 
 export interface RouterContext {
   api: ApiClient;

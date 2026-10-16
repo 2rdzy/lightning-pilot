@@ -3,8 +3,8 @@ import { useMutation } from '@tanstack/react-query';
 import { useForm } from 'react-hook-form';
 import { useApi } from '../../app/api-context.tsx';
 import { useT } from '../../app/i18n.tsx';
-import { Amount, Card, CopyButton, ErrorNote, Field } from '../../app/parts.tsx';
-import { QrCode } from '../../app/qr.tsx';
+import { Amount, Card, CopyButton, ErrorNote, Field } from '../../shell/parts.tsx';
+import { QrCode } from '@lightning-pilot/ui';
 import { nodeRoute } from '../../app/router.tsx';
 import { formatDateTime, formatSats, parseSatsInput } from '../../i18n/format.ts';
 
