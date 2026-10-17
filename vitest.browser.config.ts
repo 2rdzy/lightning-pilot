@@ -21,6 +21,7 @@ export default defineConfig({
       '@base-ui/react/toggle',
       '@base-ui/react/toggle-group',
       'axe-core',
+      'jsqr',
       'lucide-react',
       'qrcode-generator',
       'react',

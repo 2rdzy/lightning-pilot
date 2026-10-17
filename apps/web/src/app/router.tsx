@@ -32,6 +32,9 @@ import { RecoveryScreen } from '../features/login/RecoveryScreen.tsx';
 import { LoginScreen } from '../features/login/LoginScreen.tsx';
 import { PayScreen } from '../features/pay/PayScreen.tsx';
 import { ReceiveScreen } from '../features/receive/ReceiveScreen.tsx';
+import { PaymentsScreen } from '../features/payments/PaymentsScreen.tsx';
+import { InvoiceScreen, PaymentScreen } from '../features/payments/DetailScreens.tsx';
+import { PaymentHashSchema, PaymentsSearch } from '../features/payments/data.ts';
 import { SetupScreen } from '../features/setup/SetupScreen.tsx';
 import { nodesQuery } from './queries.ts';
 import { pickNode, safeNext, sessionState } from './session.ts';
@@ -153,7 +156,33 @@ export const dashboardRoute = createRoute({
 export const receiveRoute = createRoute({
   getParentRoute: () => nodeRoute,
   path: 'receive',
+  // The invoice tab is the plain route; only the on-chain tab shows in the URL.
+  validateSearch: (search: Record<string, unknown>): { tab?: 'onchain' } =>
+    search.tab === 'onchain' ? { tab: 'onchain' } : {},
   component: ReceiveScreen,
+});
+
+export const paymentsRoute = createRoute({
+  getParentRoute: () => nodeRoute,
+  path: 'payments',
+  validateSearch: (search) => PaymentsSearch.parse(search),
+  component: PaymentsScreen,
+});
+export const paymentRoute = createRoute({
+  getParentRoute: () => nodeRoute,
+  path: 'payments/$hash',
+  beforeLoad: ({ params }) => {
+    if (!PaymentHashSchema.safeParse(params.hash).success) throw notFound();
+  },
+  component: PaymentScreen,
+});
+export const invoiceRoute = createRoute({
+  getParentRoute: () => nodeRoute,
+  path: 'invoices/$hash',
+  beforeLoad: ({ params }) => {
+    if (!PaymentHashSchema.safeParse(params.hash).success) throw notFound();
+  },
+  component: InvoiceScreen,
 });
 
 export const nodeInfoRoute = createRoute({ getParentRoute: () => nodeRoute, path: 'node', component: NodeScreen });
@@ -231,6 +260,9 @@ const routeTree = rootRoute.addChildren([
       nodeInfoRoute,
       receiveRoute,
       payRoute,
+      paymentsRoute,
+      paymentRoute,
+      invoiceRoute,
       channelsRoute,
       channelRoute,
       openChannelRoute,

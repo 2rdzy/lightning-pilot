@@ -17,6 +17,9 @@ export const NODE_READ_EVENTS = [
   'channel.updated',
   'peer.updated',
   'node.reachability',
+  'invoice.paid',
+  'invoice.expired',
+  'payment.updated',
   'reload',
 ] as const;
 
@@ -34,6 +37,10 @@ export async function refreshNodeReads(client: QueryClient): Promise<void> {
       'channel',
       'peers',
       'spend-policy',
+      'payments',
+      'payment',
+      'invoices',
+      'invoice',
     ].map((key) => client.invalidateQueries({ queryKey: [key] })),
   );
 }

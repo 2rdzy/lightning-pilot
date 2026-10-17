@@ -24,6 +24,7 @@ export { DestructiveConfirm, Dialog, StepUpDialog, type StepUpLabels, type StepU
 export { PreviewPanel, type PreviewRow } from './PreviewPanel.tsx';
 export { HelpTip, ToastProvider, useToast } from './overlays.tsx';
 export { QrBlock, QrCode } from './QrCode.tsx';
+export { decodeQrImage, QrImageInput } from './QrImageInput.tsx';
 export { qrPath } from './qr.ts';
 export { Logo } from './Logo.tsx';
 export { SegmentedControl, type SegmentOption } from './SegmentedControl.tsx';

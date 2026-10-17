@@ -52,6 +52,7 @@ test('the shell: layout, live connection, view, theme and screens, accessible in
     const panel = page.getByTestId('menu-panel');
     await expect(panel.getByTestId('live-indicator')).toHaveAttribute('data-state', 'live');
     await expect(panel.getByTestId('block-height')).toHaveText(/^Height [0-9,]+$/);
+    await expect(panel.getByRole('link', { name: 'Payments' })).toBeVisible();
     await expect(panel.getByRole('link', { name: 'Settings' })).toBeVisible();
     // Basic by default on a phone.
     await expect(panel.getByRole('button', { name: 'Basic' })).toHaveAttribute('aria-pressed', 'true');
@@ -67,6 +68,7 @@ test('the shell: layout, live connection, view, theme and screens, accessible in
       'Dashboard',
       'Channels',
       'Peers',
+      'Payments',
       'Node',
       'Pay',
       'Receive',
@@ -85,9 +87,9 @@ test('the shell: layout, live connection, view, theme and screens, accessible in
     await page.getByTestId('view-toggle').getByRole('button', { name: 'Advanced' }).click();
     // The navigation collapses to icons and keeps its names.
     await nav.getByRole('button', { name: 'Collapse the navigation' }).click();
-    await expect(nav.getByRole('link', { name: 'Pay' })).toHaveText('');
+    await expect(nav.getByRole('link', { name: 'Pay', exact: true })).toHaveText('');
     await nav.getByRole('button', { name: 'Expand the navigation' }).click();
-    await expect(nav.getByRole('link', { name: 'Pay' })).toHaveText('Pay');
+    await expect(nav.getByRole('link', { name: 'Pay', exact: true })).toHaveText('Pay');
   }
 
   // The theme follows the system until one is chosen, then stays chosen after a reload.
@@ -115,6 +117,8 @@ test('the shell: layout, live connection, view, theme and screens, accessible in
       ['', 'Dashboard'],
       ['/receive', 'Receive'],
       ['/pay', 'Pay'],
+      ['/receive?tab=onchain', 'Receive'],
+      ['/payments', 'Payments'],
     ] as const) {
       await page.goto(`${server.url}${node}${path}`);
       await expect(page.getByRole('heading', { level: 1, name: heading })).toBeVisible();

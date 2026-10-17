@@ -70,6 +70,7 @@ describe('navigation', () => {
       'dashboard',
       'channels',
       'peers',
+      'payments',
       'node',
       'pay',
       'receive',
