@@ -51,6 +51,31 @@ it('checks on-chain and channel spend requests strictly', async () => {
   expect(PeerConnectRequest.safeParse({ uri: 'short' }).success).toBe(false);
 });
 
+it('describes where a channel close sends the funds', async () => {
+  const { ChannelClosePreviewResponse } = await import('./spend.ts');
+  const at = new Date(0).toISOString();
+  const preview = {
+    confirmationToken: 't',
+    cost: { amount: '1000', maxFee: '0', total: '1000' },
+    duplicateWarning: false,
+    stepUpRequired: false,
+    feeOverride: false,
+    scope: 'Lightning Pilot spending limits',
+    chainIdentity: { state: 'confirmed', profile: 'bitcoin', checkedAt: at },
+    expiresAt: at,
+    channel: '103x1x0',
+    peer: '02' + 'ab'.repeat(32),
+    force: false,
+    localBalance: '1000',
+  };
+  const parsed = ChannelClosePreviewResponse.safeParse(preview);
+  expect(parsed.success, JSON.stringify(parsed.error?.issues)).toBe(true);
+  for (const fundsTo of [{ ownWallet: true }, { address: 'bcrt1qxyz', ownWallet: false }])
+    expect(ChannelClosePreviewResponse.safeParse({ ...preview, fundsTo }).success).toBe(true);
+  for (const fundsTo of [{ address: 'bcrt1qxyz' }, { address: '', ownWallet: true }, { ownWallet: false, extra: 1 }])
+    expect(ChannelClosePreviewResponse.safeParse({ ...preview, fundsTo }).success).toBe(false);
+});
+
 it('accepts only a settled outcome when the owner resolves a spend', async () => {
   const { SpendResolveRequest, SpendIntentParam, UnresolvedSpend } = await import('./spend.ts');
   expect(SpendResolveRequest.safeParse({ outcome: 'succeeded' }).success).toBe(true);

@@ -36,6 +36,13 @@ export interface RuneCheckPort {
   checkRune(rune: string, method: string, params?: Record<string, string>): Promise<boolean>;
 }
 
+// Whether an address belongs to the node's own wallet (CLN `listaddresses`). A channel close with no destination pays
+// the channel's local shutdown script, which can be an external address set when the channel was opened; the spend
+// module counts such a close as external unless this says the address is the wallet's.
+export interface AddressOwnershipPort {
+  ownsAddress(address: string): Promise<boolean>;
+}
+
 export interface NodePort extends RuneCheckPort {
   getInfo(): Promise<NodeFacts>;
   // Reachability, the spend credential's state, the access level and the capabilities. Makes several node calls:
