@@ -57,7 +57,7 @@ export class ClnRestClient {
     )
       throw new Error('clnrest URL must be an https origin without credentials');
     const host = this.#url.hostname.replace(/^\[|\]$/g, '');
-    if (isIP(host) && !isNodeAddress(host)) throw new Error('clnrest address must be loopback or private');
+    if (isIP(host) && !isNodeAddress(host)) throw new Error('clnrest address must be loopback, private or Tailscale');
     this.#ca = options.caCertificate;
     this.#serverName = options.serverName;
     this.#maxBytes = options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE;
@@ -73,7 +73,7 @@ export class ClnRestClient {
             return;
           }
           if (!addresses.length || addresses.some(({ address }) => !isNodeAddress(address))) {
-            callback(new Error('clnrest address must be loopback or private'), []);
+            callback(new Error('clnrest address must be loopback, private or Tailscale'), []);
             return;
           }
           if (options.all) callback(null, addresses);
