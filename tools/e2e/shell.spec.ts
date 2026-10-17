@@ -69,6 +69,7 @@ test('the shell: layout, live connection, view, theme and screens, accessible in
       'Channels',
       'Peers',
       'Payments',
+      'On-chain',
       'Node',
       'Pay',
       'Receive',

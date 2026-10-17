@@ -545,6 +545,20 @@ function Handoff({ classified, nodeId }: { classified: Classified; nodeId: strin
       data-testid="pay-handoff"
     >
       <p>{text}</p>
+      {classified.kind === 'onchain' ? (
+        <Link
+          className="inline-flex min-h-11 items-center text-brand-strong underline"
+          to="/n/$node/onchain/send"
+          params={{ node: nodeId }}
+          search={{
+            address: classified.address,
+            ...(classified.amountSats === undefined ? {} : { amount: classified.amountSats }),
+          }}
+          data-testid="pay-handoff-onchain"
+        >
+          {tr.t('pay.handoff.send')}
+        </Link>
+      ) : null}
       {classified.kind === 'node' ? (
         <Link
           className="inline-flex min-h-11 items-center text-brand-strong underline"

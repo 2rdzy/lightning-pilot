@@ -20,6 +20,8 @@ export const NODE_READ_EVENTS = [
   'invoice.paid',
   'invoice.expired',
   'payment.updated',
+  'onchain.updated',
+  'fees.updated',
   'reload',
 ] as const;
 
@@ -41,6 +43,9 @@ export async function refreshNodeReads(client: QueryClient): Promise<void> {
       'payment',
       'invoices',
       'invoice',
+      'onchain-transactions',
+      'utxos',
+      'fee-estimates',
     ].map((key) => client.invalidateQueries({ queryKey: [key] })),
   );
 }

@@ -6,8 +6,9 @@ import { DecodeError, decodeRequest, type Chain, type DecodeReason, type Network
 export type Classified =
   // A BOLT11 invoice, pasted or carried by a bitcoin: URI (BIP321 `lightning=`), with the URI's own texts.
   | { kind: 'invoice'; bolt11: string; label?: string; message?: string }
-  // An on-chain address, or a bitcoin: URI without an invoice: sent from the on-chain screen.
-  | { kind: 'onchain' }
+  // An on-chain address, or a bitcoin: URI without an invoice: sent from the on-chain screen, which the hand-off
+  // prefills with the address and the URI's amount in sats (msat in the URI, whole sats only).
+  | { kind: 'onchain'; address: string; amountSats?: string }
   // A node URI: a peer to connect to, not something to pay.
   | { kind: 'node'; uri: string }
   // Recognised, but not payable in this release (BOLT12 with D7, Lightning address and LNURL with D8 and D10).
@@ -20,6 +21,16 @@ export type Classified =
 const INVOICE_BIT_512: Record<Chain, 'required' | 'refused'> = { blake2b: 'required', bitcoin: 'refused' };
 
 const LIGHTNING_INVOICE = /^(lightning:)?ln[a-z]*1/i;
+
+function onchain(address: string, amount?: bigint): Classified {
+  return {
+    kind: 'onchain',
+    address,
+    ...(amount !== undefined && amount > 0n && amount % 1000n === 0n
+      ? { amountSats: (amount / 1000n).toString() }
+      : {}),
+  };
+}
 
 export function classifyRequest(text: string, chain: Chain, network: Network): Classified {
   const raw = text.trim();
@@ -38,7 +49,8 @@ export function classifyRequest(text: string, chain: Chain, network: Network): C
       return { kind: 'invoice', bolt11: raw };
     case 'bip21': {
       const { lightning, label, message } = decoded.uri;
-      if (!lightning) return decoded.uri.address ? { kind: 'onchain' } : { kind: 'unsupported' };
+      if (!lightning)
+        return decoded.uri.address ? onchain(decoded.uri.address.address, decoded.uri.amount) : { kind: 'unsupported' };
       return {
         kind: 'invoice',
         bolt11: lightning.bolt11,
@@ -47,7 +59,7 @@ export function classifyRequest(text: string, chain: Chain, network: Network): C
       };
     }
     case 'onchain-address':
-      return { kind: 'onchain' };
+      return onchain(decoded.address.address);
     case 'node-uri':
       return { kind: 'node', uri: raw };
     case 'unknown':
