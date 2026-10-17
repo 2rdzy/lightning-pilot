@@ -36,19 +36,20 @@ describe('display preferences', () => {
 
   it('keeps choices per device and drops unknown stored values', () => {
     const storage = memoryStorage();
-    writePreferences(storage, { view: 'basic', theme: 'dark' });
-    expect(readPreferences(storage)).toEqual({ view: 'basic', theme: 'dark' });
-    writePreferences(storage, { view: undefined, theme: 'system' });
+    writePreferences(storage, { view: 'basic', theme: 'dark', region: 'de-CH' });
+    expect(readPreferences(storage)).toEqual({ view: 'basic', theme: 'dark', region: 'de-CH' });
+    writePreferences(storage, { view: undefined, theme: 'system', region: undefined });
     expect(storage.data.size).toBe(0);
-    expect(readPreferences(memoryStorage({ 'lp.view': 'expert', 'lp.theme': 'pink' }))).toEqual({
+    expect(readPreferences(memoryStorage({ 'lp.view': 'expert', 'lp.theme': 'pink', 'lp.region': 'xx-ZZ' }))).toEqual({
       view: undefined,
       theme: 'system',
+      region: undefined,
     });
   });
 
   it('works with storage blocked or missing', () => {
     expect(readPreferences(blocked)).toEqual({ view: undefined, theme: 'system' });
-    expect(() => writePreferences(blocked, { view: 'basic', theme: 'light' })).not.toThrow();
+    expect(() => writePreferences(blocked, { view: 'basic', theme: 'light', region: 'en-GB' })).not.toThrow();
     expect(readPreferences(undefined)).toEqual({ view: undefined, theme: 'system' });
   });
 
@@ -99,7 +100,8 @@ describe('navigation', () => {
     const byId = (id: string) => NAV_ITEMS.find((i) => i.id === id) as NavItem;
     expect(hrefOf(byId('dashboard'), node)).toBe(`/n/${node}`);
     expect(hrefOf(byId('pay'), node)).toBe(`/n/${node}/pay`);
-    expect(hrefOf(byId('settings'), node)).toBe('/settings/export');
+    expect(hrefOf(byId('settings'), node)).toBe('/settings');
+    expect(isActive(byId('settings'), node, '/settings/nodes/abc')).toBe(true);
     expect(isActive(byId('dashboard'), node, `/n/${node}`)).toBe(true);
     expect(isActive(byId('dashboard'), node, `/n/${node}/`)).toBe(true);
     expect(isActive(byId('dashboard'), node, `/n/${node}/pay`)).toBe(false);
@@ -114,6 +116,13 @@ describe('navigation', () => {
     expect(isAdvancedOnly('advanced', node, `/n/${node}/peers`)).toBe(false);
     expect(isAdvancedOnly('basic', node, `/n/${node}/channels`)).toBe(false);
     expect(isAdvancedOnly('basic', node, `/n/${node}`)).toBe(false);
+    // Settings is in both views; its node screens are Advanced only.
+    expect(isAdvancedOnly('basic', node, '/settings')).toBe(false);
+    expect(isAdvancedOnly('basic', node, '/settings/security')).toBe(false);
+    expect(isAdvancedOnly('basic', node, '/settings/nodes')).toBe(true);
+    expect(isAdvancedOnly('basic', node, `/settings/nodes/${node}/limits`)).toBe(true);
+    expect(isAdvancedOnly('basic', node, '/settings/nodesx')).toBe(false);
+    expect(isAdvancedOnly('advanced', node, '/settings/nodes')).toBe(false);
   });
 });
 

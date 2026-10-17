@@ -1,4 +1,5 @@
-// The display preferences as React state: the view (Basic/Advanced), the theme and whether the screen is phone-sized.
+// The display preferences as React state: the view (Basic/Advanced), the theme, the number-format region and whether
+// the screen is phone-sized.
 // Changes are kept in the browser (preferences.ts) and the theme is applied to <html> at once.
 import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
@@ -15,9 +16,12 @@ import {
 interface PreferencesValue {
   view: View;
   theme: ThemeChoice;
+  // undefined: the browser's region.
+  region: string | undefined;
   isPhone: boolean;
   setView: (view: View) => void;
   setTheme: (theme: ThemeChoice) => void;
+  setRegion: (region: string | undefined) => void;
 }
 
 const PreferencesContext = createContext<PreferencesValue | undefined>(undefined);
@@ -55,9 +59,11 @@ export function PreferencesProvider({ children }: { children: ReactNode }) {
     () => ({
       view: effectiveView(prefs, isPhone),
       theme: prefs.theme,
+      region: prefs.region,
       isPhone,
       setView: (view) => setPrefs((p) => ({ ...p, view })),
       setTheme: (theme) => setPrefs((p) => ({ ...p, theme })),
+      setRegion: (region) => setPrefs((p) => ({ ...p, region })),
     }),
     [prefs, isPhone],
   );

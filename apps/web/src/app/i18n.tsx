@@ -13,6 +13,7 @@ import receive from '../features/receive/messages.en.json' with { type: 'json' }
 import payments from '../features/payments/messages.en.json' with { type: 'json' };
 import onchain from '../features/onchain/messages.en.json' with { type: 'json' };
 import setup from '../features/setup/messages.en.json' with { type: 'json' };
+import settings from '../features/settings/messages.en.json' with { type: 'json' };
 import shell from '../shell/messages.en.json' with { type: 'json' };
 
 // English only in release 0.1; every feature adds its own file here.
@@ -30,6 +31,7 @@ export const MESSAGES_EN = mergeMessages(
   payments,
   onchain,
   exporting,
+  settings,
 );
 
 const TranslatorContext = createContext<Translator | undefined>(undefined);

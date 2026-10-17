@@ -38,6 +38,9 @@ export function NoNodes() {
     <AuthFrame>
       <h1 className="text-2xl font-semibold">{tr.t('app.noNodes.title')}</h1>
       <p className="text-muted">{tr.t('app.noNodes.body')}</p>
+      <Link to="/settings/nodes" search={{ add: true }} className="text-brand-strong underline">
+        {tr.t('app.noNodes.add')}
+      </Link>
       <Link to="/settings/export" className="text-brand-strong underline">
         {tr.t('export.title')}
       </Link>
