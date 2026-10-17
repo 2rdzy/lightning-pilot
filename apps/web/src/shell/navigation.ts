@@ -77,7 +77,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
     icon: 'onchain',
     basic: false,
     section: 'main',
-    built: false,
+    built: true,
   },
   {
     id: 'node',

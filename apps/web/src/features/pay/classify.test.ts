@@ -59,10 +59,15 @@ describe('classifyRequest (universal pay input)', () => {
     });
   });
 
-  it('points addresses and URIs without an invoice to on-chain sending', () => {
-    expect(classifyRequest(address('blake2b'), 'blake2b', 'regtest')).toEqual({ kind: 'onchain' });
+  it('points addresses and URIs without an invoice to on-chain sending, with the address and amount in sats', () => {
+    expect(classifyRequest(address('blake2b'), 'blake2b', 'regtest')).toEqual({
+      kind: 'onchain',
+      address: address('blake2b'),
+    });
     expect(classifyRequest(`bitcoin:${address('sha256d')}?amount=0.001`, 'bitcoin', 'regtest')).toEqual({
       kind: 'onchain',
+      address: address('sha256d'),
+      amountSats: '100000',
     });
     expect(classifyRequest('bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4', 'bitcoin', 'regtest')).toEqual({
       kind: 'invalid',

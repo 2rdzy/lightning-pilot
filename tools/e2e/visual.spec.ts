@@ -35,7 +35,9 @@ for (const scheme of ['light', 'dark'] as const) {
         page.getByTestId('block-height'),
         page.getByTestId('live-indicator'),
         page.locator('main .font-mono'),
-        page.locator('main time'),
+        // The block around a time, not the time itself: a time is as wide as its text, which changes with the hour
+        // ("9:39 AM", "10:39 AM"), so masking it alone made the baselines depend on the time of day of the run.
+        page.locator('main :has(> time)'),
       ],
     });
   });

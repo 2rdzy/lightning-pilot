@@ -35,6 +35,9 @@ import { ReceiveScreen } from '../features/receive/ReceiveScreen.tsx';
 import { PaymentsScreen } from '../features/payments/PaymentsScreen.tsx';
 import { InvoiceScreen, PaymentScreen } from '../features/payments/DetailScreens.tsx';
 import { PaymentHashSchema, PaymentsSearch } from '../features/payments/data.ts';
+import { OnchainScreen, TransactionScreen } from '../features/onchain/OnchainScreen.tsx';
+import { SendScreen } from '../features/onchain/SendScreen.tsx';
+import { OnchainSearch, TxidSchema, sendSearch } from '../features/onchain/data.ts';
 import { SetupScreen } from '../features/setup/SetupScreen.tsx';
 import { nodesQuery } from './queries.ts';
 import { pickNode, safeNext, sessionState } from './session.ts';
@@ -196,6 +199,28 @@ export const payRoute = createRoute({
   component: PayScreen,
 });
 
+export const onchainRoute = createRoute({
+  getParentRoute: () => nodeRoute,
+  path: 'onchain',
+  validateSearch: (search) => OnchainSearch.parse(search),
+  component: OnchainScreen,
+});
+export const onchainSendRoute = createRoute({
+  getParentRoute: () => nodeRoute,
+  path: 'onchain/send',
+  // A link may prefill the address and amount; it never sends by itself (style guide §7).
+  validateSearch: (search: Record<string, unknown>) => sendSearch(search),
+  component: SendScreen,
+});
+export const onchainTxRoute = createRoute({
+  getParentRoute: () => nodeRoute,
+  path: 'onchain/tx/$txid',
+  beforeLoad: ({ params }) => {
+    if (!TxidSchema.safeParse(params.txid).success) throw notFound();
+  },
+  component: TransactionScreen,
+});
+
 export const channelsRoute = createRoute({
   getParentRoute: () => nodeRoute,
   path: 'channels',
@@ -263,6 +288,9 @@ const routeTree = rootRoute.addChildren([
       paymentsRoute,
       paymentRoute,
       invoiceRoute,
+      onchainRoute,
+      onchainSendRoute,
+      onchainTxRoute,
       channelsRoute,
       channelRoute,
       openChannelRoute,

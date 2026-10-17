@@ -11,6 +11,7 @@ import login from '../features/login/messages.en.json' with { type: 'json' };
 import pay from '../features/pay/messages.en.json' with { type: 'json' };
 import receive from '../features/receive/messages.en.json' with { type: 'json' };
 import payments from '../features/payments/messages.en.json' with { type: 'json' };
+import onchain from '../features/onchain/messages.en.json' with { type: 'json' };
 import setup from '../features/setup/messages.en.json' with { type: 'json' };
 import shell from '../shell/messages.en.json' with { type: 'json' };
 
@@ -27,6 +28,7 @@ export const MESSAGES_EN = mergeMessages(
   receive,
   pay,
   payments,
+  onchain,
   exporting,
 );
 

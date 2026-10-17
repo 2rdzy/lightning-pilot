@@ -71,6 +71,7 @@ describe('navigation', () => {
       'channels',
       'peers',
       'payments',
+      'onchain',
       'node',
       'pay',
       'receive',

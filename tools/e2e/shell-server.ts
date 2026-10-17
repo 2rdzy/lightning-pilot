@@ -4,7 +4,7 @@
 import { expect, type Page } from '@playwright/test';
 import { fileURLToPath } from 'node:url';
 import { FakeAdapter, FakeNetwork } from '../../packages/adapter-kit/src/index.ts';
-import type { Chain } from '../../packages/core/src/index.ts';
+import type { Chain, SetupLimits } from '../../packages/core/src/index.ts';
 import { loadConfig } from '../../apps/server/src/config/config.ts';
 import { listen } from '../../apps/server/src/http/listen.ts';
 import { createLogger } from '../../apps/server/src/logging/logger.ts';
@@ -29,7 +29,13 @@ export interface ShellServer {
 // `live` starts the node event workers, so the browser's live connection carries real node events (WP18: an
 // invoice paid by another fake node).
 export async function startShellServer(
-  options: { spending?: boolean; readOnly?: boolean; live?: boolean } = {},
+  options: {
+    spending?: boolean;
+    readOnly?: boolean;
+    live?: boolean;
+    // Changes to the test spending policy (with `spending`), e.g. a step-up threshold (WP19).
+    limits?: Partial<SetupLimits>;
+  } = {},
 ): Promise<ShellServer> {
   const tmp = tempDir();
   const key = writeVaultKey(tmp.dir);
@@ -75,7 +81,7 @@ export async function startShellServer(
         serverName: 'localhost',
         viewRune: testRune('read'),
         ...(options.readOnly ? { accessLevel: 'read-only' as const } : { spendRune: testRune('spend') }),
-        ...(options.spending ? { limits: testSpendPolicy } : {}),
+        ...(options.spending ? { limits: { ...testSpendPolicy, ...options.limits } } : {}),
       },
       'r-shell',
     );
