@@ -46,6 +46,7 @@ export async function refreshNodeReads(client: QueryClient): Promise<void> {
       'onchain-transactions',
       'utxos',
       'fee-estimates',
+      'unresolved-spends',
     ].map((key) => client.invalidateQueries({ queryKey: [key] })),
   );
 }

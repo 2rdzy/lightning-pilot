@@ -114,4 +114,5 @@
   "onchain.intent": "Spend id",
   "onchain.showTransaction": "Show the transaction",
   "onchain.reason.insufficient_funds": "The wallet's confirmed coins do not cover the amount and the fee."
+  "onchain.unresolvedLink": "Unresolved spends in the settings"
 }

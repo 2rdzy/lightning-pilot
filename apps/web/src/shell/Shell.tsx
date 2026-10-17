@@ -2,7 +2,8 @@
 // indicator, the Basic/Advanced toggle, the theme and logout; a left navigation that collapses to icons. Phone: a
 // top bar in --bar with the mark, the node and its chain badge, and a bottom tab bar Home · Channels · Pay ·
 // Receive · More, where More holds the other screens, the view and theme switches and logout. A node on the wrong
-// chain gets a full-width banner; a dropped live connection a quiet bar, never a dialog.
+// chain gets a full-width banner; a dropped live connection a quiet bar, never a dialog. App-wide screens (settings)
+// use the same frame with the last used node in the top bar, or none while no node exists.
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { Link, Outlet, useNavigate, useRouterState } from '@tanstack/react-router';
 import {
@@ -19,14 +20,16 @@ import {
   WrongChainBanner,
   type LiveState,
 } from '@lightning-pilot/ui';
-import { useEffect, useRef, useState } from 'react';
+import type { NodeSummary } from '@lightning-pilot/core';
+import type { z } from 'zod';
+import { createContext, useContext, useEffect, useRef, useState } from 'react';
 import { ApiError } from '../api/client.ts';
 import { useApi } from '../app/api-context.tsx';
 import { useT } from '../app/i18n.tsx';
-import { nodeInfoQuery } from '../app/queries.ts';
-import { nodeRoute } from '../app/router.tsx';
+import { nodeInfoQuery, nodesQuery } from '../app/queries.ts';
+import { nodeRoute, settingsRoute } from '../app/router.tsx';
 import { NODE_READ_EVENTS, refreshNodeReads } from '../features/node/queries.ts';
-import { rememberNode } from '../app/session.ts';
+import { pickNode, rememberNode } from '../app/session.ts';
 import { formatInteger } from '../i18n/format.ts';
 import { connectLive } from './live.ts';
 import { hrefOf, isActive, isAdvancedOnly, phoneLayout, visibleItems, type NavItem } from './navigation.ts';
@@ -35,6 +38,21 @@ import { storage, usePreferences } from './preferences-context.tsx';
 import { THEME_CHOICES, VIEWS, type ThemeChoice, type View } from './preferences.ts';
 
 type Translate = ReturnType<typeof useT>;
+
+// Ends this session through `call` (log out everywhere, revoking the current session): the live stream closes first,
+// as for logout, and the app goes to the login screen once the server confirms. On any other failure the stream
+// opens again and the error goes back to the caller.
+interface ShellSession {
+  endSession: (call: () => Promise<unknown>) => Promise<void>;
+}
+
+const ShellSessionContext = createContext<ShellSession | undefined>(undefined);
+
+export function useShellSession(): ShellSession {
+  const value = useContext(ShellSessionContext);
+  if (!value) throw new Error('useShellSession outside the shell');
+  return value;
+}
 
 // Any navigation inside the app counts as user activity for the session's idle timer (sessions spec).
 function useMarkActivity(): () => void {
@@ -115,6 +133,29 @@ function NavLink({
 }
 
 export function Shell() {
+  const { node, nodes } = nodeRoute.useLoaderData();
+  return <ShellFrame node={node} nodes={nodes} />;
+}
+
+// Settings add and remove nodes, so the frame follows the node list rather than the loader's first answer.
+export function AppShell() {
+  const api = useApi();
+  const loaded = settingsRoute.useLoaderData();
+  const { data } = useQuery({ ...nodesQuery(api), initialData: { items: loaded.nodes } });
+  const nodeId = pickNode(
+    storage(),
+    data.items.map((n) => n.id),
+  );
+  return <ShellFrame node={data.items.find((n) => n.id === nodeId)} nodes={data.items} />;
+}
+
+function ShellFrame({
+  node,
+  nodes,
+}: {
+  node: z.infer<typeof NodeSummary> | undefined;
+  nodes: readonly z.infer<typeof NodeSummary>[];
+}) {
   const tr = useT();
   const api = useApi();
   const queryClient = useQueryClient();
@@ -122,8 +163,8 @@ export function Shell() {
   const toast = useToast();
   const markActivity = useMarkActivity();
   const { view, isPhone } = usePreferences();
-  const { node, nodes } = nodeRoute.useLoaderData();
-  const info = useQuery(nodeInfoQuery(api, node.id));
+  const nodeId = node?.id ?? '';
+  const info = useQuery({ ...nodeInfoQuery(api, nodeId), enabled: node !== undefined });
   const pathname = useRouterState({ select: (s) => s.location.pathname });
   const [live, setLive] = useState<LiveState>('connecting');
   // Bumped to open the live connection again after a logout the server did not confirm.
@@ -133,8 +174,8 @@ export function Shell() {
   const [moreOpen, setMoreOpen] = useState(false);
 
   useEffect(() => {
-    rememberNode(storage(), node.id);
-  }, [node.id]);
+    if (nodeId) rememberNode(storage(), nodeId);
+  }, [nodeId]);
 
   useEffect(() => {
     // Reopening the stream can miss updates, so refresh reads on open as well as on relevant events.
@@ -170,6 +211,20 @@ export function Shell() {
     },
   });
 
+  const session: ShellSession = {
+    endSession: async (call) => {
+      stopLive.current();
+      try {
+        await call();
+      } catch (err) {
+        if (err instanceof ApiError && err.code === 'unauthenticated') return leave();
+        setLiveRun((n) => n + 1);
+        throw err;
+      }
+      await leave();
+    },
+  };
+
   const copyLink = () => {
     const clipboard = globalThis.navigator?.clipboard;
     if (!clipboard) return;
@@ -179,19 +234,19 @@ export function Shell() {
     );
   };
 
-  const identity = info.data?.chainIdentity ?? node.chainIdentity;
+  const identity = info.data?.chainIdentity ?? node?.chainIdentity;
   const height = info.data ? (
     <span className="text-sm tabular-nums" data-testid="block-height">
       {tr.t('shell.height', { height: formatInteger(info.data.blockHeight, tr.locale) })}
     </span>
   ) : null;
   const liveIndicator = <LiveIndicator state={live} label={tr.t(`live.${live}`)} />;
-  const nodeSelect = (
+  const nodeSelect = node ? (
     <label className="flex min-w-0 items-center gap-2 text-sm">
       <span className={isPhone ? 'sr-only' : undefined}>{tr.t('nav.node')}</span>
       <select
         className="max-w-40 min-w-0 rounded-control border border-border bg-surface px-2 py-1 text-text"
-        value={node.id}
+        value={nodeId}
         data-testid="node-select"
         onChange={(e) => {
           markActivity();
@@ -205,7 +260,7 @@ export function Shell() {
         ))}
       </select>
     </label>
-  );
+  ) : null;
   const logoutButton = (
     <Button
       variant="ghost"
@@ -219,7 +274,12 @@ export function Shell() {
       {tr.t('nav.logout')}
     </Button>
   );
-  const { tabs, more } = phoneLayout(view);
+  // Without a node only the app-wide screens can be reached.
+  const usable = (items: NavItem[]) => (node ? items : items.filter((item) => item.scope === 'app'));
+  const layout = phoneLayout(view);
+  const tabs = usable(layout.tabs),
+    more = usable(layout.more);
+  const badge = identity ? <ChainBadge identity={identity} /> : null;
 
   return (
     <div className="flex min-h-dvh flex-col">
@@ -233,18 +293,16 @@ export function Shell() {
         <header className="sticky top-0 z-20 flex items-center gap-3 bg-bar px-4 py-2 text-white">
           <Logo size={28} label={tr.t('app.name')} />
           {nodeSelect}
-          <span className="ml-auto">
-            <ChainBadge identity={identity} />
-          </span>
+          <span className="ml-auto">{badge}</span>
         </header>
       ) : (
         <header className="sticky top-0 z-20 flex flex-wrap items-center gap-x-4 gap-y-2 border-b border-border bg-surface px-4 py-2">
-          <Link to="/n/$node" params={{ node: node.id }} className="inline-flex items-center gap-2 font-semibold">
+          <Link to="/" className="inline-flex items-center gap-2 font-semibold">
             <Logo size={28} />
             <span>{tr.t('app.name')}</span>
           </Link>
           {nodeSelect}
-          <ChainBadge identity={identity} />
+          {badge}
           {height}
           {liveIndicator}
           <span className="ml-auto flex flex-wrap items-center gap-2">
@@ -255,7 +313,7 @@ export function Shell() {
           </span>
         </header>
       )}
-      {identity.state === 'refused' ? <WrongChainBanner>{tr.t('chain.refusedBanner')}</WrongChainBanner> : null}
+      {identity?.state === 'refused' ? <WrongChainBanner>{tr.t('chain.refusedBanner')}</WrongChainBanner> : null}
       {live === 'reconnecting' ? <ReconnectingBar>{tr.t('live.paused')}</ReconnectingBar> : null}
       {logout.isError ? (
         <div className="px-4 pt-3">
@@ -275,7 +333,7 @@ export function Shell() {
               collapsed ? 'w-16 items-center' : 'w-56 px-2',
             )}
           >
-            {visibleItems(view).map((item, index, list) => (
+            {usable(visibleItems(view)).map((item, index, list) => (
               <div
                 key={item.id}
                 className={
@@ -286,7 +344,7 @@ export function Shell() {
               >
                 <NavLink
                   item={item}
-                  nodeId={node.id}
+                  nodeId={nodeId}
                   pathname={pathname}
                   tr={tr}
                   collapsed={collapsed}
@@ -307,12 +365,14 @@ export function Shell() {
           </nav>
         )}
         <main id="main" className="w-full max-w-[1440px] min-w-0 flex-1 p-4 pb-24 md:p-8">
-          {isAdvancedOnly(view, node.id, pathname) ? (
+          {isAdvancedOnly(view, nodeId, pathname) ? (
             <p className="mb-4 rounded-control border border-info px-3 py-2 text-sm" data-testid="advanced-only">
               {tr.t('view.advancedOnly')}
             </p>
           ) : null}
-          <Outlet />
+          <ShellSessionContext.Provider value={session}>
+            <Outlet />
+          </ShellSessionContext.Provider>
         </main>
       </div>
       {isPhone ? (
@@ -324,7 +384,7 @@ export function Shell() {
             <NavLink
               key={item.id}
               item={item}
-              nodeId={node.id}
+              nodeId={nodeId}
               pathname={pathname}
               tr={tr}
               label={item.id === 'dashboard' ? tr.t('nav.home') : undefined}
@@ -354,7 +414,7 @@ export function Shell() {
                   <li key={item.id}>
                     <NavLink
                       item={item}
-                      nodeId={node.id}
+                      nodeId={nodeId}
                       pathname={pathname}
                       tr={tr}
                       onNavigate={() => {

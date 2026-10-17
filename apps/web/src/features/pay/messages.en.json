@@ -67,5 +67,6 @@
   "errors.decode.wrong_network": "This payment request is for another network than this node's.",
   "errors.decode.wrong_chain": "This invoice is for the other chain. Paying it from this node is refused.",
   "errors.decode.inconsistent": "The parts of this payment link disagree (for example two different amounts).",
-  "errors.decode.unsupported": "This kind of payment request is not supported in this release."
+  "errors.decode.unsupported": "This kind of payment request is not supported in this release.",
+  "pay.unresolvedLink": "Unresolved spends in the settings"
 }

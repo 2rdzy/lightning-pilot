@@ -45,7 +45,22 @@ describe('web API client against the OpenAPI document', () => {
         expect(operation, `${name}: ${endpoint.method} ${endpoint.path}`).toBeDefined();
         const success = Object.keys(operation?.responses ?? {}).filter((s) => s.startsWith('2'));
         expect(success, name).toEqual([String(endpoint.status)]);
-        expect(operation?.requestBody?.content?.['application/json']?.schema?.$ref, name).toBe(refId(endpoint.body));
+        const body = operation?.requestBody?.content?.['application/json']?.schema;
+        if (endpoint.body && !endpoint.body.meta()?.id) {
+          // Inline request contracts (setup-command, WP14): compare the complete schema, as for responses below.
+          const path = `/__client-request/${name}`;
+          server.app.openAPIRegistry.registerPath({
+            method: 'post',
+            path,
+            request: { body: { content: { 'application/json': { schema: endpoint.body } } } },
+            responses: { 204: { description: 'Client contract' } },
+          });
+          const expected = openApiDocument(server.app).paths?.[path]?.post?.requestBody;
+          expect(body, `${name}: documented request body`).toBeDefined();
+          expect(body, name).toEqual(
+            expected && 'content' in expected ? expected.content?.['application/json']?.schema : undefined,
+          );
+        } else expect(body?.$ref, name).toBe(refId(endpoint.body));
         // Query parameters: the client sends exactly the names the server documents (paged lists).
         const documented = (operation?.parameters ?? []).filter((p) => p.in === 'query').map((p) => p.name);
         const query = 'query' in endpoint ? (endpoint.query as { shape?: Record<string, unknown> }).shape : undefined;

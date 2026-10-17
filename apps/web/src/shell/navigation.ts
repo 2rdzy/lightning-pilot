@@ -111,11 +111,10 @@ export const NAV_ITEMS: readonly NavItem[] = [
     section: 'main',
     built: true,
   },
-  // The settings overview comes with WP20; until then the only settings screen is export and import.
   {
     id: 'settings',
     label: 'nav.settings',
-    path: '/settings/export',
+    path: '/settings',
     scope: 'app',
     icon: 'settings',
     basic: true,
@@ -149,11 +148,19 @@ export function isActive(item: NavItem, nodeId: string, pathname: string): boole
 
 // A screen of the Advanced view opened by URL in the Basic view is still shown, with a note saying where it belongs
 // (style guide §7: the view never changes URLs). Unbuilt items count too, so the rule holds as screens arrive.
+// Settings is in both views, but some of its screens are Advanced only (route map): those paths are listed here.
+export const ADVANCED_APP_PATHS: readonly string[] = ['/settings/nodes', '/settings/clients'];
+
 export function isAdvancedOnly(
   view: View,
   nodeId: string,
   pathname: string,
   items: readonly NavItem[] = NAV_ITEMS,
 ): boolean {
-  return view === 'basic' && items.some((item) => !item.basic && isActive(item, nodeId, pathname));
+  if (view !== 'basic') return false;
+  const path = pathname.length > 1 && pathname.endsWith('/') ? pathname.slice(0, -1) : pathname;
+  return (
+    items.some((item) => !item.basic && isActive(item, nodeId, pathname)) ||
+    ADVANCED_APP_PATHS.some((prefix) => path === prefix || path.startsWith(`${prefix}/`))
+  );
 }

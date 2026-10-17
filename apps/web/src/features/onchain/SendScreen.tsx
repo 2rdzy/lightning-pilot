@@ -228,6 +228,14 @@ function Send() {
           {result?.state === 'unknown' ? (
             <>
               <p className="text-sm">{tr.t('onchain.unknownHelp')}</p>
+              <Link
+                to="/settings/spends"
+                search={{ node: node.id }}
+                className="text-sm text-brand-strong underline"
+                data-testid="unresolved-link"
+              >
+                {tr.t('onchain.unresolvedLink')}
+              </Link>
               {execute.error ? <SendError error={execute.error} /> : null}
               <Button className="self-start" onClick={() => send(preview)} disabled={locked}>
                 {execute.isPending ? tr.t('onchain.checking') : tr.t('onchain.checkAgain')}

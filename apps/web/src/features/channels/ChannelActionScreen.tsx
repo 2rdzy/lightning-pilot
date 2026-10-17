@@ -195,6 +195,16 @@ function ChannelAction({
               <p className="mt-2 text-sm">
                 {tr.t(result?.state === 'unknown' ? 'channels.unknownHelp' : 'channels.followState')}
               </p>
+              {result?.state === 'unknown' ? (
+                <Link
+                  to="/settings/spends"
+                  search={{ node: node.id }}
+                  className="text-sm text-brand-strong underline"
+                  data-testid="unresolved-link"
+                >
+                  {tr.t('channels.unresolvedLink')}
+                </Link>
+              ) : null}
               {result ? (
                 <>
                   <p>

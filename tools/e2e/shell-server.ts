@@ -13,6 +13,7 @@ import { buildServer } from '../../apps/server/src/server.ts';
 import { setupForTest, tempDir, testRune, testSpendPolicy, writeVaultKey } from '../../apps/server/src/testing.ts';
 
 export const SHELL_PASSWORD = 'Shell-browser-account-9!';
+export { FAKE_CA };
 const FAKE_CA = '-----BEGIN CERTIFICATE-----\nZmFrZQ==\n-----END CERTIFICATE-----\n';
 const NODES: { name: string; chain: Chain }[] = [
   { name: 'alice', chain: 'blake2b' },
@@ -38,6 +39,8 @@ export async function startShellServer(
     // Fee-cap modes of the test policy (not part of `SetupLimits`; the settings screen changes them with security
     // step-up), written straight into the database.
     feeModes?: { maxFeeRateMode?: 'refuse' | 'step-up'; maxFeeShareMode?: 'refuse' | 'step-up' };
+    // Fake nodes the server can reach but has not added, for the add-node screen (WP20a): https://<name>.fake.invalid.
+    extraNodes?: { name: string; chain: Chain }[];
   } = {},
 ): Promise<ShellServer> {
   const tmp = tempDir();
@@ -56,7 +59,10 @@ export async function startShellServer(
   config.server.port = 0;
   const world = new FakeNetwork();
   const fakes = new Map(
-    NODES.map((n) => [`https://${n.name}.fake.invalid`, new FakeAdapter({ chain: n.chain, alias: n.name, world })]),
+    [...NODES, ...(options.extraNodes ?? [])].map((n) => [
+      `https://${n.name}.fake.invalid`,
+      new FakeAdapter({ chain: n.chain, alias: n.name, world }),
+    ]),
   );
   const server = await buildServer({
     config,
