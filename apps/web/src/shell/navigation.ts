@@ -67,7 +67,7 @@ export const NAV_ITEMS: readonly NavItem[] = [
     icon: 'payments',
     basic: true,
     section: 'main',
-    built: false,
+    built: true,
   },
   {
     id: 'onchain',

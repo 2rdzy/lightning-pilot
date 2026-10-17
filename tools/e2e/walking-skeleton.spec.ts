@@ -211,12 +211,13 @@ test('setup, login, receive, pay and log out in the browser', async ({ page }, t
   await page.goto(`${aliceUrl}/pay?request=${bolt11}`);
   await expect(page).toHaveURL(new RegExp(`${aliceUrl}/pay$`));
   await expect(page.getByTestId('from-link')).toBeVisible();
-  await expect(page.getByLabel('Payment request (BOLT11 invoice)')).toHaveValue(bolt11);
+  await expect(page.getByLabel('Payment request', { exact: true })).toHaveValue(bolt11);
   await page.getByRole('button', { name: 'Preview' }).click();
   await expect(page.getByTestId('preview-amount')).toHaveText('1,000 sat');
   await expect(page.getByTestId('preview').getByTestId('chain-badge')).toBeVisible();
-  await page.getByLabel('Confirm your password to authorize this spend').fill(PASSWORD);
-  await page.getByRole('button', { name: 'Pay 1,000 sat' }).click();
+  await page.getByRole('button', { name: /^Pay up to [0-9,.]+ sat$/ }).click();
+  await page.getByTestId('step-up').getByLabel('Password', { exact: true }).fill(PASSWORD);
+  await page.getByTestId('step-up').getByRole('button', { name: 'Confirm', exact: true }).click();
   await expect(page.getByTestId('payment-outcome')).toHaveAttribute('data-state', 'succeeded');
   await expect(page.getByText('Paid 1,000 sat')).toBeVisible();
 
@@ -234,11 +235,12 @@ test('setup, login, receive, pay and log out in the browser', async ({ page }, t
   await expect(
     page.getByText('Lightning Pilot spending limits — payments made by other apps are not limited.'),
   ).toBeVisible();
-  const confirm = page.getByRole('button', { name: 'Pay 1,000 sat' });
+  const confirm = page.getByRole('button', { name: /^Pay up to [0-9,.]+ sat$/ });
   await expect(confirm).toBeDisabled();
   await page.getByLabel('I understand that a payment to this destination').check();
-  await page.getByLabel('Confirm your password to authorize this spend').fill(PASSWORD);
   await confirm.click();
+  await page.getByTestId('step-up').getByLabel('Password', { exact: true }).fill(PASSWORD);
+  await page.getByTestId('step-up').getByRole('button', { name: 'Confirm', exact: true }).click();
   await expect(page.getByTestId('payment-outcome')).toHaveAttribute('data-state', 'succeeded');
 
   // The balance on the dashboard has changed.
@@ -283,7 +285,7 @@ test('setup, login, receive, pay and log out in the browser', async ({ page }, t
   await login();
   await expect(page).toHaveURL(new RegExp(`${aliceUrl}/pay$`));
   await expect(page.getByTestId('from-link')).toBeVisible();
-  await expect(page.getByLabel('Payment request (BOLT11 invoice)')).toHaveValue(bolt11);
+  await expect(page.getByLabel('Payment request', { exact: true })).toHaveValue(bolt11);
   // Each step replaced the entry before it: no new history entry holds the request.
   expect(await historyLength(page)).toBe(entries);
 

@@ -26,7 +26,11 @@ export interface ShellServer {
   close: () => Promise<void>;
 }
 
-export async function startShellServer(options: { spending?: boolean; readOnly?: boolean } = {}): Promise<ShellServer> {
+// `live` starts the node event workers, so the browser's live connection carries real node events (WP18: an
+// invoice paid by another fake node).
+export async function startShellServer(
+  options: { spending?: boolean; readOnly?: boolean; live?: boolean } = {},
+): Promise<ShellServer> {
   const tmp = tempDir();
   const key = writeVaultKey(tmp.dir);
   let token = '';
@@ -76,6 +80,7 @@ export async function startShellServer(options: { spending?: boolean; readOnly?:
       'r-shell',
     );
   }
+  if (options.live) server.events.workers.start();
   const listener = listen(server.app, config, logger);
   const url = `http://localhost:${await listener.port}`;
   return {
