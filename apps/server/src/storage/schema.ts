@@ -99,6 +99,8 @@ export interface DB {
     channel_id: Generated<string | null>;
     peer: Generated<string | null>;
     close_force: Generated<number | null>;
+    // JSON array of `txid:vout` (WP09c).
+    utxos: Generated<string | null>;
     id: string;
     node_id: string;
     chain: string;

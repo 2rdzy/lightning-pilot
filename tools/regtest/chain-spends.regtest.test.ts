@@ -41,6 +41,27 @@ const channelState = (channelId: string) =>
     (c) => c.channel_id === channelId,
   )?.state;
 const newAddress = () => (cli(chain, 'cln-b', 'newaddr') as { bech32: string }).bech32;
+// An address of cln-a's own wallet: a send to it keeps the funds for the next tests.
+const ownAddress = (type: 'bech32' | 'p2tr' = 'bech32') =>
+  (cli(chain, 'cln-a', 'newaddr', `addresstype=${type}`) as Record<string, string>)[type] as string;
+const confirmedCoins = () =>
+  (
+    cli(chain, 'cln-a', 'listfunds') as { outputs: { amount_msat: number; status: string; reserved: boolean }[] }
+  ).outputs
+    .filter((o) => o.status === 'confirmed' && !o.reserved)
+    .map((o) => BigInt(o.amount_msat))
+    .sort((a, b) => (a > b ? -1 : a < b ? 1 : 0));
+// What the transaction pays in fee, from bitcoind's mempool (before it is mined).
+const mempoolFeeMsat = (txid: string) => {
+  const entry = cli(chain, 'btc', 'getmempoolentry', txid) as { fees: { base: number } };
+  return BigInt(Math.round(entry.fees.base * 1e8)) * 1000n;
+};
+const intentRow = (id: string) =>
+  s.server.db
+    .selectFrom('spend_intents')
+    .select(['fee_msat', 'max_fee_msat', 'utxos', 'txid'])
+    .where('id', '=', id)
+    .executeTakeFirstOrThrow();
 
 async function spend<T>(kind: string, body: unknown): Promise<T & { intentId: string; state: string }> {
   const preview = await ok<{ confirmationToken: string }>(
@@ -66,6 +87,10 @@ async function openChannel(): Promise<string> {
   });
   expect(opened.state).toBe('succeeded');
   expect(opened.txid).toMatch(/^[0-9a-f]{64}$/);
+  // WP09c: the funding transaction (no check is possible before `fundchannel` broadcasts) pays at most the bound.
+  const row = await intentRow(opened.intentId);
+  expect(mempoolFeeMsat(opened.txid)).toBeLessThanOrEqual(BigInt(row.max_fee_msat));
+  expect(JSON.parse(row.utxos ?? '[]').length).toBeGreaterThan(0);
   await mine(6);
   await waitFor('the channel to be normal', () => channelState(opened.channelId) === 'CHANNELD_NORMAL');
   return opened.channelId;
@@ -87,6 +112,38 @@ describe(`on-chain and channel spends on ${chain}`, () => {
     expect(row).toMatchObject({ type: 'onchain', state: 'succeeded', txid: sent.txid, psbt_ciphertext: null });
     expect(BigInt(row.fee_msat ?? '0')).toBeGreaterThan(0n);
   });
+
+  it('WP09c: the node fee stays within the size bound, at several rates and with one or more coins', async () => {
+    // Two more coins, of two types, so that a send larger than the largest coin needs several inputs.
+    regtest(chain, 'cli', 'btc', '-rpcwallet=miner', 'sendtoaddress', ownAddress('p2tr'), '0.3');
+    regtest(chain, 'cli', 'btc', '-rpcwallet=miner', 'sendtoaddress', ownAddress(), '0.2');
+    await mine(1);
+    await waitFor('the new coins at cln-a', () => confirmedCoins().length >= 3);
+    const [largest = 0n, second = 0n] = confirmedCoins();
+    const cases = [
+      { feeRate: '1', amount: 20_000_000n, coins: 1 },
+      { feeRate: '2.5', amount: 50_000_000n, coins: 1 },
+      { feeRate: '3.333', amount: 30_000_000n, coins: 1 },
+      // More than the largest coin holds: the largest and the next one.
+      { feeRate: '7.001', amount: ((largest + second / 2n) / 1000n) * 1000n, coins: 2 },
+    ];
+    for (const c of cases) {
+      const sent = await spend<{ txid: string }>('onchain', {
+        address: ownAddress(),
+        amount: c.amount.toString(),
+        feeRate: c.feeRate,
+      });
+      expect(sent.state, `${c.amount} msat at ${c.feeRate} sat/vB`).toBe('succeeded');
+      const row = await intentRow(sent.intentId);
+      const fee = mempoolFeeMsat(sent.txid);
+      expect(BigInt(row.fee_msat ?? '-1')).toBe(fee);
+      expect(fee, `fee ${fee} above the bound ${row.max_fee_msat} at ${c.feeRate} sat/vB`).toBeLessThanOrEqual(
+        BigInt(row.max_fee_msat),
+      );
+      expect(JSON.parse(row.utxos ?? '[]')).toHaveLength(c.coins);
+      await mine(1);
+    }
+  }, 400_000);
 
   it('opens a channel and closes it cooperatively to the node wallet (not counted)', async () => {
     const channelId = await openChannel();

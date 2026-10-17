@@ -2112,15 +2112,21 @@ describe(`WP09b on-chain and channel spends (${testDriver()})`, () => {
         await s.preview('onchain', { address: 'bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4', amount: '1000' }),
       ),
     ).toBe('validation_failed');
+    const [coin] = await s.payer.onchain.listUtxos();
     const p = await s.token('onchain', { address: to, amount: '100000000', feeRate: '2' });
-    // 5 % of 100,000 sat is the most fee this send may pay.
-    expect(p.cost).toEqual({ amount: '100000000', maxFee: '5000000', total: '105000000' });
+    // WP09c: the fee is bounded from the coin chosen (one P2WPKH input 68 vB, the P2WPKH output 31 vB, a change
+    // output 43 vB, 11 vB overhead: 153 vB × 2 sat/vB), not the 5 % share (5,000 sat).
+    expect(p.cost).toEqual({ amount: '100000000', maxFee: '306000', total: '100306000' });
     const prepare = vi.spyOn(s.payer.onchain, 'prepare');
     const res = await s.execute('onchain', p.confirmationToken, 'wp09b-onchain-send');
     expect(res.status, await res.clone().text()).toBe(200);
     const outcome = (await res.json()) as { intentId: string; state: string; txid: string };
     expect(outcome.state).toBe('succeeded');
-    expect(prepare.mock.calls[0]?.[0]).toEqual({ outputs: [{ address: to, amount: 100_000_000n }], feeRate: '2' });
+    expect(prepare.mock.calls[0]?.[0]).toEqual({
+      outputs: [{ address: to, amount: 100_000_000n }],
+      feeRate: '2',
+      utxos: [coin?.outpoint],
+    });
     const row = await s.intent(outcome.intentId);
     expect(row).toMatchObject({
       type: 'onchain',
@@ -2128,7 +2134,10 @@ describe(`WP09b on-chain and channel spends (${testDriver()})`, () => {
       txid: outcome.txid,
       destination: to,
       payment_hash: null,
+      utxos: JSON.stringify([coin?.outpoint]),
     });
+    // The node's fee is within the bound.
+    expect(BigInt(row.fee_msat ?? '0')).toBeLessThanOrEqual(306_000n);
     expect(row.psbt_ciphertext).toBeNull();
     expect(BigInt(row.fee_msat ?? '0')).toBeGreaterThan(0n);
     expect((await s.payer.onchain.listTransactions()).items.map((t) => t.txid)).toContain(outcome.txid);
@@ -2139,7 +2148,7 @@ describe(`WP09b on-chain and channel spends (${testDriver()})`, () => {
     expect(await errorCode(await s.execute('onchain', p.confirmationToken))).toBe('confirmation_invalid');
     // Counted in the rolling window.
     const used = (await (await s.h.request('GET', `${s.path}/spend-policy`, s.auth)).json()) as { usedMsat: string };
-    expect(used.usedMsat).toBe('105000000');
+    expect(used.usedMsat).toBe('100306000');
     expect(
       s.h.lines.some(
         (l) => l.includes('"spend intent"') && l.includes('"type":"onchain"') && l.includes('"security":true'),
@@ -2147,11 +2156,63 @@ describe(`WP09b on-chain and channel spends (${testDriver()})`, () => {
     ).toBe(true);
   });
 
+  it('WP09c: counts only the size bound on a large send, and applies the fee share to it', async () => {
+    const s = await chainSpending();
+    const to = await s.address();
+    // A large send counts its bound (306 sat at 2 sat/vB), not 5 % of the amount (20,000 sat).
+    const large = await s.token('onchain', { address: to, amount: '400000000', feeRate: '2' });
+    expect(large.cost.maxFee).toBe('306000');
+    // A small send at a high rate: 153 vB × 9 sat/vB = 1,377 sat is above 5 % of 20,000 sat (1,000 sat).
+    const small = { address: to, amount: '20000000', feeRate: '9' };
+    expect(await errorCode(await s.preview('onchain', small))).toBe('fee_cap_exceeded');
+    // In step-up mode the exact bound is shown and a fresh password is needed.
+    expect((await s.policy({ maxFeeShareMode: 'step-up' })).status).toBe(204);
+    s.h.server.auth.sessions.clearGrants(s.handle);
+    const stepped = await s.token('onchain', small);
+    expect(stepped).toMatchObject({ feeOverride: true, stepUpRequired: true, cost: { maxFee: '1377000' } });
+    expect(await errorCode(await s.execute('onchain', stepped.confirmationToken))).toBe('step_up_required');
+    const rotated = await s.passwordStepUp();
+    const res = await s.execute('onchain', stepped.confirmationToken, undefined, false, rotated);
+    expect(res.status, await res.clone().text()).toBe(200);
+    const done = (await res.json()) as { intentId: string; state: string };
+    expect(done.state).toBe('succeeded');
+    // The node's fee stayed within the bound shown.
+    expect(BigInt((await s.intent(done.intentId)).fee_msat ?? '0')).toBeLessThanOrEqual(1_377_000n);
+  });
+
+  it('WP09c: bounds from the fewest coins, refuses what the coins cannot cover, and fixes them for the node', async () => {
+    const s = await chainSpending();
+    const to = await s.address();
+    const big = s.payer.addCoin(msat(900_000_000n), 'p2tr');
+    // The largest coin alone covers it: one P2TR input (58 vB).
+    const one = await s.token('onchain', { address: to, amount: '600000000', feeRate: '1.5' });
+    expect(one.cost.maxFee).toBe(String(Math.ceil(1.5 * (11 + 58 + 31 + 43)) * 1000));
+    // Both coins are needed for more than the largest holds: 58 + 68 vB of inputs.
+    const both = await s.token('onchain', { address: to, amount: '1200000000', feeRate: '1.5' });
+    expect(both.cost.maxFee).toBe(String(Math.ceil(1.5 * (11 + 58 + 68 + 31 + 43)) * 1000));
+    expect(
+      await (await s.preview('onchain', { address: to, amount: '1400000000', feeRate: '1.5' })).json(),
+    ).toMatchObject({ error: { code: 'validation_failed', details: { reason: 'insufficient_funds' } } });
+    const prepare = vi.spyOn(s.payer.onchain, 'prepare');
+    expect((await s.execute('onchain', one.confirmationToken)).status).toBe(200);
+    expect(prepare.mock.calls[0]?.[0].utxos).toEqual([big]);
+    // A coin chosen at preview and spent by another send before execute: the node refuses it, nothing is sent.
+    const stale = await s.token('onchain', { address: to, amount: '100000000', feeRate: '1.5' });
+    const first = await s.token('onchain', { address: to, amount: '110000000', feeRate: '1.5' });
+    expect((await s.execute('onchain', first.confirmationToken)).status).toBe(200);
+    const res = await s.execute('onchain', stale.confirmationToken);
+    expect(await res.json()).toMatchObject({ error: { code: 'payment_failed' } });
+    expect(prepare.mock.calls[2]?.[0].utxos).toEqual(prepare.mock.calls[1]?.[0].utxos);
+  });
+
   it('refuses a node transaction that pays too much fee or another output, and releases its inputs', async () => {
     const s = await chainSpending();
     const to = await s.address();
-    // At 9 sat/vB the fake's fee (about 1,500 sat) is above 5 % of 20,000 sat.
-    const dear = await s.token('onchain', { address: to, amount: '20000000', feeRate: '9' });
+    const real = s.payer.onchain.prepare;
+    // A node that builds a dearer transaction than the bound (here: a higher rate than confirmed) is refused before
+    // anything is broadcast, and its inputs are released.
+    s.payer.onchain.prepare = async (request) => real({ ...request, feeRate: '3' });
+    const dear = await s.token('onchain', { address: to, amount: '20000000', feeRate: '2' });
     const res = await s.execute('onchain', dear.confirmationToken);
     expect(res.status).toBe(422);
     expect(await res.json()).toMatchObject({
@@ -2159,7 +2220,6 @@ describe(`WP09b on-chain and channel spends (${testDriver()})`, () => {
     });
     expect(await reservedUtxos(s.payer)).toBe(0);
 
-    const real = s.payer.onchain.prepare;
     const elsewhere = await s.address();
     s.payer.onchain.prepare = async (request) =>
       real({ ...request, outputs: request.outputs.map((o) => ({ ...o, address: elsewhere })) });
@@ -2211,6 +2271,11 @@ describe(`WP09b on-chain and channel spends (${testDriver()})`, () => {
     s.payer.onchain.send = async () => {
       throw new AdapterError({ code: 'node_error', sent: true, definitive: true, nodeCode: -1 });
     };
+    // The unknown send keeps its coins reserved, so the wallet needs another one to bound the next send from.
+    expect(await errorCode(await s.preview('onchain', { address: to, amount: '12000000', feeRate: '2' }))).toBe(
+      'validation_failed',
+    );
+    s.payer.addCoin(msat(50_000_000n));
     const refused = await s.token('onchain', { address: to, amount: '12000000', feeRate: '2' });
     expect(await errorCode(await s.execute('onchain', refused.confirmationToken))).toBe('payment_failed');
     s.payer.onchain.send = realSend;
@@ -2328,6 +2393,8 @@ describe(`WP09b on-chain and channel spends (${testDriver()})`, () => {
         .state,
     ).toBe('unknown');
 
+    // The unknown send keeps the wallet's only coin reserved: the next preview is bounded from a new one.
+    s.payer.addCoin(msat(50_000_000n));
     const kept = await s.token('onchain', { address: to, amount: '7000000', feeRate: '2' });
     expect((await s.h.request('POST', '/api/v1/auth/logout', s.auth)).status).toBe(204);
     expect(await errorCode(await s.execute('onchain', kept.confirmationToken))).toBe('unauthenticated');
@@ -2358,7 +2425,9 @@ describe(`WP09b on-chain and channel spends (${testDriver()})`, () => {
 
     const open = await s.token('channels/open', { peer, amount: '200000000', push: '1000', feeRate: '2' });
     // The push comes out of the channel amount, so it adds nothing to the cost (spend policy §15 item 3).
-    expect(open.cost).toEqual({ amount: '200000000', maxFee: '10000000', total: '210000000' });
+    // Funding fee bounded from the coin (68 vB in, P2WSH funding output 43 vB, change 43 vB, 11 vB) at 2 sat/vB.
+    expect(open.cost).toEqual({ amount: '200000000', maxFee: '330000', total: '200330000' });
+    const fund = vi.spyOn(s.payer.channel, 'openChannel');
     const opened = (await (await s.execute('channels/open', open.confirmationToken)).json()) as {
       intentId: string;
       state: string;
@@ -2367,6 +2436,7 @@ describe(`WP09b on-chain and channel spends (${testDriver()})`, () => {
     };
     expect(opened.state).toBe('succeeded');
     expect(await s.intent(opened.intentId)).toMatchObject({ type: 'channel-open', peer, channel_id: opened.channelId });
+    expect(fund.mock.calls[0]?.[0].utxos).toHaveLength(1);
 
     // To the node's own wallet: not counted.
     const own = await s.token('channels/close', { channel: opened.channelId });
@@ -2562,6 +2632,46 @@ describe(`WP09b on-chain and channel spends (${testDriver()})`, () => {
       const server = await s.restart();
       expect(await server.recovery.resolvePass()).toBe(0);
       expect(await s.row(intentId)).toMatchObject({ state: 'failed', error_code: 'not_sent' });
+      // WP09c: the coins `txprepare` reserved are released from the stored outpoints (inputs-only PSBT).
+      expect(await reservedUtxos(s.payer)).toBe(0);
+    });
+
+    it('releases no coin that another running spend also chose', async () => {
+      const s = await interrupted();
+      s.payer.onchain.send = async () => crash();
+      const { intentId } = await s.spend(
+        'onchain',
+        { address: await s.address(), amount: '100000000', feeRate: '2' },
+        'wp09c-overlap-first',
+      );
+      const { utxos } = await s.row(intentId);
+      // Another intent that still holds the same coin (left unknown), as a spend admitted after a restart could.
+      await s.h.server.db
+        .insertInto('spend_intents')
+        .values({
+          id: randomUUIDv4(),
+          node_id: s.id,
+          chain: 'blake2b',
+          pubkey: (await s.payer.node.getInfo()).pubkey,
+          type: 'onchain',
+          payment_hash: null,
+          amount_msat: '1000000',
+          max_fee_msat: '0',
+          fee_msat: null,
+          state: 'unknown',
+          idempotency_key: 'wp09c-overlap-holder',
+          digest: 'x',
+          error_code: null,
+          created_at: s.h.clock.now.toISOString(),
+          updated_at: s.h.clock.now.toISOString(),
+          utxos,
+        })
+        .execute();
+      await s.interrupt(intentId, { txid: null, psbt_key_id: null, psbt_nonce: null, psbt_ciphertext: null });
+      const server = await s.restart();
+      await server.recovery.resolvePass();
+      expect(await s.row(intentId)).toMatchObject({ state: 'failed', error_code: 'not_sent' });
+      expect(await reservedUtxos(s.payer)).toBe(1);
     });
 
     it('finds an interrupted channel open by peer and capacity, and fails one with no channel', async () => {
@@ -2754,7 +2864,7 @@ describe(`WP09b on-chain and channel spends (${testDriver()})`, () => {
       expect(listed.status).toBe(200);
       const body = (await listed.json()) as { items: { intentId: string; cost: string }[]; warning: string };
       expect(body.items).toEqual([
-        expect.objectContaining({ intentId, type: 'onchain', cost: '105000000', reason: 'internal' }),
+        expect.objectContaining({ intentId, type: 'onchain', cost: '100306000', reason: 'internal' }),
       ]);
       expect(body.warning).toMatch(/paid a second time/);
       expect(

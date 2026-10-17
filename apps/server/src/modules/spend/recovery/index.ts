@@ -118,6 +118,7 @@ export class SpendRecovery {
         'psbt_ciphertext',
         'channel_id',
         'peer',
+        'utxos',
       ])
       .where('state', '=', 'unknown')
       .orderBy('created_at')

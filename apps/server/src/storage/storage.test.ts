@@ -220,6 +220,7 @@ describe(`storage (${testDriver()})`, () => {
       '20261015T1200_events_cursors.sql',
       '20261015T1400_jobs_confirmations.sql',
       '20261016T0910_nodes_management.sql',
+      '20261017T1200_spend_intent_utxos.sql',
     ]);
     const held = join(dir, '..', 'held');
     mkdirSync(held);

@@ -8,6 +8,7 @@ import { bech32, bech32m } from '@scure/base';
 import {
   AdapterError,
   buildPsbt,
+  readPsbt,
   CAPABILITIES,
   decodeAddress,
   msat,
@@ -92,6 +93,9 @@ export interface FakeNodeOptions {
 }
 
 const HRP: Record<Network, string> = { mainnet: 'lnbc', testnet4: 'lntb', signet: 'lntbs', regtest: 'lnbcrt' };
+// Signed input sizes (vbytes) by address type, and the dust limit, as the spend module's size bound assumes.
+const FAKE_INPUT_VBYTES: Record<string, number> = { p2wpkh: 68, p2sh: 91, p2tr: 58, p2pkh: 148 };
+const FAKE_DUST_SAT = 546n;
 const ADDRESS_HRP: Record<Network, string> = { mainnet: 'bc', testnet4: 'tb', signet: 'tb', regtest: 'bcrt' };
 const CLN_NETWORK: Record<Network, string> = {
   mainnet: 'bitcoin',
@@ -265,6 +269,20 @@ export class FakeAdapter implements NodeAdapter {
   }
 
   // The next call fails with this error (once).
+  // Test helper: a new confirmed coin of `amount` in the wallet, at an address of `type`.
+  addCoin(amount: Msat, type: NewAddressType = 'p2wpkh'): string {
+    const outpoint = parseFundingOutpoint(`${randomHex(32)}:0`);
+    this.#utxos.push({
+      outpoint,
+      amount,
+      address: this.#address(type),
+      status: 'confirmed',
+      reserved: false,
+      blockHeight: this.blockHeight,
+    });
+    return outpoint;
+  }
+
   failNext(error: AdapterError): void {
     this.#nextError = error;
   }
@@ -314,6 +332,36 @@ export class FakeAdapter implements NodeAdapter {
   #emit(event: NodeEvent): void {
     this.#events.push(event);
     for (const listener of this.#listeners) listener();
+  }
+
+  // The confirmed, unreserved coins a spend may use: all of them, or exactly the named ones (coin control); a named
+  // coin that is missing, spent or reserved is refused, as the node refuses it.
+  #coinsFor(outpoints: string[] | undefined): Utxo[] {
+    const free = this.#utxos.filter((u) => u.status === 'confirmed' && !u.reserved);
+    if (outpoints === undefined) return free;
+    return outpoints.map((o) => {
+      const coin = free.find((u) => u.outpoint === o);
+      if (!coin) throw new AdapterError({ code: 'node_error', sent: true, definitive: true, nodeCode: 301 });
+      return coin;
+    });
+  }
+
+  // ceil(rate × vbytes) in sats, with the input sizes of the coins' address types and the given output scripts.
+  #fee(rate: string, coins: readonly Utxo[], outputScriptBytes: readonly number[]): bigint {
+    const inputs = coins.reduce((sum, u) => {
+      let type = 'p2wpkh';
+      try {
+        type = decodeAddress(u.address ?? '', this.#options.network).type;
+      } catch {
+        /* an address the fake did not make: counted as P2WPKH */
+      }
+      return sum + (FAKE_INPUT_VBYTES[type] ?? 148);
+    }, 0);
+    const outputs = outputScriptBytes.reduce((sum, len) => sum + 9 + len, 0);
+    const vbytes = BigInt(11 + inputs + outputs);
+    const [whole, fraction = ''] = rate.split('.');
+    const thousandths = BigInt(whole as string) * 1000n + BigInt(fraction.slice(0, 3).padEnd(3, '0'));
+    return (thousandths * vbytes + 999n) / 1000n;
   }
 
   #address(type: NewAddressType): string {
@@ -576,6 +624,24 @@ export class FakeAdapter implements NodeAdapter {
         throw new AdapterError({ code: 'node_error', sent: true, definitive: false, nodeCode: -1 });
       }
       const amount = request.amount === 'all' ? msat(400_000_000n) : request.amount;
+      if (request.utxos !== undefined) {
+        // Coin control: fund from exactly these coins (as fundchannel's `utxos`), change back as a new coin.
+        const coins = this.#coinsFor(request.utxos);
+        const sum = coins.reduce<bigint>((a, u) => a + u.amount, 0n) / 1000n;
+        const fee = this.#fee(request.feeRate ?? '2', coins, [34, 34]);
+        const change = sum - amount / 1000n - fee;
+        if (change < 0n) throw new AdapterError({ code: 'node_error', sent: true, definitive: true, nodeCode: 301 });
+        for (const u of coins) u.status = 'spent';
+        if (change >= FAKE_DUST_SAT)
+          this.#utxos.push({
+            outpoint: parseFundingOutpoint(`${randomHex(32)}:1`),
+            amount: msat(change * 1000n),
+            address: this.#address('p2tr'),
+            status: 'confirmed',
+            reserved: false,
+            blockHeight: this.blockHeight,
+          });
+      }
       const channel = this.#newChannel(request.peer, amount, amount, 'opening');
       this.#channels.push({ channel });
       const [txid, outnum] = channel.fundingOutpoint.split(':');
@@ -817,22 +883,13 @@ export class FakeAdapter implements NodeAdapter {
     prepare: async (request: PrepareRequest) => {
       this.#spend('prepare');
       const total = request.outputs.reduce<bigint>((sum, o) => sum + (o.amount === 'all' ? 0n : o.amount), 0n);
-      const free = this.#utxos.filter((u) => u.status === 'confirmed' && !u.reserved);
+      const free = this.#coinsFor(request.utxos);
       const available = free.reduce<bigint>((sum, u) => sum + u.amount, 0n);
       if (available === 0n || total > available) {
         throw new AdapterError({ code: 'node_error', sent: true, definitive: true, nodeCode: 301 });
       }
       // A real unsigned PSBT (version 2, witness UTXOs, like CLN's) so callers can check fee and outputs.
       const all = request.outputs.some((o) => o.amount === 'all');
-      const vbytes = 11n + 68n * BigInt(free.length) + 43n * BigInt(request.outputs.length + 1);
-      const rate = Number(request.feeRate ?? '2');
-      const fee = BigInt(Math.ceil(rate * Number(vbytes)));
-      const sats = (m: bigint) => m / 1000n;
-      const inputSats = sats(available);
-      const sent = all ? inputSats - fee : request.outputs.reduce((sum, o) => sum + sats(o.amount as bigint), 0n);
-      if (sent + fee > inputSats) {
-        throw new AdapterError({ code: 'node_error', sent: true, definitive: true, nodeCode: 301 });
-      }
       const scriptOf = (address: string) => {
         try {
           return decodeAddress(address, this.#options.network).script;
@@ -840,7 +897,17 @@ export class FakeAdapter implements NodeAdapter {
           return '0014' + createHash('sha256').update(address).digest('hex').slice(0, 40);
         }
       };
-      const change = inputSats - sent - fee;
+      const outputBytes = request.outputs.map((o) => scriptOf(o.address).length / 2);
+      const sats = (m: bigint) => m / 1000n;
+      const inputSats = sats(available);
+      const fee = this.#fee(request.feeRate ?? '2', free, all ? outputBytes : [...outputBytes, 34]);
+      const sent = all ? inputSats - fee : request.outputs.reduce((sum, o) => sum + sats(o.amount as bigint), 0n);
+      if (sent + fee > inputSats) {
+        throw new AdapterError({ code: 'node_error', sent: true, definitive: true, nodeCode: 301 });
+      }
+      let change = inputSats - sent - fee;
+      // Dust change is left out, so it goes to the fee (inputs minus outputs), as a real node does.
+      if (!all && change < FAKE_DUST_SAT) change = 0n;
       const { psbt, txid } = buildPsbt({
         inputs: free.map((u) => {
           const [hash, vout] = u.outpoint.split(':') as [string, string];
@@ -894,13 +961,13 @@ export class FakeAdapter implements NodeAdapter {
       this.#prepared.delete(txid);
       for (const u of this.#utxos) if (prepared.inputs.includes(u.outpoint)) u.reserved = false;
     },
+    // Like CLN's `unreserveinputs`: only the PSBT's input outpoints matter.
     unreserve: async (psbt: string) => {
       this.#spend('unreserve');
-      for (const [txid, prepared] of this.#prepared) {
-        if (prepared.psbt !== psbt) continue;
-        this.#prepared.delete(txid);
-        for (const u of this.#utxos) if (prepared.inputs.includes(u.outpoint)) u.reserved = false;
-      }
+      const outpoints = new Set(readPsbt(psbt).inputs.map((i) => `${i.txid}:${i.vout}`));
+      for (const [txid, prepared] of this.#prepared)
+        if (prepared.inputs.some((o) => outpoints.has(o))) this.#prepared.delete(txid);
+      for (const u of this.#utxos) if (outpoints.has(u.outpoint)) u.reserved = false;
     },
   };
 

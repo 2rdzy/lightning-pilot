@@ -26,6 +26,7 @@ import {
   type NodeAdapter,
   type SpendPolicy,
   type Txid,
+  type Utxo,
 } from '@lightning-pilot/core';
 import type { Db } from '../../storage/db.ts';
 import type { Logger } from '../../logging/logger.ts';
@@ -52,6 +53,7 @@ import {
   SPEND_SCOPE,
   type SpendOperation,
 } from './policy.ts';
+import { boundFee, FUNDING_SCRIPT_BYTES, scriptBytes } from './size.ts';
 
 export type ChainSpendKind = 'onchain' | 'channel-open' | 'channel-close';
 
@@ -66,8 +68,17 @@ interface Base {
   duplicates: string[];
 }
 type Payload =
-  | (Base & { type: 'onchain'; address: string; script: string; feeRate: string; stepUp: boolean })
-  | (Base & { type: 'channel-open'; peer: string; push: string; feeRate: string; announce?: boolean; stepUp: boolean })
+  // `utxos`: the coins the maximum fee was computed from; the node is told to spend exactly these (WP09c).
+  | (Base & { type: 'onchain'; address: string; script: string; feeRate: string; utxos: string[]; stepUp: boolean })
+  | (Base & {
+      type: 'channel-open';
+      peer: string;
+      push: string;
+      feeRate: string;
+      announce?: boolean;
+      utxos: string[];
+      stepUp: boolean;
+    })
   | (Base & {
       type: 'channel-close';
       channelId: string;
@@ -131,12 +142,10 @@ export function rateOf(value: string): string {
   return fraction ? `${thousandths / 1000n}.${fraction}` : `${thousandths / 1000n}`;
 }
 
-// The on-chain fee is not known before the node selects coins, so the confirmed maximum is the owner's fee share of
-// the amount; the rate is checked against `maxFeeRate`. The node's actual fee is checked against this maximum
-// before anything is broadcast (on-chain send) or cannot exceed it at the confirmed rate in practice (channel open).
-function onchainMaxFee(amount: Msat, policy: SpendPolicy): Msat {
-  return parseMsat(((amount * BigInt(policy.maxFeeSharePercent)) / 100n).toString());
-}
+// The confirmed maximum on-chain fee (WP09c, spend policy §13 item 5) is the confirmed rate times an upper bound of
+// the transaction's size from the coins chosen for it (size.ts); the owner's fee share and rate caps then apply to
+// that bound (`onchainFee`: refuse, or step-up). Before `txsend` the node's PSBT fee is checked against it again; a
+// channel open cannot be checked before `fundchannel` broadcasts, which is why its coins are fixed too.
 
 export class ChainSpends {
   readonly #db: Db;
@@ -217,6 +226,13 @@ export class ChainSpends {
     return rateOf((opening ? estimates.node?.opening : undefined) ?? estimates.rates.halfHour);
   }
 
+  // The wallet's coins, through the view credential with the method check of the read API (a narrow view rune is
+  // `capability_missing`, not a revoked credential).
+  async #coins(nodeId: string): Promise<Utxo[]> {
+    const { adapter } = await this.#nodes.readAdapter(nodeId, 'onchain', 'listUtxos');
+    return adapter.onchain.listUtxos();
+  }
+
   #address(text: string, network: Network) {
     try {
       return decodeAddress(text, network);
@@ -237,7 +253,13 @@ export class ChainSpends {
     const amount = parseMsat(request.amount);
     const policy = await loadPolicy(this.#db, row);
     const feeRate = await this.#feeRate(adapter, request.feeRate, false);
-    const maxFee = onchainMaxFee(amount, policy);
+    const { utxos, maxFee } = boundFee(
+      await this.#coins(nodeId),
+      row.network as Network,
+      amount,
+      feeRate,
+      scriptBytes(address.script),
+    );
     const feeOverride = onchainFee(amount, maxFee, feeRate, policy);
     const cost = spendCost({ type: 'onchain', amount, maxFee });
     const stepUp = checkBudget(policy, await admissionBudget(this.#db, row, this.#now(), cost), cost);
@@ -248,6 +270,7 @@ export class ChainSpends {
       address: address.address,
       script: address.script,
       feeRate,
+      utxos,
       amount: amount.toString(),
       maxFee: maxFee.toString(),
       cost: cost.toString(),
@@ -280,7 +303,13 @@ export class ChainSpends {
     if (push > amount) throw new AppError('validation_failed', 'The push amount exceeds the channel amount.');
     const policy = await loadPolicy(this.#db, row);
     const feeRate = await this.#feeRate(adapter, request.feeRate, true);
-    const maxFee = onchainMaxFee(amount, policy);
+    const { utxos, maxFee } = boundFee(
+      await this.#coins(nodeId),
+      row.network as Network,
+      amount,
+      feeRate,
+      FUNDING_SCRIPT_BYTES,
+    );
     const feeOverride = onchainFee(amount, maxFee, feeRate, policy);
     const cost = spendCost({ type: 'channel-open', amount, push, maxFee });
     const stepUp = checkBudget(policy, await admissionBudget(this.#db, row, this.#now(), cost), cost);
@@ -291,6 +320,7 @@ export class ChainSpends {
       peer,
       push: push.toString(),
       feeRate,
+      utxos,
       ...(request.announce === undefined ? {} : { announce: request.announce }),
       amount: amount.toString(),
       maxFee: maxFee.toString(),
@@ -553,7 +583,8 @@ export class ChainSpends {
           error_code: null,
           created_at: now,
           updated_at: now,
-          ...(payload.type === 'channel-open' ? { peer: payload.peer } : {}),
+          ...(payload.type === 'onchain' ? { utxos: JSON.stringify(payload.utxos) } : {}),
+          ...(payload.type === 'channel-open' ? { peer: payload.peer, utxos: JSON.stringify(payload.utxos) } : {}),
           ...(payload.type === 'channel-close'
             ? { peer: payload.peer, channel_id: payload.channelId, close_force: payload.force ? 1 : 0 }
             : {}),
@@ -676,6 +707,7 @@ export class ChainSpends {
       prepared = await adapter.onchain.prepare({
         outputs: [{ address: payload.address, amount: parseMsat(payload.amount) }],
         feeRate: payload.feeRate,
+        utxos: payload.utxos,
       });
     } catch (err) {
       // Nothing can be broadcast without `txsend`.
@@ -741,6 +773,7 @@ export class ChainSpends {
         peer: parsePubkey(payload.peer),
         amount: parseMsat(payload.amount),
         feeRate: payload.feeRate,
+        utxos: payload.utxos,
         ...(payload.push === '0' ? {} : { pushMsat: parseMsat(payload.push) }),
         ...(payload.announce === undefined ? {} : { announce: payload.announce }),
       });
