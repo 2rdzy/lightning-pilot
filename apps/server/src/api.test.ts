@@ -2003,6 +2003,92 @@ describe(`WP09b on-chain and channel spends (${testDriver()})`, () => {
   const reservedUtxos = async (adapter: FakeAdapter) =>
     (await adapter.onchain.listUtxos()).filter((u) => u.reserved).length;
 
+  it('counts a close to an external shutdown address, rechecks the balance and says where the funds go', async () => {
+    const s = await chainSpending();
+    const channel = (await s.payer.channel.listChannels()).items[0];
+    if (!channel) throw new Error('no channel');
+    type Preview = { cost: { total: string }; fundsTo: { address?: string; ownWallet: boolean } };
+    const preview = async () => (await (await s.preview('channels/close', { channel: channel.id })).json()) as Preview;
+
+    // CLN's default: the shutdown address is one of the wallet's own, so the close is free.
+    const ownAddress = s.payer.setCloseTo(channel.id, true);
+    expect(await preview()).toMatchObject({ cost: { total: '0' }, fundsTo: { address: ownAddress, ownWallet: true } });
+    // A free close whose shutdown address changes before execute would pay elsewhere uncounted: refused.
+    const free = await s.token('channels/close', { channel: channel.id });
+    s.payer.setCloseTo(channel.id);
+    expect(await (await s.execute('channels/close', free.confirmationToken)).json()).toMatchObject({
+      error: { code: 'confirmation_invalid', details: { reason: 'channel_changed' } },
+    });
+
+    // Opened with an external `close_to`: counted at the local balance, and the preview names the address.
+    const external = s.payer.setCloseTo(channel.id);
+    const counted = await s.token('channels/close', { channel: channel.id });
+    expect(counted.cost.total).toBe(channel.local.toString());
+    expect(await preview()).toMatchObject({ fundsTo: { address: external, ownWallet: false } });
+
+    // Payments received after the preview raise the local balance: the owner must preview again.
+    const list = vi.spyOn(s.payer.channel, 'listChannels');
+    list.mockResolvedValue({ items: [{ ...channel, closeTo: external, local: msat(channel.local + 1000n) }] });
+    const close = vi.spyOn(s.payer.channel, 'closeChannel');
+    const changed = await s.execute('channels/close', counted.confirmationToken);
+    expect(changed.status).toBe(409);
+    expect(await changed.json()).toMatchObject({
+      error: { code: 'confirmation_invalid', details: { reason: 'channel_changed' } },
+    });
+    expect(close).not.toHaveBeenCalled();
+    list.mockRestore();
+    const res = await s.execute('channels/close', counted.confirmationToken);
+    const done = (await res.json()) as { intentId: string; state: string };
+    expect(done.state).toBe('succeeded');
+    // No destination is sent: the node pays its stored shutdown script, which was counted.
+    expect(close.mock.calls[0]?.[0].destination).toBeUndefined();
+    expect(await s.intent(done.intentId)).toMatchObject({ destination: external, cost_msat: channel.local.toString() });
+
+    // A view rune admitted before `listaddresses` joined the view scope cannot tell: counted (fail closed).
+    const peer = (await s.other.node.getInfo()).pubkey;
+    await s.payer.peer.connect(`${peer}@127.0.0.1:9735`);
+    const { channelId } = await s.payer.channel.openChannel({ peer, amount: msat(100_000_000n) });
+    const second = (await s.payer.channel.listChannels()).items.find((c) => c.id === channelId);
+    if (!second) throw new Error('no second channel');
+    s.payer.setCloseTo(second.id, true);
+    const row = await s.h.server.db
+      .selectFrom('nodes')
+      .select('view_methods')
+      .where('id', '=', s.id)
+      .executeTakeFirstOrThrow();
+    await s.h.server.db
+      .updateTable('nodes')
+      .set({
+        view_methods: JSON.stringify((JSON.parse(row.view_methods) as string[]).filter((m) => m !== 'listaddresses')),
+      })
+      .where('id', '=', s.id)
+      .execute();
+    const unchecked = (await (await s.preview('channels/close', { channel: second.id })).json()) as Preview;
+    expect(unchecked).toMatchObject({ cost: { total: second.local.toString() }, fundsTo: { ownWallet: false } });
+  });
+
+  it('counts the close when the wallet cannot be asked, and refuses when the shutdown address changed', async () => {
+    const s = await chainSpending();
+    const channel = (await s.payer.channel.listChannels()).items[0];
+    if (!channel) throw new Error('no channel');
+    s.payer.setCloseTo(channel.id, true);
+    const owns = vi
+      .spyOn(s.payer.onchain, 'ownsAddress')
+      .mockRejectedValue(new AdapterError({ code: 'node_unreachable', sent: false, definitive: false }));
+    const counted = await s.token('channels/close', { channel: channel.id });
+    expect(counted.cost.total).toBe(channel.local.toString());
+    expect(s.h.lines.some((l) => l.includes('wallet address not checked') && l.includes('node_unreachable'))).toBe(
+      true,
+    );
+    owns.mockRestore();
+    // The shutdown address is not the one the owner previewed any more: preview again.
+    s.payer.setCloseTo(channel.id);
+    const changed = await s.execute('channels/close', counted.confirmationToken);
+    expect(await changed.json()).toMatchObject({
+      error: { code: 'confirmation_invalid', details: { reason: 'channel_changed' } },
+    });
+  });
+
   it('fails and releases an admitted intent when credential loading is refused before any node call', async () => {
     const s = await chainSpending();
     const p = await s.token('onchain', { address: await s.address(), amount: '100000000', feeRate: '2' });
@@ -2271,7 +2357,8 @@ describe(`WP09b on-chain and channel spends (${testDriver()})`, () => {
     expect(s.h.lines.some((l) => l.includes('"peer changed"') && l.includes('"security":true'))).toBe(true);
 
     const open = await s.token('channels/open', { peer, amount: '200000000', push: '1000', feeRate: '2' });
-    expect(open.cost).toEqual({ amount: '200000000', maxFee: '10000000', total: '210001000' });
+    // The push comes out of the channel amount, so it adds nothing to the cost (spend policy §15 item 3).
+    expect(open.cost).toEqual({ amount: '200000000', maxFee: '10000000', total: '210000000' });
     const opened = (await (await s.execute('channels/open', open.confirmationToken)).json()) as {
       intentId: string;
       state: string;
@@ -2798,6 +2885,45 @@ describe(`WP09b on-chain and channel spends (${testDriver()})`, () => {
       });
       expect(res.status, await res.clone().text()).toBe(200);
       expect(discard).not.toHaveBeenCalled();
+    });
+
+    it('refuses "failed" for an on-chain send the wallet lists, and keeps the inputs when the wallet cannot be read', async () => {
+      const s = await interrupted();
+      s.payer.onchain.send = async () => crash();
+      const { intentId } = await s.spend(
+        'onchain',
+        { address: await s.address(), amount: '100000000', feeRate: '2' },
+        'wp10-owner-resolves-broadcast',
+      );
+      const { txid } = await s.row(intentId);
+      if (txid === null) throw new Error('no txid');
+      const resolve = () =>
+        s.h.request('POST', `${s.path}/spends/${intentId}/resolve`, { ...s.auth, body: { outcome: 'failed' } });
+      const discard = vi.spyOn(s.payer.onchain, 'discard');
+      const unreserve = vi.spyOn(s.payer.onchain, 'unreserve');
+      // Listed on the second page of the wallet's history.
+      const list = vi
+        .spyOn(s.payer.onchain, 'listTransactions')
+        .mockImplementation(async (page) =>
+          page?.cursor === undefined
+            ? { items: [{ txid: parseTxid('cd'.repeat(32)), confirmations: 3, kind: 'receive' }], nextCursor: 'p2' }
+            : { items: [{ txid: parseTxid(txid), confirmations: 0, kind: 'send' }] },
+        );
+      const refused = await resolve();
+      expect(await refused.json()).toMatchObject({
+        error: { code: 'validation_failed', details: { reason: 'broadcast' } },
+      });
+      expect((await s.row(intentId)).state).toBe('unknown');
+      // The wallet cannot be read: the choice is stored, but the inputs are kept.
+      list.mockImplementation(async () => {
+        throw new AdapterError({ code: 'node_unreachable', sent: false, definitive: false });
+      });
+      const res = await resolve();
+      expect(res.status, await res.clone().text()).toBe(200);
+      expect((await s.row(intentId)).state).toBe('failed');
+      expect(discard).not.toHaveBeenCalled();
+      expect(unreserve).not.toHaveBeenCalled();
+      expect(s.h.lines.some((l) => l.includes('spend wallet not readable'))).toBe(true);
     });
 
     it("keeps the owner's choice when the node cannot release the inputs", async () => {

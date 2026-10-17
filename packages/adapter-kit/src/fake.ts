@@ -222,6 +222,8 @@ export class FakeAdapter implements NodeAdapter {
   readonly #closed: ClosedChannel[] = [];
   readonly #offers = new Map<string, Offer>();
   readonly #utxos: Utxo[] = [];
+  // Every address this wallet has issued (ownsAddress).
+  readonly #own = new Set<string>();
   readonly #prepared = new Map<string, { inputs: string[]; psbt: string; amount: Msat; change: Msat }>();
   readonly #transactions: OnchainTx[] = [];
   readonly #events: NodeEvent[] = [];
@@ -284,6 +286,17 @@ export class FakeAdapter implements NodeAdapter {
     this.#channels.push({ channel: this.#newChannel(peer, capacity, msat(capacity / 2n), 'active') });
   }
 
+  // Test helper: the channel's local shutdown address, as when it was opened with `close_to`. `own` makes it one of
+  // this wallet's addresses (CLN's default); otherwise it is external.
+  setCloseTo(channelId: string, own = false): string {
+    const entry = this.#channels.find((c) => c.channel.id === channelId);
+    if (!entry) throw new Error('no such channel');
+    const hrp = ADDRESS_HRP[this.#options.network];
+    const address = own ? this.#address('p2tr') : bech32m.encode(hrp, [1, ...bech32m.toWords(randomBytes(32))]);
+    entry.channel = { ...entry.channel, closeTo: address };
+    return address;
+  }
+
   #enter(method: string): void {
     this.calls.push(method);
     const error = this.#nextError;
@@ -305,9 +318,12 @@ export class FakeAdapter implements NodeAdapter {
 
   #address(type: NewAddressType): string {
     const hrp = ADDRESS_HRP[this.#options.network];
-    return type === 'p2tr'
-      ? bech32m.encode(hrp, [1, ...bech32m.toWords(randomBytes(32))])
-      : bech32.encode(hrp, [0, ...bech32.toWords(randomBytes(20))]);
+    const address =
+      type === 'p2tr'
+        ? bech32m.encode(hrp, [1, ...bech32m.toWords(randomBytes(32))])
+        : bech32.encode(hrp, [0, ...bech32.toWords(randomBytes(20))]);
+    this.#own.add(address);
+    return address;
   }
 
   #newChannel(peer: Pubkey, capacity: Msat, local: Msat, group: 'active' | 'opening'): Channel {
@@ -789,6 +805,10 @@ export class FakeAdapter implements NodeAdapter {
     listTransactions: async (request?: PageRequest) => {
       this.#enter('listTransactions');
       return page([...this.#transactions].reverse(), request);
+    },
+    ownsAddress: async (address: string) => {
+      this.#enter('ownsAddress');
+      return this.#own.has(address);
     },
     listUtxos: async () => {
       this.#enter('listUtxos');

@@ -75,7 +75,10 @@ type Payload =
       peer: string;
       force: boolean;
       external: boolean;
+      // The requested destination, passed to the node.
       closeTo?: string;
+      // Where the funds go: the requested destination, else the channel's local shutdown address (if any).
+      fundsTo?: string;
     });
 
 interface Confirmation {
@@ -327,18 +330,23 @@ export class ChainSpends {
       throw new AppError('validation_failed', 'This channel is already closing.');
     const closeTo =
       request.destination === undefined ? undefined : this.#address(request.destination, row.network as Network);
+    // Without a destination the node pays the channel's local shutdown script, which is external when the channel
+    // was opened with `close_to` (spend policy §15 item 1): such a close is counted unless the wallet owns it.
+    const fundsTo = closeTo?.address ?? channel.closeTo;
+    const external =
+      closeTo !== undefined || (fundsTo !== undefined && !(await this.#ownsAddress(row, adapter, fundsTo)));
     const policy = await loadPolicy(this.#db, row);
     // The close fee is paid from the channel's funds, so what can leave the node is at most the local balance.
     const operation: SpendOperation = {
       type: 'channel-close',
       localBalance: channel.local,
       maxFee: ZERO,
-      external: closeTo !== undefined,
+      external,
       force: request.force,
     };
     const cost = spendCost(operation);
     const stepUp = operationNeedsStepUp(operation, policy, await admissionBudget(this.#db, row, this.#now(), cost));
-    const destination = closeTo?.address ?? `close:${channel.id}`;
+    const destination = external && fundsTo !== undefined ? fundsTo : `close:${channel.id}`;
     const payload: Payload = {
       type: 'channel-close',
       chain: row.chain,
@@ -347,16 +355,14 @@ export class ChainSpends {
       channelRef: request.channel,
       peer: channel.peer.pubkey,
       force: request.force,
-      external: closeTo !== undefined,
+      external,
       ...(closeTo === undefined ? {} : { closeTo: closeTo.address }),
+      ...(fundsTo === undefined ? {} : { fundsTo }),
       amount: channel.local.toString(),
       maxFee: '0',
       cost: cost.toString(),
       destination,
-      duplicates:
-        closeTo === undefined
-          ? []
-          : await duplicatesOf(this.#db, row, destination, channel.local.toString(), this.#now()),
+      duplicates: external ? await duplicatesOf(this.#db, row, destination, channel.local.toString(), this.#now()) : [],
     };
     const common = await this.#issue(sessionHandle, nodeId, payload, identity, false, stepUp);
     this.#log.info('spend preview', { requestId, nodeId, type: 'channel-close', force: request.force });
@@ -367,7 +373,23 @@ export class ChainSpends {
       force: request.force,
       ...(closeTo === undefined ? {} : { destination: closeTo.address }),
       localBalance: channel.local.toString(),
+      fundsTo: { ...(fundsTo === undefined ? {} : { address: fundsTo }), ownWallet: !external },
     };
+  }
+
+  // A wallet address check that fails closed: a view rune admitted before `listaddresses` joined the view scope, or
+  // a node that cannot answer, makes the address count as external.
+  async #ownsAddress(row: { id: string; view_methods: string }, adapter: NodeAdapter, address: string) {
+    if (!(JSON.parse(row.view_methods) as string[]).includes('listaddresses')) return false;
+    try {
+      return await adapter.onchain.ownsAddress(address);
+    } catch (err) {
+      this.#log.warn('wallet address not checked', {
+        nodeId: row.id,
+        code: err instanceof AdapterError ? err.code : 'internal',
+      });
+      return false;
+    }
   }
 
   #replay(
@@ -449,8 +471,21 @@ export class ChainSpends {
     )
       throw new AppError('confirmation_invalid', 'The confirmation is missing, used, expired or not yours.');
     const payload = confirmation.payload;
-    const { row, canSpend } = await this.#nodes.adapter(nodeId);
+    const { row, adapter: reader, canSpend } = await this.#nodes.adapter(nodeId);
     if (!canSpend) throw new AppError('capability_missing', 'This node has no spend credential.');
+    // A counted close is counted at the local balance seen at preview; payments received since may have raised it
+    // (spend policy §15 item 5). A close without a destination pays the shutdown address the preview judged. Read
+    // the channel again, outside the lock, and send the owner back to the preview if either changed.
+    if (payload.type === 'channel-close' && (payload.external || payload.closeTo === undefined)) {
+      const current = await this.#findChannel(reader, payload.channelId);
+      if (
+        (payload.external && current.local > parseMsat(payload.amount)) ||
+        (payload.closeTo === undefined && current.closeTo !== payload.fundsTo)
+      )
+        throw new AppError('confirmation_invalid', 'The channel changed since the preview; preview again.', {
+          reason: 'channel_changed',
+        });
+    }
     await this.#nodes.monitor.ensureChecked(nodeId);
     refuseUnlessConfirmed(this.#nodes.identity(row));
 

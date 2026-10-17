@@ -283,6 +283,8 @@ export const AccountEvents = z.object({
 
 export const TxPrepare = z.object({ psbt: z.string().max(4_000_000), txid: hex32 });
 export const TxSend = z.object({ txid: hex32 });
+// `listaddresses address=…`: the issued wallet address that matches, or none.
+export const ListAddresses = z.object({ addresses: z.array(z.object({ keyidx: z.number().int() })).max(1000) });
 
 export const FundChannel = z.object({ txid: hex32, outnum: u32, channel_id: hex32 });
 

@@ -78,6 +78,7 @@ import {
   RawBlock,
   TxPrepare,
   TxSend,
+  ListAddresses,
   XpayReply,
   type OfferRow as OfferRowType,
   type SendPayRow,
@@ -784,6 +785,9 @@ export function createClnAdapter(options: ClnAdapterOptions) {
           reserved: o.reserved === true,
           ...(o.blockheight === undefined ? {} : { blockHeight: o.blockheight }),
         }));
+      },
+      async ownsAddress(address: string): Promise<boolean> {
+        return parse(ListAddresses, await call('listaddresses', { address })).addresses.length > 0;
       },
       async prepare(request: {
         outputs: { address: string; amount: Msat | 'all' }[];

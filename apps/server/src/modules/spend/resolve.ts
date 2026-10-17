@@ -79,6 +79,29 @@ export class SpendResolution {
     outcome: 'succeeded' | 'failed',
     requestId: string,
   ): Promise<{ intentId: string; state: 'succeeded' | 'failed' }> {
+    // An on-chain send the wallet lists was broadcast: "failed" would free its budget and its inputs while it may
+    // still confirm (spend policy §15 item 2). Asked before the write lock (no node call under it); when the wallet
+    // cannot be read, the owner's choice stands but the inputs are kept.
+    let release = true;
+    if (outcome === 'failed') {
+      this.#auth.sessions.requireGrant(await liveSession(this.#db, this.#auth, sessionHandle), 'security');
+      const target = await this.#db
+        .selectFrom('spend_intents')
+        .select(['type', 'txid', 'state'])
+        .where('id', '=', intentId)
+        .where('node_id', '=', nodeId)
+        .executeTakeFirst();
+      if (target?.type === 'onchain' && target.txid !== null && target.state === 'unknown') {
+        const listed = await this.#walletLists(nodeId, parseTxid(target.txid), requestId);
+        if (listed === true)
+          throw new AppError(
+            'validation_failed',
+            'The node wallet lists this transaction, so it was broadcast. It cannot be marked as failed.',
+            { reason: 'broadcast' },
+          );
+        if (listed === undefined) release = false;
+      }
+    }
     const resolved = await writeTx(this.#db, async (trx) => {
       this.#auth.sessions.requireGrant(await liveSession(trx, this.#auth, sessionHandle), 'security');
       const intent = await trx
@@ -115,6 +138,7 @@ export class SpendResolution {
     });
     // An on-chain send the owner calls failed may still hold its inputs on the node; release them if it can.
     if (
+      release &&
       outcome === 'failed' &&
       resolved.type === 'onchain' &&
       resolved.txid !== null &&
@@ -126,6 +150,30 @@ export class SpendResolution {
       await this.#release(nodeId, intentId, parseTxid(resolved.txid), sealed, requestId);
     }
     return { intentId, state: outcome };
+  }
+
+  // Whether the node wallet lists the transaction; undefined when it cannot be read.
+  async #walletLists(nodeId: string, txid: Txid, requestId: string): Promise<boolean | undefined> {
+    try {
+      const { adapter } = await this.#nodes.adapter(nodeId);
+      let cursor: string | undefined;
+      do {
+        const page = await adapter.onchain.listTransactions({
+          limit: 200,
+          ...(cursor === undefined ? {} : { cursor }),
+        });
+        if (page.items.some((tx) => tx.txid === txid)) return true;
+        cursor = page.nextCursor;
+      } while (cursor !== undefined);
+      return false;
+    } catch (err) {
+      this.#log.warn('spend wallet not readable', {
+        requestId,
+        nodeId,
+        code: err instanceof AdapterError || err instanceof AppError ? err.code : 'internal',
+      });
+      return undefined;
+    }
   }
 
   // Runs after the owner's choice is stored, so nothing here may fail the request: a PSBT sealed under an old vault

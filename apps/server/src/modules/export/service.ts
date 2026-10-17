@@ -340,21 +340,8 @@ export class ExportService {
             psbt_ciphertext: null,
           })
           .execute();
-      for (const c of data.restoreCounts) {
-        const id = await this.#restore(db, new Date(Date.parse(c.until) - DAY).toISOString(), data.createdAt);
-        await db
-          .insertInto('restore_counts')
-          .values({
-            restore_id: id,
-            chain: c.chain,
-            pubkey: c.pubkey,
-            state: 'counted',
-            counted_msat: c.countedMsat,
-            counted_at: at,
-            until: c.until,
-          })
-          .execute();
-      }
+      // The source's restore counts are validated but not stored: the import's own restore row below makes every
+      // identity count the last 24 hours from its node, which covers what they counted (spend policy §15 item 4).
       const id = await this.#restore(db, at, data.createdAt);
       for (const identity of await db.selectFrom('nodes').select(['chain', 'pubkey']).distinct().execute())
         await db

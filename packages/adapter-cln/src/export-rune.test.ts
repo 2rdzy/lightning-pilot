@@ -17,6 +17,14 @@ describe('isExportableViewRune', () => {
     expect(isExportableViewRune(wire(`=123456789&${restrictions}`, Buffer.alloc(32)))).toBe(true);
   });
 
+  it('accepts the view scope made before listaddresses joined it, and no other subset', () => {
+    const without = (method: string) =>
+      clauses.map((clause) => clause.filter((alternative) => alternative !== `method=${method}`).join('|')).join('&');
+    expect(restrictions).toContain('method=listaddresses');
+    expect(isExportableViewRune(wire(`=8&${without('listaddresses')}`))).toBe(true);
+    expect(isExportableViewRune(wire(`=9&${without('listfunds')}`))).toBe(false);
+  });
+
   it('accepts reordered alternatives as emitted by real CLN fixtures', () => {
     const reordered = clauses.map((clause) => [...clause].reverse().join('|')).join('&');
     expect(isExportableViewRune(wire(`=8&${reordered}`))).toBe(true);

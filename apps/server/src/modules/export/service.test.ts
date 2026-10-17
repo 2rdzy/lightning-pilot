@@ -468,13 +468,15 @@ describe('encrypted export lifecycle', { timeout: 30000 }, () => {
       psbt_nonce: null,
       psbt_ciphertext: null,
     });
+    // The source's counts are not stored: one restore row for the import, pending for every identity, makes the
+    // node's last 24 hours count instead (spend policy §15 item 4).
+    expect(await destination.db.selectFrom('restores').selectAll().execute()).toHaveLength(1);
     expect(
       await destination.db.selectFrom('restore_counts').selectAll().where('state', '=', 'counted').execute(),
-    ).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({ counted_msat: '250', until: first(data.restoreCounts).until }),
-      ]),
-    );
+    ).toEqual([]);
+    expect(await destination.db.selectFrom('restore_counts').select(['chain', 'pubkey', 'state']).execute()).toEqual([
+      { chain: 'blake2b', pubkey: PUB, state: 'pending' },
+    ]);
     await expect(
       admissionBudget(destination.db, { chain: 'blake2b', pubkey: PUB }, destination.clock.now, 1n),
     ).rejects.toMatchObject({ code: 'setup_required' });

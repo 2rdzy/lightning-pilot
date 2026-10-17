@@ -214,7 +214,7 @@ export interface PrepareRequest {
   utxos?: string[];
 }
 
-export interface OnchainPort {
+export interface OnchainPort extends AddressOwnershipPort {
   // Newest first.
   listTransactions(page?: PageRequest): Promise<Page<OnchainTx>>;
   listUtxos(): Promise<Utxo[]>;
