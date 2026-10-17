@@ -79,7 +79,8 @@ const le = (n: bigint, size: number) => Array.from({ length: size }, (_, k) => N
 
 interface Tx {
   version: number;
-  inputs: { txid: Uint8Array; vout: number; sequence: number }[];
+  // `scriptSig` is part of the txid: an input spending a non-segwit output carries one (empty in an unsigned PSBT).
+  inputs: { txid: Uint8Array; vout: number; scriptSig?: Uint8Array; sequence: number }[];
   outputs: { amount: bigint; script: Uint8Array }[];
   locktime: number;
 }
@@ -87,7 +88,13 @@ interface Tx {
 function serialize(tx: Tx): Uint8Array {
   const out: number[] = [...le(BigInt(tx.version), 4), ...varintBytes(tx.inputs.length)];
   for (const input of tx.inputs)
-    out.push(...input.txid, ...le(BigInt(input.vout), 4), 0, ...le(BigInt(input.sequence), 4));
+    out.push(
+      ...input.txid,
+      ...le(BigInt(input.vout), 4),
+      ...varintBytes(input.scriptSig?.length ?? 0),
+      ...(input.scriptSig ?? []),
+      ...le(BigInt(input.sequence), 4),
+    );
   out.push(...varintBytes(tx.outputs.length));
   for (const o of tx.outputs) out.push(...le(o.amount, 8), ...varintBytes(o.script.length), ...o.script);
   out.push(...le(BigInt(tx.locktime), 4));
@@ -106,8 +113,8 @@ function readTx(bytes: Uint8Array): Tx {
   const inputs = Array.from({ length: r.varint() }, () => {
     const txid = Uint8Array.from(r.bytes(32));
     const vout = r.u32();
-    r.bytes(r.varint());
-    return { txid, vout, sequence: r.u32() };
+    const scriptSig = Uint8Array.from(r.bytes(r.varint()));
+    return { txid, vout, scriptSig, sequence: r.u32() };
   });
   const outputs = Array.from({ length: r.varint() }, () => ({
     amount: r.u64(),

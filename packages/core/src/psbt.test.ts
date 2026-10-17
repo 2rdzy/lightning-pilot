@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import { base64 } from '@scure/base';
 import { buildPsbt, PsbtError, readPsbt } from './psbt.ts';
 import fixture from './fixtures/txprepare-psbt.json' with { type: 'json' };
+import legacyParent from './fixtures/txprepare-psbt-legacy-parent.json' with { type: 'json' };
 
 describe('readPsbt', () => {
   it('reads a CLN txprepare PSBT (version 2): txid, outputs and fee', () => {
@@ -65,5 +66,13 @@ describe('readPsbt', () => {
     expect(() => readPsbt(v0([...full, ...cheaper]))).toThrow('input amounts disagree');
     expect(() => readPsbt(v0([]))).toThrow('input amount unknown');
     expect(() => readPsbt(v0([...witness, ...witness]))).toThrow('duplicate key');
+  });
+
+  it('checks a previous transaction whose inputs carry a scriptSig (non-segwit parents keep it in the txid)', () => {
+    // Before the fix the scriptSig was dropped, so such a coin failed every on-chain send as a bad node answer.
+    const read = readPsbt(legacyParent.psbt);
+    expect(read.txid).toBe(legacyParent.txid);
+    expect(read.inputs).toHaveLength(2);
+    expect(read.fee).toBeGreaterThan(0n);
   });
 });
