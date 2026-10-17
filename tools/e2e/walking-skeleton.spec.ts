@@ -20,6 +20,9 @@ const AMOUNT_SAT = 1000;
 const nav = (page: Page) => page.getByRole('navigation', { name: 'Main' });
 const dashboardLink = (page: Page) => nav(page).getByRole('link', { name: /^(Dashboard|Home)$/ });
 async function logOut(page: Page) {
+  // isVisible() does not wait: check for "More" only once the navigation is on screen, else a phone run that asks
+  // before the tab bar renders skips "More" and waits for a hidden "Log out" until it times out.
+  await expect(dashboardLink(page)).toBeVisible();
   const more = nav(page).getByRole('button', { name: 'More' });
   if (await more.isVisible()) await more.click();
   await page.getByRole('button', { name: 'Log out' }).click();

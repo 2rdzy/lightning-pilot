@@ -1,9 +1,10 @@
 // WP19 stories in the browser, through the real server with the fake nodes alice and bob (BLAKE2b) and carol
 // (SHA256d): U6 on-chain send with a fee preview, and the on-chain wallet (balance, coins, transactions, CSV, detail).
-// A fake node starts with one confirmed coin of 500,000 sat; its transactions cost 68 vB per input and 43 vB per output
-// (packages/adapter-kit fake.ts). The test policy caps the fee rate at 10 sat/vB and the fee at 5 % of the amount, so
-// the node's 12 sat/vB "Normal" estimate is refused at preview, and a 1,000 sat send fails at execute (fee 330 sat
-// above its 50 sat maximum) while a 10,000 sat send at 2 sat/vB goes through.
+// A fake node starts with one confirmed P2WPKH coin of 500,000 sat. The maximum fee is the rate times a size bound
+// from that coin (WP09c): 11 + 68 (input) + 31 (P2WPKH output) + 43 (change) = 153 vB, so 306 sat at 2 sat/vB. The
+// test policy caps the fee rate at 10 sat/vB and the fee at 5 % of the amount, so the node's 12 sat/vB "Normal"
+// estimate is refused at preview, a 1,000 sat send is refused at preview too (306 sat is above 50 sat), and a
+// 10,000 sat send at 2 sat/vB goes through.
 import { readFileSync } from 'node:fs';
 import { expect, test, type Page } from '@playwright/test';
 import { expectAccessible } from './axe.ts';
@@ -115,13 +116,13 @@ test('U6: send with a fee preset, a second confirmation naming coin and chain, t
   await expect(page.getByTestId('preview')).toBeVisible();
   await expect(page.getByTestId('preview-address')).toHaveText(to);
   await expect(page.getByTestId('preview-rate')).toHaveText('2 sat/vB');
-  await expect(page.getByTestId('preview-max-fee')).toHaveText('500 sat');
+  await expect(page.getByTestId('preview-max-fee')).toHaveText('306 sat');
   await expect(page.getByTestId('preview-remaining')).toBeVisible();
   await expect(page.getByText('This sends XBT on Bitcoin BLAKE2b.', { exact: false })).toBeVisible();
   await expect(sendButton(page)).toHaveText('Send 0.00010000 XBT on Bitcoin BLAKE2b');
   await expectAccessible(page, 'send preview');
   await sendButton(page).click();
-  await expect(page.getByTestId('onchain-confirm')).toContainText('At most 10,500 sat leaves the wallet');
+  await expect(page.getByTestId('onchain-confirm')).toContainText('At most 10,306 sat leaves the wallet');
   await expectAccessible(page, 'send confirmation');
   await page.getByTestId('onchain-confirm-button').click();
   await expect(page.getByTestId('onchain-outcome')).toHaveAttribute('data-state', 'succeeded');
@@ -140,21 +141,38 @@ test('U6: send with a fee preset, a second confirmation naming coin and chain, t
   expect(problems).toEqual([]);
 });
 
-test('fee refusals: the rate at preview, the node fee above the maximum at execute; nothing is sent', async ({
-  page,
-}) => {
+test('fee refusals: the rate and the share at preview, the node fee above the maximum at execute', async ({ page }) => {
   const nodes = await start(page);
   const to = await addressOf(page, nodes.bob);
+  const refusal =
+    'The fee is above your fee limits (the rate, or the share of the amount). Choose a lower fee rate or a larger amount.';
   await previewSend(page, nodes.alice, to, '10000', 'Normal');
-  await expect(page.getByTestId('send-error')).toHaveText('The fee rate is above your limit. Choose a lower fee rate.');
+  await expect(page.getByTestId('send-error')).toHaveText(refusal);
   await expect(page.getByTestId('preview')).toHaveCount(0);
-
+  // 306 sat of fee is more than 5 % of 1,000 sat.
   await previewSend(page, nodes.alice, to, '1000');
-  await expect(page.getByTestId('preview-max-fee')).toHaveText('50 sat');
+  await expect(page.getByTestId('send-error')).toHaveText(refusal);
+
+  // A node that builds a dearer transaction than the bound is refused before broadcast (server side, WP09b/WP09c);
+  // here its answer is replayed to check what the screen says.
+  await page.route('**/onchain/execute', (route) =>
+    route.fulfill({
+      status: 422,
+      json: {
+        error: {
+          code: 'payment_failed',
+          message: 'The spend failed; nothing was sent.',
+          details: { intentId: '22222222-2222-4222-8222-222222222222', reason: 'fee_cap_exceeded' },
+          requestId: 'r-test',
+        },
+      },
+    }),
+  );
+  await previewSend(page, nodes.alice, to, '10000');
   await confirmSend(page);
   await expect(page.getByTestId('onchain-outcome')).toHaveAttribute('data-state', 'failed');
   await expect(page.getByText(/the node's fee for this transaction was above the confirmed maximum/)).toBeVisible();
-  // The node released the coin: the whole balance is confirmed again, nothing reserved.
+  await page.unroute('**/onchain/execute');
   await page.goto(`${nodes.alice.path}/onchain`);
   await expect(page.getByTestId('onchain-reserved')).toHaveText('0 sat');
   await expect(page.getByTestId('onchain-confirmed')).toHaveText('500,000 sat');
@@ -210,19 +228,19 @@ test('step-up above the threshold asks for the password; cancelling never sends'
   expect(executed).toBe(1);
 });
 
-test('a fee-rate override in the preview gives the fee reason in the password dialog', async ({ page }) => {
-  const nodes = await start(page);
-  const to = await addressOf(page, nodes.bob);
-  // The test policy refuses a high rate instead of asking for a step-up, so mark the real preview as an override.
-  await page.route('**/onchain/preview', async (route) => {
-    const response = await route.fetch();
-    const json = (await response.json()) as Record<string, unknown>;
-    await route.fulfill({ response, json: { ...json, feeOverride: true, stepUpRequired: true } });
+test('a fee above the share in step-up mode shows the exact maximum and asks for the password', async ({ page }) => {
+  const nodes = await start(page, {
+    spending: true,
+    limits: { maxFeeSharePercent: 1 },
+    feeModes: { maxFeeShareMode: 'step-up' },
   });
+  const to = await addressOf(page, nodes.bob);
+  // 306 sat is above 1 % of 10,000 sat: allowed only with the password, showing the exact bound.
   await previewSend(page, nodes.alice, to, '10000');
-  await expect(page.getByText('The fee rate is above your limit. Your password is needed to send.')).toBeVisible();
+  await expect(page.getByTestId('preview-max-fee')).toHaveText('306 sat');
+  await expect(page.getByText(/The fee is above one of your fee limits/)).toBeVisible();
   await confirmSend(page);
-  await expect(page.getByText(/its fee rate is above your limit/)).toBeVisible();
+  await expect(page.getByText(/its fee is above one of your fee limits/)).toBeVisible();
   await page.getByLabel('Password', { exact: true }).fill(SHELL_PASSWORD);
   await page.getByTestId('step-up').getByRole('button', { name: 'Confirm', exact: true }).click();
   await expect(page.getByTestId('onchain-outcome')).toHaveAttribute('data-state', 'succeeded');

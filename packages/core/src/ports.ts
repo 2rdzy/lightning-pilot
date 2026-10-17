@@ -82,6 +82,9 @@ export interface OpenChannelRequest {
   pushMsat?: Msat;
   // Our intent id is not sent: the node has no label for opens; recovery finds the channel by peer and txid.
   minConf?: number;
+  // Coin control (`txid:vout`): fund only from these coins. The spend module picks them so that its maximum fee is
+  // an upper bound of the funding fee, which cannot be checked before `fundchannel` broadcasts (WP09c).
+  utxos?: string[];
 }
 
 export interface OpenChannelResult {

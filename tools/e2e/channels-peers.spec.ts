@@ -61,6 +61,8 @@ test('U4: channel details, replay warning, policy and peer features are deep-lin
   ).toBe(true);
 });
 
+// Channel opens fund 100,000 sat: since WP09c the maximum fee is the opening rate (8 sat/vB) times a size bound
+// (165 vB, 1,320 sat), which the test policy's 5 % share allows only from about 26,400 sat up.
 test('U5: opening from a peer link only prefills; a preview and explicit confirmation open one channel', async ({
   page,
 }) => {
@@ -78,7 +80,7 @@ test('U5: opening from a peer link only prefills; a preview and explicit confirm
   await expect(page.getByLabel('Peer public key', { exact: true })).toHaveValue(peer);
   expect(previews).toBe(0);
   expect(executions).toBe(0);
-  await page.getByLabel('Funding amount (sat)', { exact: true }).fill('10000');
+  await page.getByLabel('Funding amount (sat)', { exact: true }).fill('100000');
   await page.getByRole('button', { name: 'Preview channel action', exact: true }).click();
   await expect(page.getByTestId('preview')).toBeVisible();
   await expect(page.getByText('Maximum permitted funding fee', { exact: true })).toBeVisible();
@@ -165,7 +167,7 @@ test('a lost execute reply retries the same token and idempotency key without an
     else await route.fulfill({ response });
   });
   await page.goto(`${dashboard}/channels/open?peer=${items[0].pubkey}`);
-  await page.getByLabel('Funding amount (sat)', { exact: true }).fill('10000');
+  await page.getByLabel('Funding amount (sat)', { exact: true }).fill('100000');
   await page.getByRole('button', { name: 'Preview channel action', exact: true }).click();
   await page.getByRole('button', { name: /^Open channel · budget/ }).click();
   await expect(page.getByText('The server could not be reached. Check the connection and try again.')).toBeVisible();
@@ -280,7 +282,7 @@ test('duplicate acknowledgement is explicit and a node switch discards the previ
     await route.fulfill({ response, json: { ...body, duplicateWarning: true } });
   });
   await page.goto(`${dashboard}/channels/open?peer=${items[0].pubkey}`);
-  await page.getByLabel('Funding amount (sat)', { exact: true }).fill('10000');
+  await page.getByLabel('Funding amount (sat)', { exact: true }).fill('100000');
   await page.getByRole('button', { name: 'Preview channel action', exact: true }).click();
   await expect(page.getByRole('button', { name: /^Open channel · budget/ })).toBeDisabled();
   await page.getByLabel('I checked the similar spend and intend this additional operation.', { exact: true }).check();

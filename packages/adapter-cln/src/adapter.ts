@@ -520,6 +520,7 @@ export function createClnAdapter(options: ClnAdapterOptions) {
         announce?: boolean;
         pushMsat?: Msat;
         minConf?: number;
+        utxos?: string[];
       }) {
         const params = {
           id: request.peer,
@@ -528,6 +529,7 @@ export function createClnAdapter(options: ClnAdapterOptions) {
           ...(request.announce === undefined ? {} : { announce: request.announce }),
           ...(request.pushMsat === undefined ? {} : { push_msat: request.pushMsat }),
           ...(request.minConf === undefined ? {} : { minconf: request.minConf }),
+          ...(request.utxos === undefined ? {} : { utxos: request.utxos }),
         };
         const reply = parse(
           FundChannel,

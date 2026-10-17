@@ -16,6 +16,13 @@ test.afterEach(async () => {
 });
 
 const nav = (page: Page) => page.getByRole('navigation', { name: 'Main' });
+// Opens "More" on a phone. isVisible() does not wait, so first wait for the navigation itself: asking before the tab
+// bar renders skipped "More" and left the next click waiting for a hidden link until the test timed out.
+async function openMore(page: Page) {
+  await expect(nav(page).getByRole('link', { name: /^(Dashboard|Home)$/ })).toBeVisible();
+  const more = nav(page).getByRole('button', { name: 'More' });
+  if (await more.isVisible()) await more.click();
+}
 
 // Logs in and returns the app paths of the three nodes, by name.
 async function start(page: Page): Promise<Record<'alice' | 'bob' | 'carol', string>> {
@@ -286,8 +293,7 @@ test('history: sent and received tabs, filters in the URL, details, unknown hash
   await invoiceOf(page, nodes.bob, '9000', 'still open');
 
   await page.goto(nodes.alice);
-  if (await nav(page).getByRole('button', { name: 'More' }).isVisible())
-    await nav(page).getByRole('button', { name: 'More' }).click();
+  await openMore(page);
   await page.getByRole('link', { name: 'Payments', exact: true }).click();
   await expect(page.getByRole('heading', { name: 'Payments', level: 1 })).toBeVisible();
   // Newest first: the 8 sat payment above the 7 sat one.
@@ -349,8 +355,7 @@ test('browser back after logout shows no payment data', async ({ page }) => {
   const { paymentHash } = await invoiceOf(page, nodes.bob, '1000', 'private');
   await page.goto(`${nodes.bob}/invoices/${paymentHash}`);
   await expect(page.getByTestId('invoice-status')).toBeVisible();
-  if (await nav(page).getByRole('button', { name: 'More' }).isVisible())
-    await nav(page).getByRole('button', { name: 'More' }).click();
+  await openMore(page);
   await page.getByRole('button', { name: 'Log out' }).click();
   await expect(page).toHaveURL(/\/login$/);
   await page.goBack();

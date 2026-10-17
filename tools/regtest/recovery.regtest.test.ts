@@ -165,6 +165,26 @@ describe(`crash recovery on ${chain}`, () => {
     expect(reservedCoins()).toBe(reservedBefore);
   });
 
+  it('on-chain, killed after txprepare and before the txid is stored: failed at once, its coins released (WP09c)', async () => {
+    const reservedBefore = reservedCoins();
+    await session.suspend();
+    const key = crashDuring(session, {
+      kind: 'onchain',
+      method: 'onchain.prepare',
+      body: { address: newAddress(), amount: '43000000', feeRate: '2' },
+      at: 'after',
+    });
+    // `txprepare` reserved the chosen coins; the intent has no txid, only the stored outpoints.
+    expect(reservedCoins()).toBeGreaterThan(reservedBefore);
+    const server = await session.reopen();
+    const marked = await intentOf(session, key);
+    expect(marked).toMatchObject({ state: 'unknown', error_code: 'interrupted', txid: null });
+    expect(await server.recovery.resolvePass()).toBe(0);
+    expect(await intentOf(session, key)).toMatchObject({ state: 'failed', error_code: 'not_sent' });
+    // The inputs-only PSBT was accepted by `unreserveinputs`.
+    expect(reservedCoins()).toBe(reservedBefore);
+  });
+
   let channelId = '';
   it('channel open, killed after the node call: succeeded, the channel found by peer and capacity', async () => {
     const peer = nodeUri(chain, 'cln-c');

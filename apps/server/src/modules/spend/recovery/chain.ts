@@ -4,6 +4,7 @@
 // channel, a close whose channel is still open. Anything unclear stays unknown and counted.
 import {
   AdapterError,
+  buildPsbt,
   parseChannelId,
   parseTxid,
   readPsbt,
@@ -40,6 +41,8 @@ export interface UnknownChainSpend {
   psbt_ciphertext: Uint8Array | null;
   channel_id: string | null;
   peer: string | null;
+  // JSON array of `txid:vout`: the coins the spend was told to use (WP09c); null for older intents.
+  utxos: string | null;
 }
 
 type Settled = 'succeeded' | 'failed' | 'unknown';
@@ -62,7 +65,7 @@ export async function settleChainSpend(
   const age = now.getTime() - Date.parse(intent.updated_at);
   let resolution: Resolution | undefined;
   try {
-    if (intent.type === 'onchain') resolution = await onchain(adapter, vault, intent, age, log);
+    if (intent.type === 'onchain') resolution = await onchain(db, adapter, vault, intent, age, log);
     else if (intent.type === 'channel-open') resolution = await channelOpen(db, adapter, intent, age);
     else resolution = await channelClose(adapter, intent, age);
   } catch (err) {
@@ -142,14 +145,19 @@ function sealedPsbt(vault: Vault, intent: UnknownChainSpend, log: Logger) {
 // them: CLN adds a transaction to the wallet's list when it broadcasts it (`sendpsbt`), so a listed txid was sent;
 // an unlisted one whose inputs are all still unspent coins of the wallet was not, and its inputs are released.
 async function onchain(
+  db: Db,
   adapter: NodeAdapter,
   vault: Vault,
   intent: UnknownChainSpend,
   age: number,
   log: Logger,
 ): Promise<Resolution | undefined> {
-  if (intent.txid === null)
-    return intent.error_code === INTERRUPTED ? { state: 'failed', errorCode: 'not_sent' } : undefined;
+  if (intent.txid === null) {
+    if (intent.error_code !== INTERRUPTED) return undefined;
+    // `txprepare` may have reserved the chosen coins before the server stopped and the txid was stored (WP09c).
+    await releaseChosen(db, adapter, intent, log);
+    return { state: 'failed', errorCode: 'not_sent' };
+  }
   const txid = parseTxid(intent.txid);
   const sealed = sealedPsbt(vault, intent, log);
   const listed = await all((page) => adapter.onchain.listTransactions(page));
@@ -167,6 +175,40 @@ async function onchain(
   if (!unspent) return undefined;
   await release(adapter, txid, psbt, intent.id, log);
   return { state: 'failed', errorCode: 'not_sent' };
+}
+
+// Releases the coins an interrupted send without a txid was told to spend: those still reserved in the wallet and
+// not chosen by another spend that may still be running, through an inputs-only PSBT (`unreserveinputs` reads only
+// each input's outpoint). A failure is logged: nothing was broadcast, and the node releases the coins by itself after
+// 72 blocks.
+async function releaseChosen(db: Db, adapter: NodeAdapter, intent: UnknownChainSpend, log: Logger) {
+  const chosen = intent.utxos === null ? [] : (JSON.parse(intent.utxos) as string[]);
+  if (chosen.length === 0) return;
+  try {
+    const others = await db
+      .selectFrom('spend_intents')
+      .select('utxos')
+      .where('id', '!=', intent.id)
+      .where('state', 'in', ['reserved', 'unknown'])
+      .where('utxos', 'is not', null)
+      .execute();
+    const held = new Set(others.flatMap((o) => JSON.parse(o.utxos as string) as string[]));
+    const wallet = new Map((await adapter.onchain.listUtxos()).map((u) => [u.outpoint as string, u]));
+    const inputs = chosen.flatMap((outpoint) => {
+      const coin = wallet.get(outpoint);
+      if (!coin?.reserved || coin.status === 'spent' || held.has(outpoint)) return [];
+      const [txid, vout] = outpoint.split(':') as [string, string];
+      // The witness UTXO is required by the PSBT format; the node reads only the outpoint.
+      return [{ txid, vout: Number(vout), amountSat: coin.amount / 1000n, script: '0014' + '00'.repeat(20) }];
+    });
+    if (inputs.length === 0) return;
+    await adapter.onchain.unreserve(buildPsbt({ inputs, outputs: [] }).psbt);
+  } catch (err) {
+    log.warn('spend inputs not released', {
+      intentId: intent.id,
+      code: err instanceof AdapterError ? err.code : 'internal',
+    });
+  }
 }
 
 // `txdiscard` works while the node still holds the prepared transaction; after a node restart only

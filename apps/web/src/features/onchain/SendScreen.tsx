@@ -1,9 +1,10 @@
 // On-chain send (U6, B2, F3; route /n/:node/onchain/send, a dialog over the wallet): address, amount in whole sats and
 // a fee rate from the node's estimates → the server's preview → a second confirmation that names the coin and the
 // chain (an address does not say which chain it belongs to, style guide §2) → password step-up when the preview asks
-// for it → execute. The screen does no fee arithmetic: the maximum fee, the fee rate and the step-up come from the
-// preview. One idempotency key per preview; once an attempt may have left the browser, retries resend the same body
-// with the same token and key, so the coins can never be sent twice. A link may prefill the form; it never sends.
+// for it → execute. The screen does no fee arithmetic: the maximum fee (the rate times a size bound from the coins
+// the server chose, WP09c), the fee rate and the step-up come from the preview. One idempotency key per preview;
+// once an attempt may have left the browser, retries resend the same body with the same token and key, so the coins
+// can never be sent twice. A link may prefill the form; it never sends.
 import type { OnchainPreviewResponse } from '@lightning-pilot/core';
 import { Button, Dialog, Field, PreviewPanel, StepUpDialog } from '@lightning-pilot/ui';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
@@ -55,8 +56,8 @@ function SendError({ error }: { error: unknown }) {
       error.code === 'setup_required' && reason
         ? `onchain.setup.${reason}`
         : error.code === 'validation_failed' && reason
-          ? tr.has(`onchain.decode.${reason}`)
-            ? `onchain.decode.${reason}`
+          ? tr.has(`onchain.reason.${reason}`)
+            ? `onchain.reason.${reason}`
             : `errors.decode.${reason}`
           : error.code === 'fee_cap_exceeded'
             ? 'onchain.feeCapPreview'
