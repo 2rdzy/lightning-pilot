@@ -2636,6 +2636,37 @@ describe(`WP09b on-chain and channel spends (${testDriver()})`, () => {
       expect(await reservedUtxos(s.payer)).toBe(0);
     });
 
+    it('fails an interrupted send without a txid even when its coins cannot be released, or none are stored', async () => {
+      const s = await interrupted();
+      s.payer.onchain.send = async () => crash();
+      const body = async () => ({ address: await s.address(), amount: '100000000', feeRate: '2' });
+      const { intentId } = await s.spend('onchain', await body(), 'wp09c-unreserve-fails');
+      await s.interrupt(intentId, { txid: null, psbt_key_id: null, psbt_nonce: null, psbt_ciphertext: null });
+      s.payer.onchain.unreserve = async () => {
+        throw new AdapterError({ code: 'node_unreachable', sent: false, definitive: true });
+      };
+      let server = await s.restart();
+      expect(await server.recovery.resolvePass()).toBe(0);
+      expect(await s.row(intentId)).toMatchObject({ state: 'failed', error_code: 'not_sent' });
+      expect(s.h.lines.some((l) => l.includes('"spend inputs not released"') && l.includes(intentId))).toBe(true);
+      // An intent from before WP09c stores no coins: nothing to release. (The first one's coin is still reserved.)
+      s.payer.addCoin(msat(50_000_000n));
+      const older = await s.spend('onchain', { ...(await body()), amount: '20000000' }, 'wp09c-no-stored-coins');
+      await s.interrupt(older.intentId, {
+        txid: null,
+        psbt_key_id: null,
+        psbt_nonce: null,
+        psbt_ciphertext: null,
+        utxos: null,
+      });
+      const unreserve = vi.fn(async () => {});
+      s.payer.onchain.unreserve = unreserve;
+      server = await s.restart();
+      expect(await server.recovery.resolvePass()).toBe(0);
+      expect(await s.row(older.intentId)).toMatchObject({ state: 'failed', error_code: 'not_sent' });
+      expect(unreserve).not.toHaveBeenCalled();
+    });
+
     it('releases no coin that another running spend also chose', async () => {
       const s = await interrupted();
       s.payer.onchain.send = async () => crash();

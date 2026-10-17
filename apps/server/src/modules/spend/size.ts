@@ -4,7 +4,6 @@
 // the one bounded: `txprepare` and `fundchannel` spend exactly the coins they are given.
 import {
   AppError,
-  DecodeError,
   decodeAddress,
   parseMsat,
   type AddressType,
@@ -47,9 +46,9 @@ export function inputVbytes(coin: Utxo, network: Network): number {
   if (coin.address === undefined) return UNKNOWN_INPUT_VBYTES;
   try {
     return INPUT_VBYTES[decodeAddress(coin.address, network).type];
-  } catch (err) {
-    if (err instanceof DecodeError) return UNKNOWN_INPUT_VBYTES;
-    throw err;
+  } catch {
+    // Not an address of this network the decoder knows: counted as the largest input.
+    return UNKNOWN_INPUT_VBYTES;
   }
 }
 

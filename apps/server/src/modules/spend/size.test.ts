@@ -23,6 +23,12 @@ describe('size bound (WP09c)', () => {
     expect(txVbytes([], [])).toBe(11);
     expect(
       txVbytes(
+        Array.from({ length: 70_000 }, () => 0),
+        [],
+      ),
+    ).toBe(8 + 5 + 1 + 1);
+    expect(
+      txVbytes(
         Array.from({ length: 253 }, () => 68),
         [22],
       ),
@@ -55,6 +61,9 @@ describe('size bound (WP09c)', () => {
     ];
     const one = boundFee([small, large, ...skipped], 'regtest', msat(50_000_000n), '2', 22);
     expect(one).toEqual({ utxos: [large.outpoint], maxFee: msat(286_000n) }); // (11 + 58 + 31 + 43) × 2
+    // Equal amounts: the outpoint decides, so the choice is the same at preview and in tests.
+    const [x, y] = [coin(100_000n, P2WPKH), coin(100_000n, P2WPKH)];
+    expect(boundFee([y, x], 'regtest', msat(1_000_000n), '1', 22).utxos).toEqual([x.outpoint]);
     const two = boundFee([small, large], 'regtest', msat(110_000_000n), '2', 22);
     expect(two.utxos).toEqual([large.outpoint, small.outpoint]);
     expect(two.maxFee).toBe(msat(422_000n)); // (11 + 58 + 68 + 31 + 43) × 2
