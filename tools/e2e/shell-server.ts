@@ -35,6 +35,9 @@ export async function startShellServer(
     live?: boolean;
     // Changes to the test spending policy (with `spending`), e.g. a step-up threshold (WP19).
     limits?: Partial<SetupLimits>;
+    // Fee-cap modes of the test policy (not part of `SetupLimits`; the settings screen changes them with security
+    // step-up), written straight into the database.
+    feeModes?: { maxFeeRateMode?: 'refuse' | 'step-up'; maxFeeShareMode?: 'refuse' | 'step-up' };
   } = {},
 ): Promise<ShellServer> {
   const tmp = tempDir();
@@ -86,6 +89,14 @@ export async function startShellServer(
       'r-shell',
     );
   }
+  if (options.feeModes)
+    await server.db
+      .updateTable('spend_limits')
+      .set({
+        ...(options.feeModes.maxFeeRateMode ? { max_fee_rate_mode: options.feeModes.maxFeeRateMode } : {}),
+        ...(options.feeModes.maxFeeShareMode ? { max_fee_share_mode: options.feeModes.maxFeeShareMode } : {}),
+      })
+      .execute();
   if (options.live) server.events.workers.start();
   const listener = listen(server.app, config, logger);
   const url = `http://localhost:${await listener.port}`;
