@@ -112,5 +112,6 @@
   "onchain.checkAgain": "Check again",
   "onchain.checking": "Checking…",
   "onchain.intent": "Spend id",
-  "onchain.showTransaction": "Show the transaction"
+  "onchain.showTransaction": "Show the transaction",
+  "onchain.unresolvedLink": "Unresolved spends in the settings"
 }

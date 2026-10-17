@@ -104,5 +104,6 @@
   "channels.sort.-remote": "Remote balance: largest first",
   "channels.sort.remote": "Remote balance: smallest first",
   "channels.sort.peer": "Peer: A to Z",
-  "channels.sort.-peer": "Peer: Z to A"
+  "channels.sort.-peer": "Peer: Z to A",
+  "channels.unresolvedLink": "Unresolved spends in the settings"
 }

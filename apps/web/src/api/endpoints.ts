@@ -34,6 +34,14 @@ import {
   ImportResponse,
   SpendPolicy,
   SpendPolicyResponse,
+  UnresolvedSpendsResponse,
+  SpendResolveRequest,
+  SpendResolveResponse,
+  ManageNodeRequest,
+  ReplaceNodeRequest,
+  NodeSetupCommandRequest,
+  NodeSetupCommandResponse,
+  NodeSummary,
   StepUpRequest,
   StepUpResponse,
   SessionListResponse,
@@ -64,7 +72,7 @@ import {
 import type { z } from 'zod';
 
 export interface Endpoint<Body extends z.ZodType | undefined, Response extends z.ZodType | undefined> {
-  method: 'GET' | 'POST';
+  method: 'GET' | 'POST' | 'PUT' | 'DELETE';
   // OpenAPI form: path parameters as {name}.
   path: string;
   status: number;
@@ -166,6 +174,55 @@ export const ENDPOINTS = {
     status: 204,
     body: SpendPolicy,
     response: undefined,
+  }),
+  unresolvedSpends: endpoint({
+    method: 'GET',
+    path: '/api/v1/nodes/{nodeId}/spends/unresolved',
+    status: 200,
+    body: undefined,
+    response: UnresolvedSpendsResponse,
+  }),
+  resolveSpend: endpoint({
+    method: 'POST',
+    path: '/api/v1/nodes/{nodeId}/spends/{intentId}/resolve',
+    status: 200,
+    body: SpendResolveRequest,
+    response: SpendResolveResponse,
+  }),
+  nodeSetupCommand: endpoint({
+    method: 'POST',
+    path: '/api/v1/nodes/setup-command',
+    status: 200,
+    body: NodeSetupCommandRequest,
+    response: NodeSetupCommandResponse,
+  }),
+  addNode: endpoint({
+    method: 'POST',
+    path: '/api/v1/nodes',
+    status: 201,
+    body: ManageNodeRequest,
+    response: NodeSummary,
+  }),
+  replaceNode: endpoint({
+    method: 'PUT',
+    path: '/api/v1/nodes/{nodeId}',
+    status: 200,
+    body: ReplaceNodeRequest,
+    response: NodeSummary,
+  }),
+  removeNode: endpoint({
+    method: 'DELETE',
+    path: '/api/v1/nodes/{nodeId}',
+    status: 204,
+    body: undefined,
+    response: undefined,
+  }),
+  recheckNodeCredentials: endpoint({
+    method: 'POST',
+    path: '/api/v1/nodes/{nodeId}/credentials/check',
+    status: 200,
+    body: undefined,
+    response: NodeCredentialStatusResponse,
   }),
   stepUp: endpoint({
     method: 'POST',

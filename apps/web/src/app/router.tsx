@@ -1,4 +1,3 @@
-import { ExportScreen } from '../features/export/ExportScreen.tsx';
 // Routes (style guide §7): history routing, node-scoped paths /n/:node/..., search params validated, deep links
 // never act by themselves. WP02 has the walking-skeleton screens; the full route map comes with the screen WPs.
 import { QueryClient } from '@tanstack/react-query';
@@ -39,10 +38,20 @@ import { OnchainScreen, TransactionScreen } from '../features/onchain/OnchainScr
 import { SendScreen } from '../features/onchain/SendScreen.tsx';
 import { OnchainSearch, TxidSchema, sendSearch } from '../features/onchain/data.ts';
 import { SetupScreen } from '../features/setup/SetupScreen.tsx';
+import { ExportScreen } from '../features/export/ExportScreen.tsx';
+import { SettingsScreen } from '../features/settings/SettingsScreen.tsx';
+import { SecurityScreen } from '../features/settings/SecurityScreen.tsx';
+import { SessionsScreen } from '../features/settings/SessionsScreen.tsx';
+import { DisplayScreen } from '../features/settings/DisplayScreen.tsx';
+import { NodesScreen } from '../features/settings/NodesScreen.tsx';
+import { NodeSettingsScreen } from '../features/settings/NodeSettingsScreen.tsx';
+import { LimitsScreen } from '../features/settings/LimitsScreen.tsx';
+import { SpendsScreen } from '../features/settings/SpendsScreen.tsx';
+import { spendsSearch } from '../features/settings/data.ts';
 import { nodesQuery } from './queries.ts';
 import { pickNode, safeNext, sessionState } from './session.ts';
 import { NoNodes, NotFound } from '../shell/pages.tsx';
-import { Shell } from '../shell/Shell.tsx';
+import { AppShell, Shell } from '../shell/Shell.tsx';
 
 export interface RouterContext {
   api: ApiClient;
@@ -56,6 +65,8 @@ const storage = (): Storage | undefined => {
     return undefined;
   }
 };
+
+const NodeParam = z.uuid();
 
 const rootRoute = createRootRouteWithContext<RouterContext>()({
   component: Outlet,
@@ -118,7 +129,57 @@ const authRoute = createRoute({
   component: Outlet,
 });
 
-const exportRoute = createRoute({ getParentRoute: () => authRoute, path: '/settings/export', component: ExportScreen });
+// App-wide settings (route map /settings/…) in the shell, with or without a node: the first node is added here.
+export const settingsRoute = createRoute({
+  getParentRoute: () => authRoute,
+  path: '/settings',
+  loader: async ({ context }) => {
+    const { items } = await context.queryClient.ensureQueryData(nodesQuery(context.api));
+    return { nodes: items };
+  },
+  component: AppShell,
+  notFoundComponent: NotFound,
+});
+
+const settingsIndexRoute = createRoute({ getParentRoute: () => settingsRoute, path: '/', component: SettingsScreen });
+const securityRoute = createRoute({ getParentRoute: () => settingsRoute, path: 'security', component: SecurityScreen });
+const sessionsRoute = createRoute({ getParentRoute: () => settingsRoute, path: 'sessions', component: SessionsScreen });
+const displayRoute = createRoute({ getParentRoute: () => settingsRoute, path: 'display', component: DisplayScreen });
+const exportRoute = createRoute({ getParentRoute: () => settingsRoute, path: 'export', component: ExportScreen });
+
+export const settingsNodesRoute = createRoute({
+  getParentRoute: () => settingsRoute,
+  path: 'nodes',
+  // `?add=1` opens the add-node form (a dialog-like step with its own URL, style guide §7).
+  validateSearch: (search: Record<string, unknown>): { add?: true } =>
+    search.add === true || search.add === 1 || search.add === '1' ? { add: true } : {},
+  component: NodesScreen,
+});
+
+const checkNodeParam = ({ params }: { params: { node: string } }) => {
+  if (!NodeParam.safeParse(params.node).success) throw notFound();
+};
+
+export const settingsNodeRoute = createRoute({
+  getParentRoute: () => settingsRoute,
+  path: 'nodes/$node',
+  beforeLoad: checkNodeParam,
+  component: NodeSettingsScreen,
+});
+
+export const settingsLimitsRoute = createRoute({
+  getParentRoute: () => settingsRoute,
+  path: 'nodes/$node/limits',
+  beforeLoad: checkNodeParam,
+  component: LimitsScreen,
+});
+
+export const settingsSpendsRoute = createRoute({
+  getParentRoute: () => settingsRoute,
+  path: 'spends',
+  validateSearch: spendsSearch,
+  component: SpendsScreen,
+});
 
 const indexRoute = createRoute({
   getParentRoute: () => authRoute,
@@ -133,8 +194,6 @@ const indexRoute = createRoute({
   },
   component: NoNodes,
 });
-
-const NodeParam = z.uuid();
 
 export const nodeRoute = createRoute({
   getParentRoute: () => authRoute,
@@ -278,7 +337,17 @@ const routeTree = rootRoute.addChildren([
   loginRoute,
   recoveryRoute,
   authRoute.addChildren([
-    exportRoute,
+    settingsRoute.addChildren([
+      settingsIndexRoute,
+      securityRoute,
+      sessionsRoute,
+      displayRoute,
+      exportRoute,
+      settingsNodesRoute,
+      settingsNodeRoute,
+      settingsLimitsRoute,
+      settingsSpendsRoute,
+    ]),
     indexRoute,
     nodeRoute.addChildren([
       dashboardRoute,

@@ -65,9 +65,9 @@ export function ExportScreen() {
     }
   };
   return (
-    <main className="mx-auto flex max-w-[640px] flex-col gap-4 p-4">
+    <div className="mx-auto flex max-w-[640px] flex-col gap-4">
       <h1 className="text-2xl font-semibold">{tr.t('export.title')}</h1>
-      <Link to="/" className="underline">
+      <Link to="/settings" className="underline">
         {tr.t('export.back')}
       </Link>
       <p>{tr.t('export.notice')}</p>
@@ -248,6 +248,6 @@ export function ExportScreen() {
       </button>
       {pending && !authOpen ? <p role="status">{tr.t('export.pending')}</p> : null}
       {message && !authOpen ? <p role={failed ? 'alert' : 'status'}>{message}</p> : null}
-    </main>
+    </div>
   );
 }

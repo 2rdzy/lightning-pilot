@@ -42,11 +42,18 @@ test('encrypted download and import into a fresh destination account without the
       scryptCost: { log2N: 10, r: 8, p: 1 },
       webRoot: fileURLToPath(new URL('../../apps/web/dist', import.meta.url)),
     });
-    const closeServer = () => server.close();
+    // The settings shell holds a live event stream open; stop it first, as shell-server.ts does.
+    const closeServer = async () => {
+      await server.events.streams.stop();
+      await server.close();
+    };
     cleanup.unshift(closeServer);
     const setup = await setupForTest(server.setup, token, PASSWORD);
     const listener = listen(server.app, config, logger);
-    cleanup.unshift(() => listener.close());
+    cleanup.unshift(async () => {
+      await server.events.streams.stop();
+      await listener.close();
+    });
     const url = `http://localhost:${await listener.port}`;
     await p.goto(`${url}/login`);
     await p.getByLabel('Password', { exact: true }).fill(PASSWORD);
@@ -91,7 +98,7 @@ test('encrypted download and import into a fresh destination account without the
     expect(contents).not.toContain(PASSPHRASE);
     await expect(page.getByLabel('Export passphrase', { exact: true })).toHaveValue('');
     // Close the source vault before opening the destination: it cannot supply its key to import.
-    await source.server.close();
+    await source.closeServer();
     cleanup.splice(cleanup.indexOf(source.closeServer), 1);
     const context = await browser.newContext({ viewport: page.viewportSize() });
     cleanup.unshift(() => context.close());

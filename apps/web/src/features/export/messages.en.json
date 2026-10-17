@@ -1,6 +1,6 @@
 {
   "export.title": "Export and import",
-  "export.back": "Back to home",
+  "export.back": "Back to settings",
   "export.authorize": "Re-authenticate",
   "export.password": "Account password",
   "export.totp": "Authenticator code",

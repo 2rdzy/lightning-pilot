@@ -253,6 +253,14 @@ function Pay() {
               <>
                 <p className="rounded-control border-l-4 border-warning pl-3 font-medium">{tr.t('pay.unknown')}</p>
                 <p className="text-sm">{tr.t('pay.unknownHelp')}</p>
+                <Link
+                  to="/settings/spends"
+                  search={{ node: node.id }}
+                  className="text-sm text-brand-strong underline"
+                  data-testid="unresolved-link"
+                >
+                  {tr.t('pay.unresolvedLink')}
+                </Link>
                 {execute.error ? <PayError error={execute.error} /> : null}
                 <Button onClick={() => send(preview)} disabled={locked}>
                   {execute.isPending ? tr.t('pay.checking') : tr.t('pay.checkAgain')}
