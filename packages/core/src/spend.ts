@@ -112,6 +112,9 @@ export const ChannelClosePreviewResponse = z
     force: z.boolean(),
     destination: z.string().optional(),
     localBalance: MsatString,
+    // Where the funds go: the requested destination, else the channel's local shutdown address. `ownWallet` is true
+    // only when that address is known to be the node's own; anything else is counted as an external close.
+    fundsTo: z.strictObject({ address: z.string().min(1).max(200).optional(), ownWallet: z.boolean() }).optional(),
   })
   .meta({ id: 'ChannelClosePreview' });
 
