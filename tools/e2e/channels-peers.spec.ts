@@ -329,6 +329,21 @@ test('cooperative external close previews the exact destination and needs confir
   await expect(page.getByTestId('channel-outcome')).toHaveAttribute('data-state', 'succeeded');
 });
 
+test('a close to an external shutdown address names it and warns that it is counted', async ({ page }) => {
+  await channels(page);
+  const shutdown = 'bcrt1p' + 'q'.repeat(58);
+  await page.route('**/channels/close/preview', async (route) => {
+    const response = await route.fetch();
+    const body = await response.json();
+    await route.fulfill({ response, json: { ...body, fundsTo: { address: shutdown, ownWallet: false } } });
+  });
+  await firstChannel(page);
+  await page.goto(`${page.url().split('?')[0]}/close`);
+  await page.getByRole('button', { name: 'Preview channel action', exact: true }).click();
+  await expect(page.getByTestId('preview').getByText(shutdown, { exact: true })).toBeVisible();
+  await expect(page.getByText(/not known to be this node's wallet/)).toBeVisible();
+});
+
 test('peer high feature bits and untrusted aliases render as text', async ({ page }) => {
   const dashboard = await channels(page);
   await page.route('**/api/v1/nodes/*/peers', async (route) => {

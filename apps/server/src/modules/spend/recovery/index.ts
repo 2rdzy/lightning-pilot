@@ -10,6 +10,7 @@ import type { Vault } from '../../vault/index.ts';
 import { INTERRUPTED, settleBolt11 } from './bolt11.ts';
 import { settleChainSpend } from './chain.ts';
 import { countRestore, type PendingCount } from './restore.ts';
+import { latestRestore } from '../policy.ts';
 
 export { settleBolt11, provenPreimage, RETRY_FOR_SECONDS, SETTLE_FAILED_AFTER_MS } from './bolt11.ts';
 
@@ -122,13 +123,10 @@ export class SpendRecovery {
       .orderBy('created_at')
       .execute();
     // Every node identity needs a count after a recent restore, also one added since (the restored database did not
-    // know it): its missing row is created here, pending.
-    const since = new Date(this.#now().getTime() - 86_400_000).toISOString();
-    for (const restore of await this.#db
-      .selectFrom('restores')
-      .select(['id', 'recorded_at'])
-      .where('recorded_at', '>', since)
-      .execute())
+    // know it): its missing row is created here, pending. Only the newest restore of the last 24 hours is counted
+    // (policy.ts, `latestRestore`): its count covers the earlier ones.
+    const restore = await latestRestore(this.#db, this.#now());
+    if (restore !== undefined)
       for (const identity of await this.#db
         .selectFrom('nodes')
         .where('removed_at', 'is', null)
@@ -148,13 +146,22 @@ export class SpendRecovery {
           })
           .onConflict((conflict) => conflict.doNothing())
           .execute();
-    const counts = await this.#db
-      .selectFrom('restore_counts')
-      .innerJoin('restores', 'restores.id', 'restore_counts.restore_id')
-      .select(['restore_counts.restore_id', 'restore_counts.chain', 'restore_counts.pubkey', 'restores.recorded_at'])
-      .where('restore_counts.state', '=', 'pending')
-      .where('restore_counts.until', '>', this.#now().toISOString())
-      .execute();
+    const counts =
+      restore === undefined
+        ? []
+        : await this.#db
+            .selectFrom('restore_counts')
+            .innerJoin('restores', 'restores.id', 'restore_counts.restore_id')
+            .select([
+              'restore_counts.restore_id',
+              'restore_counts.chain',
+              'restore_counts.pubkey',
+              'restores.recorded_at',
+            ])
+            .where('restore_counts.restore_id', '=', restore.id)
+            .where('restore_counts.state', '=', 'pending')
+            .where('restore_counts.until', '>', this.#now().toISOString())
+            .execute();
     const countKey = (c: PendingCount) => `restore:${c.restore_id}:${c.chain}:${c.pubkey}`;
     const wall = Date.now();
     const known = new Set([...pending.map((intent) => intent.id), ...counts.map(countKey)]);

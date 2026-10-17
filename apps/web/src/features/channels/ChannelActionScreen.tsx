@@ -252,7 +252,12 @@ function ChannelAction({
                       {
                         label: tr.t('channels.destination'),
                         value: (
-                          <span className="break-all">{preview.data.destination ?? tr.t('channels.nodeWallet')}</span>
+                          <span className="break-all">
+                            {preview.data.destination ??
+                              (preview.data.fundsTo?.ownWallet === false && preview.data.fundsTo.address
+                                ? preview.data.fundsTo.address
+                                : tr.t('channels.nodeWallet'))}
+                          </span>
                         ),
                       },
                     ]),
@@ -272,6 +277,11 @@ function ChannelAction({
               ]}
               warnings={[
                 ...(kind === 'close' ? [tr.t('channels.closeFeeUnavailable')] : []),
+                ...('fundsTo' in preview.data &&
+                preview.data.destination === undefined &&
+                preview.data.fundsTo?.ownWallet === false
+                  ? [tr.t('channels.externalShutdown')]
+                  : []),
                 ...(force ? [tr.t('channels.forceWarning')] : []),
                 ...(preview.data.duplicateWarning ? [tr.t('channels.duplicateWarning')] : []),
                 ...(preview.data.feeOverride ? [tr.t('channels.feeOverride')] : []),

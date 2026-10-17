@@ -39,6 +39,7 @@ const VIEW = [
   'wait',
   'waitblockheight',
   'invoice',
+  'listaddresses',
   'offer',
   'disableoffer',
   'newaddr',

@@ -236,6 +236,14 @@ export const METHODS = [
     feature: 'B4',
     capabilities: ['onchain.utxos'],
   },
+  // Whether a channel's local shutdown address is the wallet's own (spend policy §15 item 1, channel close cost).
+  {
+    port: 'onchain',
+    method: 'ownsAddress',
+    nodeMethods: ['listaddresses'],
+    credential: 'read',
+    feature: 'C4',
+  },
   // txprepare/txsend instead of withdraw: the transaction id is known before anything is broadcast (spend policy §4).
   {
     port: 'onchain',

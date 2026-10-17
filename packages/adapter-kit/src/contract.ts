@@ -2,7 +2,8 @@
 // real nodes on both regtest chains (tools/regtest). A new backend is done when the suite passes. Tests that move
 // funds use the node's own wallet or a channel they open themselves, so the standard regtest channels stay as they
 // are for the other tests.
-import { createHash } from 'node:crypto';
+import { createHash, randomBytes } from 'node:crypto';
+import { bech32m } from '@scure/base';
 import { describe, expect, it } from 'vitest';
 import {
   AdapterError,
@@ -317,6 +318,19 @@ export function adapterContract(name: string, setup: () => Promise<ContractEnv>)
         expect(segwit.address.startsWith(`${hrp}q`)).toBe(true);
         const taproot = await adapter.receive.newAddress('p2tr');
         expect(taproot.address.startsWith(`${hrp}p`)).toBe(true);
+      });
+
+      it('onchain.ownsAddress knows the addresses its wallet issued and no others', async () => {
+        const { adapter, network } = await ready();
+        const hrp = network === 'mainnet' ? 'bc' : network === 'regtest' ? 'bcrt' : 'tb';
+        expect(await adapter.onchain.ownsAddress((await adapter.receive.newAddress('p2wpkh')).address)).toBe(true);
+        expect(await adapter.onchain.ownsAddress((await adapter.receive.newAddress('p2tr')).address)).toBe(true);
+        const stranger = bech32m.encode(hrp, [1, ...bech32m.toWords(randomBytes(32))]);
+        expect(await adapter.onchain.ownsAddress(stranger)).toBe(false);
+        // The node's default shutdown address of an open channel is its own (a close with no destination is free).
+        for (const channel of (await adapter.channel.listChannels({ limit: 200 })).items)
+          if (channel.closeTo !== undefined && channel.state.group === 'active')
+            expect(await adapter.onchain.ownsAddress(channel.closeTo), channel.id).toBe(true);
       });
 
       it('creates, lists and disables an offer', async () => {

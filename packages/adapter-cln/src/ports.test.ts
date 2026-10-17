@@ -805,6 +805,15 @@ describe('pay', () => {
 });
 
 describe('on-chain', () => {
+  it('asks listaddresses whether an address belongs to the wallet', async () => {
+    const issued = { addresses: [{ keyidx: 3, bech32: 'bcrt1qown', p2tr: 'bcrt1pown' }] };
+    const { adapter: a, calls } = adapter({ listaddresses: issued });
+    expect(await a.onchain.ownsAddress('bcrt1qown')).toBe(true);
+    expect(calls.at(-1)).toMatchObject({ command: 'listaddresses', rune: 'VIEW', params: { address: 'bcrt1qown' } });
+    const { adapter: b } = adapter({ listaddresses: { addresses: [] } });
+    expect(await b.onchain.ownsAddress('bcrt1qelsewhere')).toBe(false);
+  });
+
   it('lists coins with their status and reservation', async () => {
     const { adapter: a } = adapter({
       listfunds: {

@@ -8,6 +8,7 @@ import {
   loadPolicy,
   policyValues,
   usedBudget,
+  admissionBudget,
   reserveSpend,
   spendCost,
   operationNeedsStepUp,
@@ -40,7 +41,7 @@ it('computes the cost of every fund-moving operation and refuses undeclared acti
   for (const type of ['bolt11', 'bolt12', 'lnurl', 'lightning-address', 'keysend', 'onchain'] as const)
     expect(spendCost({ type, amount: msat(100n), maxFee: msat(10n) })).toBe(110n);
   const cases: [SpendOperation, bigint][] = [
-    [{ type: 'channel-open', amount: msat(100n), push: msat(20n), maxFee: msat(10n) }, 130n],
+    [{ type: 'channel-open', amount: msat(100n), push: msat(20n), maxFee: msat(10n) }, 110n],
     [{ type: 'channel-close', external: true, force: false, localBalance: msat(100n), maxFee: msat(10n) }, 110n],
     [{ type: 'channel-close', external: false, force: true, localBalance: msat(100n), maxFee: msat(10n) }, 0n],
     [{ type: 'fee-bump', maxFee: msat(10n) }, 10n],
@@ -178,4 +179,111 @@ it('counts only the rolling 24-hour window across midnight and shares identity a
   expect(await usedBudget(db, { ...id, chain: 'bitcoin' }, now)).toBe(999n);
   await db.updateTable('spend_intents').set({ amount_msat: '999999' }).where('id', '=', 'new').execute();
   expect(await usedBudget(db, id, now)).toBe(163n);
+});
+
+async function withNode(db: Awaited<ReturnType<typeof database>>, now: Date) {
+  await db
+    .insertInto('nodes')
+    .values({
+      id: 'node',
+      name: 'node',
+      chain: id.chain,
+      network: 'regtest',
+      implementation: 'cln',
+      url: 'https://node.test',
+      ca_certificate: 'test',
+      server_name: 'localhost',
+      pubkey: id.pubkey,
+      identity_state: 'confirmed',
+      identity_failed_check: null,
+      identity_detail: null,
+      identity_checked_at: now.toISOString(),
+      created_at: now.toISOString(),
+    })
+    .execute();
+}
+
+it('counts an amount_mismatch payment at no less than what the node paid, and nothing else above its cost', async () => {
+  const db = await database();
+  const now = new Date('2026-10-17T12:00:00.000Z');
+  await withNode(db, now);
+  const insert = (
+    name: string,
+    row: { amount: string; fee: string | null; cost: string; code: string | null; type?: string },
+  ) =>
+    db
+      .insertInto('spend_intents')
+      .values({
+        id: name,
+        node_id: 'node',
+        chain: id.chain,
+        pubkey: id.pubkey,
+        type: row.type ?? 'bolt11',
+        payment_hash: (row.type ?? 'bolt11') === 'bolt11' ? name : null,
+        amount_msat: row.amount,
+        max_fee_msat: '10',
+        cost_msat: row.cost,
+        fee_msat: row.fee,
+        state: 'succeeded',
+        idempotency_key: name,
+        digest: 'digest',
+        error_code: row.code,
+        created_at: now.toISOString(),
+        updated_at: now.toISOString(),
+      })
+      .execute();
+  // Paid 150 + 25 fee against a confirmed cost of 110: counts 175.
+  await insert('over', { amount: '150', fee: '25', cost: '110', code: 'amount_mismatch' });
+  // Paid less than confirmed: the confirmed cost stays.
+  await insert('under', { amount: '50', fee: '1', cost: '110', code: 'amount_mismatch' });
+  // No fee reported: the confirmed maximum fee stands in for it (110 + 10 = 120 > 100).
+  await insert('nofee', { amount: '110', fee: null, cost: '100', code: 'amount_mismatch' });
+  // A close to the node's own wallet stores the local balance as its amount but costs nothing.
+  await insert('close', { amount: '9000', fee: null, cost: '0', code: null, type: 'channel-close' });
+  expect(await usedBudget(db, id, now)).toBe(175n + 110n + 120n);
+});
+
+it('counts only the newest restore of the last 24 hours and pauses spending until it is counted', async () => {
+  const db = await database();
+  const now = new Date('2026-10-17T12:00:00.000Z');
+  await withNode(db, now);
+  const restore = async (rid: string, hoursAgo: number, counted: string | null) => {
+    const at = new Date(now.getTime() - hoursAgo * 3_600_000);
+    await db
+      .insertInto('restores')
+      .values({
+        id: rid,
+        marker_hash: rid,
+        restored_at: at.toISOString(),
+        backup_file: 'b',
+        recorded_at: at.toISOString(),
+      })
+      .execute();
+    await db
+      .insertInto('restore_counts')
+      .values({
+        restore_id: rid,
+        chain: id.chain,
+        pubkey: id.pubkey,
+        state: counted === null ? 'pending' : 'counted',
+        counted_msat: counted,
+        counted_at: counted === null ? null : at.toISOString(),
+        until: new Date(at.getTime() + 86_400_000).toISOString(),
+      })
+      .execute();
+  };
+  await restore('older', 10, '400');
+  await restore('newer', 2, '500');
+  // The newer count covers the older one's window: 500, not 900.
+  expect(await usedBudget(db, id, now)).toBe(500n);
+  expect(await admissionBudget(db, id, now, 1n)).toBe(500n);
+  await restore('newest', 1, null);
+  await expect(admissionBudget(db, id, now, 1n)).rejects.toMatchObject({
+    code: 'setup_required',
+    details: { reason: 'restore_reconciliation' },
+  });
+  // Costless spends are not paused, and an uncounted restore adds nothing yet.
+  expect(await admissionBudget(db, id, now, 0n)).toBe(0n);
+  // A restore older than 24 hours no longer matters.
+  expect(await usedBudget(db, id, new Date(now.getTime() + 86_400_000))).toBe(0n);
 });

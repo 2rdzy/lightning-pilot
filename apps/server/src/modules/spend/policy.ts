@@ -25,7 +25,8 @@ export function spendCost(operation: SpendOperation): Msat {
       value = operation.external ? operation.localBalance + operation.maxFee : 0n;
       break;
     case 'channel-open':
-      value = operation.amount + operation.push + operation.maxFee;
+      // The push is paid out of the channel amount, so amount + fee is all that leaves the wallet (§15 item 3).
+      value = operation.amount + operation.maxFee;
       break;
     case 'fee-bump':
     case 'rebalance':
@@ -85,56 +86,74 @@ export function policyValues(policy: SpendPolicy) {
 // After a restore (modules/restore), the node's own spends since the backup are unknown until counted: spending on
 // that identity is refused meanwhile (fail closed), except what costs nothing. Once counted, they add to the window.
 // "Not counted yet" is the default for every identity during the 24 hours after a restore, so a node added after the
-// restore (unknown to the restored database) is refused too until the recovery loop has counted it.
+// restore (unknown to the restored database) is refused too until the recovery loop has counted it. Only the newest
+// restore of the last 24 hours counts (spend policy §15 item 4): its count reads the 24 hours before it from the
+// node, which covers every earlier restore's window that still matters, so counting those too would count twice.
+const RESTORE_WINDOW_MS = 86_400_000;
+export async function latestRestore(db: Db, now: Date): Promise<{ id: string; recorded_at: string } | undefined> {
+  return db
+    .selectFrom('restores')
+    .select(['id', 'recorded_at'])
+    .where('recorded_at', '>', new Date(now.getTime() - RESTORE_WINDOW_MS).toISOString())
+    .orderBy('recorded_at', 'desc')
+    .orderBy('id', 'desc')
+    .executeTakeFirst();
+}
+
+async function restoreCount(db: Db, identity: NodeIdentity, now: Date) {
+  const latest = await latestRestore(db, now);
+  if (latest === undefined) return { pending: false, counted: 0n };
+  const row = await db
+    .selectFrom('restore_counts')
+    .select(['state', 'counted_msat'])
+    .where('restore_id', '=', latest.id)
+    .where('chain', '=', identity.chain)
+    .where('pubkey', '=', identity.pubkey)
+    .executeTakeFirst();
+  if (row?.state !== 'counted') return { pending: true, counted: 0n };
+  // A counted row always has its amount (table CHECK); its `until` is the restore's 24-hour window, still open here.
+  return { pending: false, counted: BigInt(row.counted_msat as string) };
+}
+
 export async function admissionBudget(db: Db, identity: NodeIdentity, now: Date, cost: bigint): Promise<bigint> {
-  if (cost > 0n) {
-    const pending = await db
-      .selectFrom('restores')
-      .leftJoin('restore_counts', (join) =>
-        join
-          .onRef('restore_counts.restore_id', '=', 'restores.id')
-          .on('restore_counts.chain', '=', identity.chain)
-          .on('restore_counts.pubkey', '=', identity.pubkey)
-          .on('restore_counts.state', '=', 'counted'),
-      )
-      .select('restores.id')
-      .where('restores.recorded_at', '>', new Date(now.getTime() - 86_400_000).toISOString())
-      .where('restore_counts.restore_id', 'is', null)
-      .executeTakeFirst();
-    if (pending)
-      throw new AppError(
-        'setup_required',
-        'Spending is paused after a restore until the node has been read again. Try again shortly.',
-        { reason: 'restore_reconciliation' },
-      );
-  }
+  if (cost > 0n && (await restoreCount(db, identity, now)).pending)
+    throw new AppError(
+      'setup_required',
+      'Spending is paused after a restore until the node has been read again. Try again shortly.',
+      { reason: 'restore_reconciliation' },
+    );
   return usedBudget(db, identity, now);
+}
+
+// What an intent counts against the window: its immutable cost, except that a payment for which the node reported
+// other figures than confirmed (`amount_mismatch`: its amount and fee are stored) counts at least what it paid, so
+// the window never counts less than what left the node (§15). Legacy rows have no immutable cost; preserve their
+// reservation conservatively.
+function intentCost(row: {
+  cost_msat: string | null;
+  amount_msat: string;
+  max_fee_msat: string;
+  fee_msat: string | null;
+  error_code: string | null;
+}): bigint {
+  const cost = row.cost_msat === null ? BigInt(row.amount_msat) + BigInt(row.max_fee_msat) : BigInt(row.cost_msat);
+  if (row.error_code !== 'amount_mismatch') return cost;
+  const paid = BigInt(row.amount_msat) + BigInt(row.fee_msat ?? row.max_fee_msat);
+  return paid > cost ? paid : cost;
 }
 
 export async function usedBudget(db: Db, identity: NodeIdentity, now: Date): Promise<bigint> {
   const rows = await db
     .selectFrom('spend_intents')
-    .select(['cost_msat', 'amount_msat', 'max_fee_msat'])
+    .select(['cost_msat', 'amount_msat', 'max_fee_msat', 'fee_msat', 'error_code'])
     .where('chain', '=', identity.chain)
     .where('pubkey', '=', identity.pubkey)
     .where('state', 'in', ['reserved', 'sent', 'succeeded', 'unknown'])
     .where('created_at', '>', new Date(now.getTime() - 86400000).toISOString())
     .where('created_at', '<=', now.toISOString())
     .execute();
-  const restored = await db
-    .selectFrom('restore_counts')
-    .select('counted_msat')
-    .where('chain', '=', identity.chain)
-    .where('pubkey', '=', identity.pubkey)
-    .where('state', '=', 'counted')
-    .where('until', '>', now.toISOString())
-    .execute();
-  // Legacy rows have no immutable cost; preserve their reservation conservatively.
-  return rows.reduce(
-    (sum, row) =>
-      sum + (row.cost_msat === null ? BigInt(row.amount_msat) + BigInt(row.max_fee_msat) : BigInt(row.cost_msat)),
-    restored.reduce((sum, row) => sum + BigInt(row.counted_msat ?? '0'), 0n),
-  );
+  const restored = (await restoreCount(db, identity, now)).counted;
+  return rows.reduce((sum, row) => sum + intentCost(row), restored);
 }
 export function checkBudget(policy: SpendPolicy, used: bigint, cost: bigint): boolean {
   if (
